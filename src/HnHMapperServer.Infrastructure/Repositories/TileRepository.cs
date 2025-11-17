@@ -41,12 +41,16 @@ public class TileRepository : ITileRepository
 
     public async Task SaveTileAsync(TileData tileData)
     {
+        // Use IgnoreQueryFilters to work in background services (no HTTP context)
+        // Then manually filter by the TenantId from the incoming tileData
         var existing = await _context.Tiles
+            .IgnoreQueryFilters()
             .FirstOrDefaultAsync(t =>
                 t.MapId == tileData.MapId &&
                 t.CoordX == tileData.Coord.X &&
                 t.CoordY == tileData.Coord.Y &&
-                t.Zoom == tileData.Zoom);
+                t.Zoom == tileData.Zoom &&
+                t.TenantId == tileData.TenantId);
 
         var entity = MapFromDomain(tileData);
 
