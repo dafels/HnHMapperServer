@@ -222,19 +222,71 @@ public class TileService : ITileService
             // Process zoom levels 1-6 in order
             for (int zoom = 1; zoom <= 6 && rebuiltCount < maxTilesToRebuild; zoom++)
             {
-                // Get all tiles at this zoom level
-                var zoomTiles = tenantTiles.Where(t => t.Zoom == zoom).ToList();
-
                 int skippedMissingSubTiles = 0;
                 int skippedNoNewerSubTiles = 0;
                 int zoomLevelRebuiltCount = 0;
+                int zoomLevelCreatedCount = 0;
 
-                if (zoomTiles.Count > 0)
+                // First, find all parent coordinates that should exist at this zoom level
+                // based on tiles that exist at the previous zoom level
+                var previousZoomTiles = tenantTiles.Where(t => t.Zoom == zoom - 1).ToList();
+                var parentCoords = previousZoomTiles
+                    .Select(t => t.Coord.Parent())
+                    .Distinct()
+                    .ToList();
+
+                // Get tiles that already exist at this zoom level
+                var existingZoomTiles = tenantTiles.Where(t => t.Zoom == zoom).ToList();
+                var existingCoords = existingZoomTiles.Select(t => new { t.Coord.X, t.Coord.Y, t.MapId }).ToHashSet();
+
+                _logger.LogInformation("Zoom rebuild: Level {Zoom} has {Existing} existing tiles, {Expected} parent coords from level {PrevZoom}",
+                    zoom, existingZoomTiles.Count, parentCoords.Count, zoom - 1);
+
+                // Create missing zoom tiles
+                foreach (var parentCoord in parentCoords)
                 {
-                    _logger.LogInformation("Zoom rebuild: Checking {Count} tiles at zoom level {Zoom}", zoomTiles.Count, zoom);
+                    if (rebuiltCount >= maxTilesToRebuild)
+                        break;
+
+                    // Get the map ID from any of the sub-tiles
+                    var sampleSubTile = previousZoomTiles.FirstOrDefault(t => t.Coord.Parent().Equals(parentCoord));
+                    if (sampleSubTile == null) continue;
+
+                    var mapId = sampleSubTile.MapId;
+
+                    // Check if this tile already exists
+                    if (existingCoords.Contains(new { X = parentCoord.X, Y = parentCoord.Y, MapId = mapId }))
+                        continue;
+
+                    // Create the missing tile
+                    _logger.LogInformation("Creating missing zoom tile: Map={MapId}, Zoom={Zoom}, Coord={Coord}, TenantId={TenantId}",
+                        mapId, zoom, parentCoord, tenantId);
+
+                    await UpdateZoomLevelAsync(mapId, parentCoord, zoom, tenantId, gridStorage, tenantTiles);
+
+                    // Add to tenantTiles list so higher zoom levels can use it
+                    var newTile = new TileData
+                    {
+                        MapId = mapId,
+                        Coord = parentCoord,
+                        Zoom = zoom,
+                        File = $"tenants/{tenantId}/{mapId}/{zoom}/{parentCoord.Name()}.png",
+                        Cache = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        TenantId = tenantId,
+                        FileSizeBytes = 0 // Will be set by SaveTileAsync
+                    };
+                    tenantTiles.Add(newTile);
+
+                    rebuiltCount++;
+                    zoomLevelCreatedCount++;
                 }
 
-                foreach (var zoomTile in zoomTiles)
+                if (existingZoomTiles.Count > 0)
+                {
+                    _logger.LogInformation("Zoom rebuild: Checking {Count} existing tiles at zoom level {Zoom}", existingZoomTiles.Count, zoom);
+                }
+
+                foreach (var zoomTile in existingZoomTiles)
                 {
                     if (rebuiltCount >= maxTilesToRebuild)
                         break;
@@ -278,6 +330,15 @@ public class TileService : ITileService
                         var uniqueTimestamps = subTilesExist.Select(st => st.Cache).Distinct().Count();
                         bool hasVaryingSubTileTimestamps = uniqueTimestamps > 1;
 
+                        // Check if zoom tile is older than 1 minute (likely needs rebuilding)
+                        // This is aggressive but needed for one-time fix of broken tiles
+                        var tileAgeMinutes = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - zoomTile.Cache) / 1000.0 / 60.0;
+                        bool isOldTile = tileAgeMinutes > 1;
+
+                        // Check if tile file is suspiciously small (likely empty/transparent)
+                        // Real zoom tiles should be 2KB+, empty ones are <1KB
+                        bool isEmptyTile = zoomTile.FileSizeBytes > 0 && zoomTile.FileSizeBytes < 1024;
+
                         if (hasNewerThanZoom)
                         {
                             shouldRebuild = true;
@@ -287,6 +348,18 @@ public class TileService : ITileService
                         {
                             shouldRebuild = true;
                             rebuildReason = $"sub-tiles have varying timestamps ({subTileCount}/4)";
+                        }
+                        else if (isEmptyTile && subTileCount >= 1)
+                        {
+                            // Rebuild empty tiles that have at least one sub-tile
+                            shouldRebuild = true;
+                            rebuildReason = $"empty tile fix ({subTileCount}/4, {zoomTile.FileSizeBytes}b)";
+                        }
+                        else if (isOldTile && subTileCount >= 1)
+                        {
+                            // Rebuild old tiles with at least one sub-tile (one-time fix for existing tiles)
+                            shouldRebuild = true;
+                            rebuildReason = $"old tile refresh ({subTileCount}/4)";
                         }
                     }
 
@@ -332,18 +405,29 @@ public class TileService : ITileService
                             await _quotaService.IncrementStorageUsageAsync(zoomTile.TenantId, -oldFileSizeMB);
                         }
 
+                        // Update the zoom tile in the tenantTiles list with new timestamp
+                        // This allows higher zoom levels to detect it as "changed" and rebuild
+                        var existingTile = tenantTiles.FirstOrDefault(t =>
+                            t.MapId == zoomTile.MapId &&
+                            t.Zoom == zoom &&
+                            t.Coord.X == zoomTile.Coord.X &&
+                            t.Coord.Y == zoomTile.Coord.Y);
+
+                        if (existingTile != null)
+                        {
+                            // Update timestamp to current time so higher zoom levels see it as "newer"
+                            existingTile.Cache = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        }
+
                         rebuiltCount++;
                         zoomLevelRebuiltCount++;
                     }
                 }
 
                 // Log summary for this zoom level
-                if (zoomTiles.Count > 0)
-                {
-                    _logger.LogInformation(
-                        "Zoom {Zoom} summary: {Total} tiles checked, {Rebuilt} rebuilt this level, {SkippedMissing} skipped (missing sub-tiles), {SkippedNotNewer} skipped (no newer sub-tiles)",
-                        zoom, zoomTiles.Count, zoomLevelRebuiltCount, skippedMissingSubTiles, skippedNoNewerSubTiles);
-                }
+                _logger.LogInformation(
+                    "Zoom {Zoom} summary: {Existing} existing tiles, {Created} created, {Rebuilt} rebuilt, {SkippedMissing} skipped (missing sub-tiles), {SkippedNotNewer} skipped (no newer sub-tiles)",
+                    zoom, existingZoomTiles.Count, zoomLevelCreatedCount, zoomLevelRebuiltCount, skippedMissingSubTiles, skippedNoNewerSubTiles);
             }
 
             if (rebuiltCount > 0)
