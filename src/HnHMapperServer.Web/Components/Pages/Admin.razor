@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @attribute [Microsoft.AspNetCore.Authorization.Authorize(Roles = "TenantAdmin")]
 @using HnHMapperServer.Web.Components.Admin
+@using HnHMapperServer.Web.Components.SuperAdmin
 @using HnHMapperServer.Web.Models
 @using HnHMapperServer.Web.Services
 @inject TenantContextService TenantContext
@@ -46,6 +47,11 @@
         @* Tenant Settings Tab *@
         <MudTabPanel Text="Settings" Icon="@Icons.Material.Filled.Settings">
             <TenantSettings />
+        </MudTabPanel>
+
+        @* Map Management Tab *@
+        <MudTabPanel Text="Maps" Icon="@Icons.Material.Filled.Map">
+            <MapManagement />
         </MudTabPanel>
 
         @* Tenant Audit Logs Tab *@

@@ -687,6 +687,7 @@ app.MapCustomMarkerEndpoints();
 app.MapPingEndpoints();
 app.MapInvitationEndpoints();
 app.MapTenantAdminEndpoints(); // Phase 5: Tenant admin endpoints (RBAC)
+app.MapMapAdminEndpoints(); // Map admin endpoints (tenant-scoped map management)
 app.MapSuperadminEndpoints(); // Phase 5: Superadmin endpoints (global tenant management)
 app.MapAuditEndpoints(); // Phase 6: Audit log viewer endpoints
 app.MapDatabaseEndpoints();

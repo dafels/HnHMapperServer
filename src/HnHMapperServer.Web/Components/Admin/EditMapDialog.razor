@@ -1,4 +1,4 @@
-@using HnHMapperServer.Web.Models
+@using HnHMapperServer.Core.DTOs
 @inject IHttpClientFactory HttpClientFactory
 @inject ISnackbar Snackbar
 
@@ -23,9 +23,8 @@
             <MudNumericField @bind-Value="priority"
                              Label="Priority"
                              Variant="Variant.Outlined"
-                             Min="0"
                              Step="1"
-                             HelperText="Maps are sorted by priority (lower first), then by name" />
+                             HelperText="Maps are sorted by priority (lower first), then by name. Use negative values to pin maps to the top." />
         </MudStack>
     </DialogContent>
     <DialogActions>
@@ -91,12 +90,6 @@
         if (string.IsNullOrWhiteSpace(name))
         {
             Snackbar.Add("Map name cannot be empty", Severity.Error);
-            return;
-        }
-
-        if (priority < 0)
-        {
-            Snackbar.Add("Priority must be >= 0", Severity.Error);
             return;
         }
 

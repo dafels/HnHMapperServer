@@ -54,7 +54,7 @@ public class ZoomTileRebuildService : BackgroundService
                 var tenants = await tenantService.GetAllTenantsAsync();
                 var activeTenants = tenants.Where(t => t.IsActive).ToList();
 
-                _logger.LogInformation("Starting zoom rebuild cycle for {TenantCount} active tenants", activeTenants.Count);
+                _logger.LogDebug("Starting zoom rebuild cycle for {TenantCount} active tenants", activeTenants.Count);
 
                 int totalRebuiltCount = 0;
 

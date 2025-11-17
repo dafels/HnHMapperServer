@@ -1,4 +1,4 @@
-namespace HnHMapperServer.Web.Models;
+namespace HnHMapperServer.Core.DTOs;
 
 /// <summary>
 /// DTO for admin map management operations.
@@ -48,4 +48,3 @@ public class DeleteMapResponse
     /// </summary>
     public string Message { get; set; } = string.Empty;
 }
-

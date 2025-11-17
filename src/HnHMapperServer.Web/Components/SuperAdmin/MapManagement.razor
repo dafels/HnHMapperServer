@@ -1,12 +1,26 @@
-@using HnHMapperServer.Web.Models
+@using HnHMapperServer.Core.DTOs
 @using HnHMapperServer.Web.Components.Admin
 @inject IHttpClientFactory HttpClientFactory
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
 
-<MudText Typo="Typo.h5" Class="mb-4">Map Management</MudText>
+<MudPaper Class="pa-4">
+    <MudStack Spacing="4">
+        <div class="d-flex justify-space-between align-center">
+            <MudText Typo="Typo.h5">
+                <MudIcon Icon="@Icons.Material.Filled.Map" Class="me-2" />
+                Map Management
+            </MudText>
+            <MudButton Variant="Variant.Filled"
+                       Color="Color.Primary"
+                       StartIcon="@Icons.Material.Filled.Refresh"
+                       OnClick="LoadMaps"
+                       Disabled="@isLoading">
+                Refresh
+            </MudButton>
+        </div>
 
-<MudTable Items="@maps" Hover="true" Striped="true" Dense="true" Elevation="2" Loading="@isLoading">
+<MudTable Items="@maps" Hover="true" Striped="true" Dense="true" Elevation="0" Loading="@isLoading">
     <LoadingContent>
         <MudStack AlignItems="AlignItems.Center" Spacing="2" Class="pa-8">
             <MudProgressCircular Color="Color.Primary" Indeterminate="true" Size="Size.Large" />
@@ -47,14 +61,17 @@
                            Size="Size.Small"
                            OnClick="@(() => ShowEditDialog(context))"
                            Title="Edit map" />
-            <MudIconButton Icon="@Icons.Material.Filled.Delete"
+            @* Delete button disabled - too destructive for tenant admins *@
+            @* <MudIconButton Icon="@Icons.Material.Filled.Delete"
                            Color="Color.Error"
                            Size="Size.Small"
                            OnClick="@(() => ShowDeleteConfirmation(context))"
-                           Title="Delete map" />
+                           Title="Delete map" /> *@
         </MudTd>
     </RowTemplate>
 </MudTable>
+    </MudStack>
+</MudPaper>
 
 @code {
     private List<AdminMapDto>? maps;
@@ -135,64 +152,67 @@
         }
     }
 
-    /// <summary>
-    /// Show a confirmation dialog before deleting a map.
-    /// </summary>
-    private async Task ShowDeleteConfirmation(AdminMapDto map)
-    {
-        var result = await DialogService.ShowMessageBox(
-            "Delete Map",
-            $"Are you sure you want to delete map '{map.Name}' (ID: {map.Id})?\n\n" +
-            "This will permanently delete:\n" +
-            "• All grids in this map\n" +
-            "• All markers in this map\n" +
-            "• All tile images (zoom levels 0-6)\n" +
-            "• All related files on disk\n\n" +
-            "This action cannot be undone!",
-            yesText: "Delete Forever",
-            cancelText: "Cancel");
+    // TODO: Delete functionality disabled - too destructive for tenant admins
+    // Consider re-enabling for SuperAdmin only in the future
 
-        if (result == true)
-        {
-            await DeleteMap(map.Id);
-        }
-    }
-
-    /// <summary>
-    /// Delete a map via the admin API.
-    /// </summary>
-    private async Task DeleteMap(int mapId)
-    {
-        try
-        {
-            var httpClient = HttpClientFactory.CreateClient("API");
-            var response = await httpClient.DeleteAsync($"/admin/maps/{mapId}");
-
-            if (response.IsSuccessStatusCode)
-            {
-                var result = await response.Content.ReadFromJsonAsync<DeleteMapResponse>();
-                Snackbar.Add(result?.Message ?? "Map deleted successfully", Severity.Success);
-                await LoadMaps();
-            }
-            else if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-            {
-                Snackbar.Add("Map not found. It may have already been deleted.", Severity.Warning);
-                await LoadMaps();
-            }
-            else
-            {
-                var errorContent = await response.Content.ReadAsStringAsync();
-                Snackbar.Add($"Failed to delete map: {errorContent}", Severity.Error);
-            }
-        }
-        catch (HttpRequestException ex)
-        {
-            Snackbar.Add($"Network error deleting map: {ex.Message}", Severity.Error);
-        }
-        catch (Exception ex)
-        {
-            Snackbar.Add($"Failed to delete map: {ex.Message}", Severity.Error);
-        }
-    }
+    ///// <summary>
+    ///// Show a confirmation dialog before deleting a map.
+    ///// </summary>
+    //private async Task ShowDeleteConfirmation(AdminMapDto map)
+    //{
+    //    var result = await DialogService.ShowMessageBox(
+    //        "Delete Map",
+    //        $"Are you sure you want to delete map '{map.Name}' (ID: {map.Id})?\n\n" +
+    //        "This will permanently delete:\n" +
+    //        "• All grids in this map\n" +
+    //        "• All markers in this map\n" +
+    //        "• All tile images (zoom levels 0-6)\n" +
+    //        "• All related files on disk\n\n" +
+    //        "This action cannot be undone!",
+    //        yesText: "Delete Forever",
+    //        cancelText: "Cancel");
+    //
+    //    if (result == true)
+    //    {
+    //        await DeleteMap(map.Id);
+    //    }
+    //}
+    //
+    ///// <summary>
+    ///// Delete a map via the admin API.
+    ///// </summary>
+    //private async Task DeleteMap(int mapId)
+    //{
+    //    try
+    //    {
+    //        var httpClient = HttpClientFactory.CreateClient("API");
+    //        var response = await httpClient.DeleteAsync($"/admin/maps/{mapId}");
+    //
+    //        if (response.IsSuccessStatusCode)
+    //        {
+    //            var result = await response.Content.ReadFromJsonAsync<DeleteMapResponse>();
+    //            Snackbar.Add(result?.Message ?? "Map deleted successfully", Severity.Success);
+    //            await LoadMaps();
+    //        }
+    //        else if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+    //        {
+    //            Snackbar.Add("Map not found. It may have already been deleted.", Severity.Warning);
+    //            await LoadMaps();
+    //        }
+    //        else
+    //        {
+    //            var errorContent = await response.Content.ReadAsStringAsync();
+    //            Snackbar.Add($"Failed to delete map: {errorContent}", Severity.Error);
+    //        }
+    //    }
+    //    catch (HttpRequestException ex)
+    //    {
+    //        Snackbar.Add($"Network error deleting map: {ex.Message}", Severity.Error);
+    //    }
+    //    catch (Exception ex)
+    //    {
+    //        Snackbar.Add($"Failed to delete map: {ex.Message}", Severity.Error);
+    //    }
+    //}
 }
 

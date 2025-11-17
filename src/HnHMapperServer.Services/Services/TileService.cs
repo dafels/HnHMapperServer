@@ -239,7 +239,7 @@ public class TileService : ITileService
                 var existingZoomTiles = tenantTiles.Where(t => t.Zoom == zoom).ToList();
                 var existingCoords = existingZoomTiles.Select(t => new { t.Coord.X, t.Coord.Y, t.MapId }).ToHashSet();
 
-                _logger.LogInformation("Zoom rebuild: Level {Zoom} has {Existing} existing tiles, {Expected} parent coords from level {PrevZoom}",
+                _logger.LogDebug("Zoom rebuild: Level {Zoom} has {Existing} existing tiles, {Expected} parent coords from level {PrevZoom}",
                     zoom, existingZoomTiles.Count, parentCoords.Count, zoom - 1);
 
                 // Create missing zoom tiles
@@ -259,7 +259,7 @@ public class TileService : ITileService
                         continue;
 
                     // Create the missing tile
-                    _logger.LogInformation("Creating missing zoom tile: Map={MapId}, Zoom={Zoom}, Coord={Coord}, TenantId={TenantId}",
+                    _logger.LogDebug("Creating missing zoom tile: Map={MapId}, Zoom={Zoom}, Coord={Coord}, TenantId={TenantId}",
                         mapId, zoom, parentCoord, tenantId);
 
                     await UpdateZoomLevelAsync(mapId, parentCoord, zoom, tenantId, gridStorage, tenantTiles);
@@ -283,7 +283,7 @@ public class TileService : ITileService
 
                 if (existingZoomTiles.Count > 0)
                 {
-                    _logger.LogInformation("Zoom rebuild: Checking {Count} existing tiles at zoom level {Zoom}", existingZoomTiles.Count, zoom);
+                    _logger.LogDebug("Zoom rebuild: Checking {Count} existing tiles at zoom level {Zoom}", existingZoomTiles.Count, zoom);
                 }
 
                 foreach (var zoomTile in existingZoomTiles)
@@ -327,8 +327,9 @@ public class TileService : ITileService
                         bool hasNewerThanZoom = subTilesExist.Any(st => st.Cache > zoomTile.Cache);
 
                         // Check if tile file is suspiciously small (likely empty/transparent)
-                        // Real zoom tiles should be 2KB+, empty ones are <1KB
-                        bool isEmptyTile = zoomTile.FileSizeBytes > 0 && zoomTile.FileSizeBytes < 1024;
+                        // Only trigger for old tiles (24+ hours) to avoid rebuilding recently-created small tiles
+                        var tileAgeHours = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - zoomTile.Cache) / 1000.0 / 3600.0;
+                        bool isEmptyTile = zoomTile.FileSizeBytes > 0 && zoomTile.FileSizeBytes < 1024 && tileAgeHours > 24;
 
                         if (hasNewerThanZoom)
                         {
@@ -339,7 +340,7 @@ public class TileService : ITileService
                         {
                             // Rebuild empty tiles that have at least one sub-tile
                             shouldRebuild = true;
-                            rebuildReason = $"empty tile fix ({subTileCount}/4, {zoomTile.FileSizeBytes}b)";
+                            rebuildReason = $"empty tile fix ({subTileCount}/4, {zoomTile.FileSizeBytes}b, {tileAgeHours:F1}h old)";
                         }
                     }
 
@@ -356,7 +357,7 @@ public class TileService : ITileService
                     // Rebuild if needed
                     if (shouldRebuild)
                     {
-                        _logger.LogInformation(
+                        _logger.LogDebug(
                             "Rebuilding zoom tile: Map={MapId}, Zoom={Zoom}, Coord={Coord}, TenantId={TenantId}, Reason={Reason}",
                             zoomTile.MapId, zoom, zoomTile.Coord, zoomTile.TenantId, rebuildReason);
 
