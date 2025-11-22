@@ -287,7 +287,7 @@ public class DiscordWebhookService : IDiscordWebhookService
                             // Append .png if not already present
                             var iconPath = customMarker.Icon.EndsWith(".png") ? customMarker.Icon : $"{customMarker.Icon}.png";
                             iconUrl = $"{baseUrl}/{iconPath}";
-                            mapUrl = $"{baseUrl}/map?mapid={customMarker.MapId}&x={customMarker.CoordX}&y={customMarker.CoordY}";
+                            mapUrl = $"{baseUrl}/map?map={customMarker.MapId}&x={customMarker.CoordX}&y={customMarker.CoordY}&z=7";
                         }
                     }
                     else if (markerId.HasValue)
@@ -321,7 +321,7 @@ public class DiscordWebhookService : IDiscordWebhookService
                                 var iconPath = marker.Image.EndsWith(".png") ? marker.Image : $"{marker.Image}.png";
                                 iconUrl = $"{baseUrl}/{iconPath}";
                                 // Use grid coordinates directly from the Grids table
-                                mapUrl = $"{baseUrl}/map?mapid={grid.Map}&x={grid.CoordX}&y={grid.CoordY}";
+                                mapUrl = $"{baseUrl}/map?map={grid.Map}&x={grid.CoordX}&y={grid.CoordY}&z=7";
                                 _logger.LogDebug("Set marker data: name={Name}, iconUrl={IconUrl}, mapUrl={MapUrl}", markerName, iconUrl, mapUrl);
                             }
                         }
