@@ -135,10 +135,13 @@ public class TimerCheckService : BackgroundService
             string? actionType = null;
             string? actionData = null;
 
-            if (timer.Type == "Marker")
+            if (timer.Type == "Marker" || timer.Type == "CustomMarker")
             {
+                // Both standard markers and custom markers should navigate to map
                 title = $"{timer.Title} is ready!";
-                message = "Resource is ready to be harvested";
+                message = timer.Type == "CustomMarker"
+                    ? (timer.Description ?? "Custom marker timer has expired")
+                    : "Resource is ready to be harvested";
                 actionType = "NavigateToMarker";
                 actionData = JsonSerializer.Serialize(new
                 {
@@ -146,7 +149,7 @@ public class TimerCheckService : BackgroundService
                     customMarkerId = timer.CustomMarkerId
                 });
             }
-            else // Standalone timer
+            else // Standalone timer (no marker association)
             {
                 title = timer.Title;
                 message = timer.Description ?? "Timer has expired";
@@ -158,7 +161,7 @@ public class TimerCheckService : BackgroundService
             {
                 TenantId = timer.TenantId,
                 UserId = timer.UserId, // Send to specific user who created the timer
-                Type = timer.Type == "Marker" ? "MarkerTimerExpired" : "StandaloneTimerExpired",
+                Type = (timer.Type == "Marker" || timer.Type == "CustomMarker") ? "MarkerTimerExpired" : "StandaloneTimerExpired",
                 Title = title,
                 Message = message,
                 ActionType = actionType,
