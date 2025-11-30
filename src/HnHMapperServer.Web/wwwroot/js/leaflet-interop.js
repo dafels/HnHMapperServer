@@ -800,6 +800,14 @@ export function setMarkerFilterModeEnabled(enabled) {
     return MarkerManager.setMarkerFilterModeEnabled(enabled, mapInstance);
 }
 
+export function setJumpConnectionsEnabled(enabled) {
+    if (!mapInstance) {
+        console.warn('[LeafletInterop] Cannot toggle jump connections - map not initialized');
+        return false;
+    }
+    return MarkerManager.setJumpConnectionsEnabled(enabled, mapInstance);
+}
+
 export function jumpToMarker(markerId) {
     return MarkerManager.jumpToMarker(markerId, mapInstance);
 }

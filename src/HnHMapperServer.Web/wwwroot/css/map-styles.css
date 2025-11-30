@@ -467,3 +467,31 @@
 .questgiver-label::before {
     border: none !important;
 }
+
+/* Thingwall jump target highlight - gold glow to distinguish from cyan source */
+.thingwall-jump-target {
+    filter: drop-shadow(0 0 8px rgba(255, 215, 0, 1))
+            drop-shadow(0 0 16px rgba(255, 215, 0, 0.8)) !important;
+    animation: jump-target-pulse 0.8s ease-in-out infinite;
+    z-index: 1000 !important;
+}
+
+@keyframes jump-target-pulse {
+    0%, 100% {
+        filter: drop-shadow(0 0 8px rgba(255, 215, 0, 1))
+                drop-shadow(0 0 16px rgba(255, 215, 0, 0.8));
+    }
+    50% {
+        filter: drop-shadow(0 0 12px rgba(255, 215, 0, 1))
+                drop-shadow(0 0 24px rgba(255, 215, 0, 0.9));
+    }
+}
+
+/* Uncertain/far thingwall jump target - orange, faded to indicate uncertainty */
+.thingwall-jump-target-uncertain {
+    filter: drop-shadow(0 0 4px rgba(255, 152, 0, 0.6))
+            drop-shadow(0 0 8px rgba(255, 152, 0, 0.3)) !important;
+    opacity: 0.6 !important;
+    z-index: 999 !important;
+}
+
