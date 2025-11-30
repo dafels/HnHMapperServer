@@ -280,8 +280,8 @@ function createOverlayLayer() {
                 }
             }
 
-            // Request any missing overlay data via Blazor
-            if (coordsToFetch.length > 0) {
+            // Request any missing overlay data via Blazor (only if overlays are enabled)
+            if (coordsToFetch.length > 0 && enabledOverlayTypes.size > 0) {
                 requestOverlays(currentMapId, coordsToFetch);
             }
 

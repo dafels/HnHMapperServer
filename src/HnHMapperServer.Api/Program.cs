@@ -491,8 +491,8 @@ builder.Services.AddRateLimiter(options =>
             partitionKey: ipAddress,
             factory: _ => new ConcurrencyLimiterOptions
             {
-                PermitLimit = 100,              // 100 concurrent requests per IP
-                QueueLimit = 200,               // Queue up to 200 more per IP
+                PermitLimit = 500,              // 500 concurrent requests per IP
+                QueueLimit = 1000,              // Queue up to 1000 more per IP
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst
             });
     });
