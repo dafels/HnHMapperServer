@@ -66,6 +66,9 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
     // Overlay data tables
     public DbSet<OverlayDataEntity> OverlayData => Set<OverlayDataEntity>();
 
+    // Performance optimization tables
+    public DbSet<DirtyZoomTileEntity> DirtyZoomTiles => Set<DirtyZoomTileEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -615,6 +618,39 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        modelBuilder.Entity<DirtyZoomTileEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.TenantId).IsRequired();
+            entity.Property(e => e.MapId).IsRequired();
+            entity.Property(e => e.CoordX).IsRequired();
+            entity.Property(e => e.CoordY).IsRequired();
+            entity.Property(e => e.Zoom).IsRequired();
+            entity.Property(e => e.CreatedAt).IsRequired();
+
+            // Unique index: Only one dirty tile entry per (Tenant, Map, Coord, Zoom)
+            // This ensures upserts can use "ON CONFLICT IGNORE" semantics
+            entity.HasIndex(e => new { e.TenantId, e.MapId, e.CoordX, e.CoordY, e.Zoom }).IsUnique();
+
+            // Index for efficient tenant queries (used by ZoomTileRebuildService)
+            entity.HasIndex(e => e.TenantId);
+
+            // Composite index for ordered processing
+            entity.HasIndex(e => new { e.TenantId, e.Zoom, e.MapId });
+
+            // Foreign key to Tenants
+            entity.HasOne<TenantEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Foreign key to Maps
+            entity.HasOne<MapInfoEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.MapId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         // Global query filters for automatic tenant isolation
         // These filters automatically add "WHERE TenantId = {currentTenantId}" to all queries
         // GetCurrentTenantId() is evaluated at query time (not model creation time)
@@ -1147,6 +1183,48 @@ public sealed class TimerWarningEntity
     /// UTC timestamp when the warning was sent
     /// </summary>
     public DateTime SentAt { get; set; }
+}
+
+/// <summary>
+/// Tracks zoom tiles that need rebuilding after base tile uploads.
+/// Instead of scanning all tiles to find stale ones, we mark dirty tiles on upload.
+/// </summary>
+public sealed class DirtyZoomTileEntity
+{
+    /// <summary>
+    /// Primary key
+    /// </summary>
+    public int Id { get; set; }
+
+    /// <summary>
+    /// Tenant ID for multi-tenancy isolation
+    /// </summary>
+    public string TenantId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Map ID the tile belongs to
+    /// </summary>
+    public int MapId { get; set; }
+
+    /// <summary>
+    /// Tile coordinate X (at the given zoom level)
+    /// </summary>
+    public int CoordX { get; set; }
+
+    /// <summary>
+    /// Tile coordinate Y (at the given zoom level)
+    /// </summary>
+    public int CoordY { get; set; }
+
+    /// <summary>
+    /// Zoom level (1-6)
+    /// </summary>
+    public int Zoom { get; set; }
+
+    /// <summary>
+    /// When the tile was marked dirty (for debugging/monitoring)
+    /// </summary>
+    public DateTime CreatedAt { get; set; }
 }
 
 /// <summary>

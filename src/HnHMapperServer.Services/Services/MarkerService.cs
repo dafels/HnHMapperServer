@@ -194,28 +194,33 @@ public class MarkerService : IMarkerService
 
     public async Task UpdateReadinessOnMarkersAsync(string tenantId)
     {
-        // Get all markers (global query filter should apply if called from HTTP context,
-        // but in background services we need to defensively filter by tenantId)
-        var markers = await _markerRepository.GetAllMarkersAsync();
+        // OPTIMIZED: Use tenant-specific query instead of loading all markers
+        // This avoids loading markers from other tenants in background services
+        var markers = await _markerRepository.GetMarkersByTenantAsync(tenantId);
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        // SECURITY: Filter by tenant to ensure we only process this tenant's markers
-        // This is critical in background services where HttpContext is null
-        var tenantMarkers = markers.Where(m => m.TenantId == tenantId).ToList();
+        // Collect all markers that need to be updated
+        var updates = new List<(int markerId, bool ready, long maxReady, long minReady)>();
+        var updatedNames = new List<string>();
 
-        foreach (var marker in tenantMarkers)
+        foreach (var marker in markers)
         {
             if (!marker.Ready && marker.MaxReady != -1 && marker.MaxReady < now)
             {
-                marker.Ready = true;
-                marker.MaxReady = -1;
-                marker.MinReady = -1;
+                updates.Add((marker.Id, true, -1, -1));
+                updatedNames.Add(marker.Name);
+            }
+        }
 
-                var key = $"{marker.GridId}_{marker.Position.X}_{marker.Position.Y}";
-                await _markerRepository.SaveMarkerAsync(marker, key);
+        if (updates.Count > 0)
+        {
+            // OPTIMIZED: Single batch update instead of N individual saves
+            var updated = await _markerRepository.BatchUpdateReadinessAsync(updates, tenantId);
 
+            foreach (var name in updatedNames)
+            {
                 _logger.LogInformation("Marker {Name} (Tenant: {TenantId}) is now ready to be harvested!",
-                    marker.Name, tenantId);
+                    name, tenantId);
             }
         }
     }

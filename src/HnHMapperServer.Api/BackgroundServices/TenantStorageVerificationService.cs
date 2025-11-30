@@ -97,9 +97,9 @@ public class TenantStorageVerificationService : BackgroundService
 
     private async Task VerifyTenantAsync(string tenantId, ApplicationDbContext db, IStorageQuotaService quotaService)
     {
-        // Calculate from filesystem only (avoids expensive DB query that causes lockups)
+        // Calculate from filesystem - single pass for both count and size
         var tenantDir = Path.Combine(_gridStorage, "tenants", tenantId);
-        var fsUsageBytes = CalculateDirectorySize(tenantDir);
+        var (fileCount, fsUsageBytes) = CalculateDirectorySizeAndCount(tenantDir);
         var fsUsageMB = fsUsageBytes / 1024.0 / 1024.0;
 
         // Get current tracked value
@@ -115,9 +115,6 @@ public class TenantStorageVerificationService : BackgroundService
             // Update if there's a significant difference (> 1 MB)
             if (diffMB > 1)
             {
-                tenant.CurrentStorageMB = fsUsageMB;
-                await db.SaveChangesAsync();
-
                 _logger.LogInformation(
                     "Updated tenant {TenantId} storage usage: {OldMB:F2}MB → {NewMB:F2}MB",
                     tenantId, oldUsage, fsUsageMB);
@@ -130,31 +127,53 @@ public class TenantStorageVerificationService : BackgroundService
             }
         }
 
-        // Recalculate storage (this also writes .storage.json metadata file)
-        await quotaService.RecalculateStorageUsageAsync(tenantId, _gridStorage);
+        // Use the new optimized method that takes pre-calculated values
+        // This avoids a duplicate filesystem scan
+        await quotaService.UpdateStorageFromCalculationAsync(tenantId, _gridStorage, fsUsageBytes, fileCount);
     }
 
-    private static long CalculateDirectorySize(string dirPath)
+    /// <summary>
+    /// Calculates total size and file count of a directory in a single pass.
+    /// Uses EnumerateFiles for streaming instead of GetFiles to reduce memory pressure.
+    /// </summary>
+    private static (int fileCount, long totalBytes) CalculateDirectorySizeAndCount(string dirPath)
     {
         if (!Directory.Exists(dirPath))
-            return 0;
-
-        var dirInfo = new DirectoryInfo(dirPath);
+            return (0, 0);
 
         try
         {
-            return dirInfo.GetFiles("*", SearchOption.AllDirectories)
-                .Sum(fi => fi.Length);
+            int count = 0;
+            long total = 0;
+
+            // Use EnumerateFiles for streaming - more memory efficient for large directories
+            foreach (var file in Directory.EnumerateFiles(dirPath, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    var fileInfo = new FileInfo(file);
+                    total += fileInfo.Length;
+                    count++;
+                }
+                catch (IOException)
+                {
+                    // File may have been deleted during enumeration, skip it
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // Skip files we can't access
+                }
+            }
+
+            return (count, total);
         }
         catch (UnauthorizedAccessException)
         {
-            // Skip directories we can't access
-            return 0;
+            return (0, 0);
         }
         catch (DirectoryNotFoundException)
         {
-            // Directory was deleted during scan
-            return 0;
+            return (0, 0);
         }
     }
 }

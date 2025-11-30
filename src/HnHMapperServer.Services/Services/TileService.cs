@@ -64,6 +64,60 @@ public class TileService : ITileService
 
         await _tileRepository.SaveTileAsync(tileData);
         _updateNotificationService.NotifyTileUpdate(tileData);
+
+        // If this is a base tile (zoom 0), mark all parent zoom levels as dirty
+        // This enables the optimized rebuild that only processes changed tiles
+        if (zoom == 0)
+        {
+            await MarkParentTilesDirtyAsync(mapId, coord, tenantId);
+        }
+    }
+
+    /// <summary>
+    /// Marks all parent zoom tiles (1-6) as dirty when a base tile is uploaded.
+    /// Uses INSERT OR IGNORE to avoid duplicates efficiently.
+    /// </summary>
+    private async Task MarkParentTilesDirtyAsync(int mapId, Coord baseCoord, string tenantId)
+    {
+        var now = DateTime.UtcNow;
+        var currentCoord = baseCoord;
+
+        for (int zoom = 1; zoom <= 6; zoom++)
+        {
+            currentCoord = new Coord(currentCoord.X / 2, currentCoord.Y / 2);
+
+            // Check if already exists (unique index will prevent duplicates anyway)
+            var exists = await _dbContext.DirtyZoomTiles
+                .IgnoreQueryFilters()
+                .AnyAsync(d => d.TenantId == tenantId
+                    && d.MapId == mapId
+                    && d.CoordX == currentCoord.X
+                    && d.CoordY == currentCoord.Y
+                    && d.Zoom == zoom);
+
+            if (!exists)
+            {
+                try
+                {
+                    _dbContext.DirtyZoomTiles.Add(new DirtyZoomTileEntity
+                    {
+                        TenantId = tenantId,
+                        MapId = mapId,
+                        CoordX = currentCoord.X,
+                        CoordY = currentCoord.Y,
+                        Zoom = zoom,
+                        CreatedAt = now
+                    });
+                    await _dbContext.SaveChangesAsync();
+                }
+                catch (DbUpdateException)
+                {
+                    // Unique constraint violation - tile already marked dirty by another request
+                    // This is expected in high-concurrency scenarios, safe to ignore
+                    _dbContext.ChangeTracker.Clear();
+                }
+            }
+        }
     }
 
     public async Task<TileData?> GetTileAsync(int mapId, Coord coord, int zoom)
@@ -76,9 +130,10 @@ public class TileService : ITileService
         using var img = new Image<Rgba32>(100, 100);
         img.Mutate(ctx => ctx.BackgroundColor(Color.Transparent));
 
-        int loadedSubTiles = 0;
+        // OPTIMIZED: Load all 4 sub-tiles in parallel instead of sequentially
+        // This reduces I/O wait time from 4x to 1x (parallel file reads)
+        var loadTasks = new List<Task<(int x, int y, Image<Rgba32>? image)>>();
 
-        // Sequential sub-tile loading (DbContext is not thread-safe)
         for (int x = 0; x <= 1; x++)
         {
             for (int y = 0; y <= 1; y++)
@@ -108,19 +163,37 @@ public class TileService : ITileService
                 if (!File.Exists(filePath))
                     continue;
 
-                try
-                {
-                    using var subImg = await Image.LoadAsync<Rgba32>(filePath);
+                // Capture loop variables for the async lambda
+                var capturedX = x;
+                var capturedY = y;
+                var capturedPath = filePath;
 
-                    // Resize to 50x50 and place in appropriate quadrant
-                    using var resized = subImg.Clone(ctx => ctx.Resize(50, 50));
-                    img.Mutate(ctx => ctx.DrawImage(resized, new Point(50 * x, 50 * y), 1f));
-                    loadedSubTiles++;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to load sub-tile {File}", filePath);
-                }
+                // Start async image loading task
+                loadTasks.Add(LoadSubTileAsync(capturedX, capturedY, capturedPath));
+            }
+        }
+
+        // Wait for all image loads to complete in parallel
+        var loadedImages = await Task.WhenAll(loadTasks);
+
+        int loadedSubTiles = 0;
+
+        // Composite all loaded images onto the canvas (must be sequential for thread safety)
+        foreach (var (x, y, subImage) in loadedImages)
+        {
+            if (subImage == null)
+                continue;
+
+            try
+            {
+                // Resize to 50x50 and place in appropriate quadrant
+                using var resized = subImage.Clone(ctx => ctx.Resize(50, 50));
+                img.Mutate(ctx => ctx.DrawImage(resized, new Point(50 * x, 50 * y), 1f));
+                loadedSubTiles++;
+            }
+            finally
+            {
+                subImage.Dispose();
             }
         }
 
@@ -138,7 +211,7 @@ public class TileService : ITileService
         Directory.CreateDirectory(outputDir);
 
         var outputFile = Path.Combine(outputDir, $"{coord.Name()}.png");
-        await img.SaveAsPngAsync(outputFile);
+        await img.SaveAsPngAsync(outputFile, FastPngEncoder);
 
         // Calculate file size
         var fileInfo = new FileInfo(outputFile);
@@ -150,6 +223,23 @@ public class TileService : ITileService
 
         var relativePath = Path.Combine("tenants", tenantId, mapId.ToString(), zoom.ToString(), $"{coord.Name()}.png");
         await SaveTileAsync(mapId, coord, zoom, relativePath, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), tenantId, fileSizeBytes);
+    }
+
+    /// <summary>
+    /// Loads a sub-tile image asynchronously. Returns null if loading fails.
+    /// </summary>
+    private async Task<(int x, int y, Image<Rgba32>? image)> LoadSubTileAsync(int x, int y, string filePath)
+    {
+        try
+        {
+            var image = await Image.LoadAsync<Rgba32>(filePath);
+            return (x, y, image);
+        }
+        catch (Exception)
+        {
+            // Failed to load - return null (will be skipped during compositing)
+            return (x, y, null);
+        }
     }
 
     public async Task RebuildZoomsAsync(string gridStorage)
@@ -207,8 +297,9 @@ public class TileService : ITileService
     }
 
     /// <summary>
-    /// OPTIMIZED: Rebuilds incomplete zoom tiles using database-level filtering.
-    /// Instead of loading ALL tiles into memory, queries only tiles that need work.
+    /// OPTIMIZED: Rebuilds zoom tiles using dirty tile tracking.
+    /// Instead of scanning all tiles to find stale ones, queries only the dirty tile table.
+    /// Expected performance: O(dirty tiles) instead of O(all tiles).
     /// </summary>
     public async Task<int> RebuildIncompleteZoomTilesAsync(string tenantId, string gridStorage, int maxTilesToRebuild)
     {
@@ -216,157 +307,115 @@ public class TileService : ITileService
 
         try
         {
-            _logger.LogDebug("Starting optimized zoom rebuild for tenant {TenantId}", tenantId);
+            // FAST: Query only dirty tiles (should be small number)
+            var dirtyTiles = await _dbContext.DirtyZoomTiles
+                .IgnoreQueryFilters()
+                .Where(d => d.TenantId == tenantId)
+                .OrderBy(d => d.Zoom)  // Process lower zoom levels first
+                .ThenBy(d => d.MapId)
+                .ThenBy(d => d.CoordX)
+                .ThenBy(d => d.CoordY)
+                .Take(maxTilesToRebuild)
+                .ToListAsync();
 
-            // Process zoom levels 1-6 in order
-            for (int zoom = 1; zoom <= 6 && rebuiltCount < maxTilesToRebuild; zoom++)
+            if (dirtyTiles.Count == 0)
             {
-                var remaining = maxTilesToRebuild - rebuiltCount;
-                int zoomLevelCreatedCount = 0;
-                int zoomLevelRebuiltCount = 0;
-
-                // 1. Find and create MISSING zoom tiles (parent coords that don't have a tile yet)
-                var missingTiles = await FindMissingZoomTilesAsync(tenantId, zoom, remaining);
-
-                foreach (var (mapId, coord) in missingTiles)
-                {
-                    if (rebuiltCount >= maxTilesToRebuild) break;
-
-                    // Load only the 4 sub-tiles needed for this specific parent
-                    var subTiles = await LoadSubTilesForParentAsync(tenantId, mapId, coord, zoom - 1);
-
-                    if (subTiles.Count == 0)
-                    {
-                        _logger.LogDebug("Skipping missing tile Map={MapId} Zoom={Zoom} Coord={Coord}: no sub-tiles found", mapId, zoom, coord);
-                        continue;
-                    }
-
-                    _logger.LogDebug("Creating missing zoom tile: Map={MapId}, Zoom={Zoom}, Coord={Coord}, SubTiles={SubTileCount}",
-                        mapId, zoom, coord, subTiles.Count);
-
-                    await UpdateZoomLevelAsync(mapId, coord, zoom, tenantId, gridStorage, subTiles);
-                    rebuiltCount++;
-                    zoomLevelCreatedCount++;
-                }
-
-                // 2. Find and rebuild STALE zoom tiles (where sub-tiles are newer)
-                remaining = maxTilesToRebuild - rebuiltCount;
-                if (remaining > 0)
-                {
-                    var staleTiles = await FindStaleZoomTilesAsync(tenantId, zoom, remaining);
-
-                    foreach (var staleTile in staleTiles)
-                    {
-                        if (rebuiltCount >= maxTilesToRebuild) break;
-
-                        var subTiles = await LoadSubTilesForParentAsync(tenantId, staleTile.MapId, staleTile.Coord, zoom - 1);
-
-                        // Get the old file size for quota adjustment
-                        var oldFilePath = Path.Combine(gridStorage, staleTile.File);
-                        long oldFileSizeBytes = 0;
-                        if (File.Exists(oldFilePath))
-                        {
-                            oldFileSizeBytes = new FileInfo(oldFilePath).Length;
-                        }
-
-                        _logger.LogDebug("Rebuilding stale zoom tile: Map={MapId}, Zoom={Zoom}, Coord={Coord}, SubTiles={SubTileCount}",
-                            staleTile.MapId, zoom, staleTile.Coord, subTiles.Count);
-
-                        await UpdateZoomLevelAsync(staleTile.MapId, staleTile.Coord, zoom, tenantId, gridStorage, subTiles);
-
-                        // Adjust quota: UpdateZoomLevelAsync already increments for the new file,
-                        // so we need to decrement the old file size
-                        if (oldFileSizeBytes > 0)
-                        {
-                            var oldFileSizeMB = oldFileSizeBytes / 1024.0 / 1024.0;
-                            await _quotaService.IncrementStorageUsageAsync(tenantId, -oldFileSizeMB);
-                        }
-
-                        rebuiltCount++;
-                        zoomLevelRebuiltCount++;
-                    }
-                }
-
-                if (zoomLevelCreatedCount > 0 || zoomLevelRebuiltCount > 0)
-                {
-                    _logger.LogInformation("Zoom {Zoom}: created {Created}, rebuilt {Rebuilt}", zoom, zoomLevelCreatedCount, zoomLevelRebuiltCount);
-                }
+                _logger.LogDebug("Tenant {TenantId}: No dirty zoom tiles", tenantId);
+                return 0;
             }
+
+            _logger.LogDebug("Tenant {TenantId}: Processing {Count} dirty zoom tiles", tenantId, dirtyTiles.Count);
+
+            foreach (var dirty in dirtyTiles)
+            {
+                var coord = new Coord(dirty.CoordX, dirty.CoordY);
+
+                // Load only the 4 sub-tiles needed for this specific parent
+                var subTiles = await LoadSubTilesForParentAsync(tenantId, dirty.MapId, coord, dirty.Zoom - 1);
+
+                if (subTiles.Count == 0)
+                {
+                    _logger.LogDebug("Skipping dirty tile Map={MapId} Zoom={Zoom} Coord={Coord}: no sub-tiles found",
+                        dirty.MapId, dirty.Zoom, coord);
+                    // Still remove from dirty list since there's nothing to rebuild
+                    _dbContext.DirtyZoomTiles.Remove(dirty);
+                    continue;
+                }
+
+                // Check if zoom tile exists (for quota adjustment)
+                var existingTile = await _dbContext.Tiles
+                    .IgnoreQueryFilters()
+                    .Where(t => t.TenantId == tenantId
+                        && t.MapId == dirty.MapId
+                        && t.Zoom == dirty.Zoom
+                        && t.CoordX == dirty.CoordX
+                        && t.CoordY == dirty.CoordY)
+                    .FirstOrDefaultAsync();
+
+                long oldFileSizeBytes = 0;
+                if (existingTile != null && !string.IsNullOrEmpty(existingTile.File))
+                {
+                    var oldFilePath = Path.Combine(gridStorage, existingTile.File);
+                    if (File.Exists(oldFilePath))
+                    {
+                        oldFileSizeBytes = new FileInfo(oldFilePath).Length;
+                    }
+                }
+
+                _logger.LogDebug("Rebuilding dirty zoom tile: Map={MapId}, Zoom={Zoom}, Coord={Coord}, SubTiles={SubTileCount}",
+                    dirty.MapId, dirty.Zoom, coord, subTiles.Count);
+
+                await UpdateZoomLevelAsync(dirty.MapId, coord, dirty.Zoom, tenantId, gridStorage, subTiles);
+
+                // Adjust quota: UpdateZoomLevelAsync already increments for the new file,
+                // so we need to decrement the old file size
+                if (oldFileSizeBytes > 0)
+                {
+                    var oldFileSizeMB = oldFileSizeBytes / 1024.0 / 1024.0;
+                    await _quotaService.IncrementStorageUsageAsync(tenantId, -oldFileSizeMB);
+                }
+
+                // Remove from dirty list
+                _dbContext.DirtyZoomTiles.Remove(dirty);
+                rebuiltCount++;
+            }
+
+            // Save all dirty tile removals in one batch
+            await _dbContext.SaveChangesAsync();
 
             if (rebuiltCount > 0)
             {
-                _logger.LogInformation("Total rebuilt: {Count} zoom tiles for tenant {TenantId}", rebuiltCount, tenantId);
+                _logger.LogInformation("Rebuilt {Count} dirty zoom tiles for tenant {TenantId}", rebuiltCount, tenantId);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error rebuilding incomplete zoom tiles for tenant {TenantId}", tenantId);
+            _logger.LogError(ex, "Error rebuilding dirty zoom tiles for tenant {TenantId}", tenantId);
         }
 
         return rebuiltCount;
     }
 
     /// <summary>
-    /// Finds parent coordinates from zoom-1 that don't have a corresponding tile at the target zoom level.
-    /// Uses database-level filtering to avoid loading all tiles into memory.
+    /// Checks if tenant has any dirty tiles pending rebuild.
+    /// Used by ZoomTileRebuildService for fast skip check.
     /// </summary>
-    private async Task<List<(int MapId, Coord Coord)>> FindMissingZoomTilesAsync(string tenantId, int zoom, int limit)
+    public async Task<bool> HasDirtyZoomTilesAsync(string tenantId)
     {
-        var prevZoom = zoom - 1;
-
-        // Use EF Core to find parent coords that don't have corresponding zoom tiles
-        // This is more efficient than loading all tiles and filtering in memory
-        var result = await _dbContext.Tiles
+        return await _dbContext.DirtyZoomTiles
             .IgnoreQueryFilters()
-            .Where(t => t.TenantId == tenantId && t.Zoom == prevZoom)
-            .Select(t => new { t.MapId, ParentX = t.CoordX / 2, ParentY = t.CoordY / 2 })
-            .Distinct()
-            .Where(parent => !_dbContext.Tiles
-                .IgnoreQueryFilters()
-                .Any(curr => curr.TenantId == tenantId
-                    && curr.MapId == parent.MapId
-                    && curr.Zoom == zoom
-                    && curr.CoordX == parent.ParentX
-                    && curr.CoordY == parent.ParentY))
-            .Take(limit)
-            .ToListAsync();
-
-        return result.Select(r => (r.MapId, new Coord(r.ParentX, r.ParentY))).ToList();
+            .AnyAsync(d => d.TenantId == tenantId);
     }
 
     /// <summary>
-    /// Finds zoom tiles where at least one sub-tile has a newer timestamp.
-    /// Uses database-level filtering to avoid loading all tiles into memory.
+    /// Gets the count of dirty tiles for a tenant.
+    /// Used for monitoring and logging.
     /// </summary>
-    private async Task<List<TileData>> FindStaleZoomTilesAsync(string tenantId, int zoom, int limit)
+    public async Task<int> GetDirtyZoomTileCountAsync(string tenantId)
     {
-        var prevZoom = zoom - 1;
-
-        // Find zoom tiles that have at least one sub-tile with a newer Cache timestamp
-        var staleTiles = await _dbContext.Tiles
+        return await _dbContext.DirtyZoomTiles
             .IgnoreQueryFilters()
-            .Where(curr => curr.TenantId == tenantId && curr.Zoom == zoom)
-            .Where(curr => _dbContext.Tiles
-                .IgnoreQueryFilters()
-                .Any(sub => sub.TenantId == tenantId
-                    && sub.MapId == curr.MapId
-                    && sub.Zoom == prevZoom
-                    && sub.CoordX / 2 == curr.CoordX
-                    && sub.CoordY / 2 == curr.CoordY
-                    && sub.Cache > curr.Cache))
-            .Take(limit)
-            .ToListAsync();
-
-        return staleTiles.Select(t => new TileData
-        {
-            MapId = t.MapId,
-            Coord = new Coord(t.CoordX, t.CoordY),
-            Zoom = t.Zoom,
-            File = t.File,
-            Cache = t.Cache,
-            TenantId = t.TenantId,
-            FileSizeBytes = t.FileSizeBytes
-        }).ToList();
+            .CountAsync(d => d.TenantId == tenantId);
     }
 
     /// <summary>

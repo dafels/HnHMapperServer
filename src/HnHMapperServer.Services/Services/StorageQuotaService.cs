@@ -145,13 +145,10 @@ public class StorageQuotaService : IStorageQuotaService
             throw new InvalidOperationException($"Tenant {tenantId} not found");
         }
 
-        // Calculate from filesystem
+        // Calculate from filesystem (single pass - count and sum in one enumeration)
         var tenantDir = Path.Combine(gridStorage, "tenants", tenantId);
-        var totalSizeBytes = CalculateDirectorySize(tenantDir);
+        var (fileCount, totalSizeBytes) = CalculateDirectorySizeAndCount(tenantDir);
         var totalSizeMB = totalSizeBytes / 1024.0 / 1024.0;
-
-        // Count files
-        var fileCount = CountFiles(tenantDir);
 
         _logger.LogInformation(
             "RecalculateStorage: Tenant {TenantId} - Files: {FileCount}, Size: {SizeMB:F2}MB",
@@ -179,51 +176,89 @@ public class StorageQuotaService : IStorageQuotaService
     }
 
     /// <summary>
-    /// Calculates total size of a directory recursively
+    /// Updates storage usage from pre-calculated values (avoids duplicate filesystem scan)
     /// </summary>
-    private static long CalculateDirectorySize(string dirPath)
+    public async Task UpdateStorageFromCalculationAsync(string tenantId, string gridStorage, long totalSizeBytes, int fileCount)
     {
-        if (!Directory.Exists(dirPath))
+        var tenant = await _db.Tenants
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.Id == tenantId);
+
+        if (tenant == null)
         {
-            return 0;
+            throw new InvalidOperationException($"Tenant {tenantId} not found");
         }
 
-        var directoryInfo = new DirectoryInfo(dirPath);
+        var totalSizeMB = totalSizeBytes / 1024.0 / 1024.0;
 
-        try
-        {
-            // Get size of all files in this directory
-            var totalSize = directoryInfo.GetFiles("*", SearchOption.AllDirectories)
-                .Sum(file => file.Length);
+        _logger.LogInformation(
+            "RecalculateStorage: Tenant {TenantId} - Files: {FileCount}, Size: {SizeMB:F2}MB",
+            tenantId, fileCount, totalSizeMB);
 
-            return totalSize;
-        }
-        catch (UnauthorizedAccessException)
+        // Update database
+        var oldUsage = tenant.CurrentStorageMB;
+        tenant.CurrentStorageMB = totalSizeMB;
+        await _db.SaveChangesAsync();
+
+        // Write .storage.json file
+        var tenantDir = Path.Combine(gridStorage, "tenants", tenantId);
+        await WriteStorageMetadataAsync(tenantDir, tenantId, totalSizeBytes, totalSizeMB, fileCount);
+
+        // Log discrepancy if significant
+        var diffMB = Math.Abs(oldUsage - totalSizeMB);
+        if (diffMB > 1.0)
         {
-            // Skip directories we can't access
-            return 0;
+            _logger.LogWarning(
+                "RecalculateStorage: Tenant {TenantId} discrepancy detected. " +
+                "DB: {OldMB:F2}MB, Filesystem: {NewMB:F2}MB, Diff: {DiffMB:F2}MB",
+                tenantId, oldUsage, totalSizeMB, diffMB);
         }
     }
 
     /// <summary>
-    /// Counts files in a directory recursively
+    /// Calculates total size and file count of a directory in a single pass.
+    /// Uses EnumerateFiles for streaming instead of GetFiles to reduce memory pressure.
     /// </summary>
-    private static int CountFiles(string dirPath)
+    private static (int fileCount, long totalBytes) CalculateDirectorySizeAndCount(string dirPath)
     {
         if (!Directory.Exists(dirPath))
         {
-            return 0;
+            return (0, 0);
         }
-
-        var directoryInfo = new DirectoryInfo(dirPath);
 
         try
         {
-            return directoryInfo.GetFiles("*", SearchOption.AllDirectories).Length;
+            int count = 0;
+            long total = 0;
+
+            // Use EnumerateFiles for streaming - more memory efficient for large directories
+            foreach (var file in Directory.EnumerateFiles(dirPath, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    var fileInfo = new FileInfo(file);
+                    total += fileInfo.Length;
+                    count++;
+                }
+                catch (IOException)
+                {
+                    // File may have been deleted during enumeration, skip it
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // Skip files we can't access
+                }
+            }
+
+            return (count, total);
         }
         catch (UnauthorizedAccessException)
         {
-            return 0;
+            return (0, 0);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return (0, 0);
         }
     }
 

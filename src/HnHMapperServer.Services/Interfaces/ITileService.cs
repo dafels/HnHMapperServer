@@ -30,4 +30,16 @@ public interface ITileService
     /// Returns the number of tiles rebuilt
     /// </summary>
     Task<int> RebuildIncompleteZoomTilesAsync(string tenantId, string gridStorage, int maxTilesToRebuild);
+
+    /// <summary>
+    /// Checks if tenant has any dirty tiles pending rebuild.
+    /// Used by ZoomTileRebuildService for fast skip check.
+    /// </summary>
+    Task<bool> HasDirtyZoomTilesAsync(string tenantId);
+
+    /// <summary>
+    /// Gets the count of dirty tiles for a tenant.
+    /// Used for monitoring and logging.
+    /// </summary>
+    Task<int> GetDirtyZoomTileCountAsync(string tenantId);
 }

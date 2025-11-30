@@ -70,6 +70,18 @@ public class ZoomTileRebuildService : BackgroundService
                 // Rebuild tiles for each active tenant
                 foreach (var tenant in activeTenants)
                 {
+                    // FAST SKIP CHECK: Skip tenants with no dirty tiles
+                    // This avoids expensive database queries when there's no work to do
+                    var hasDirtyTiles = await tileService.HasDirtyZoomTilesAsync(tenant.Id);
+                    if (!hasDirtyTiles)
+                    {
+                        _logger.LogDebug("Tenant {TenantId}: No dirty tiles, skipping", tenant.Id);
+                        continue;
+                    }
+
+                    var dirtyCount = await tileService.GetDirtyZoomTileCountAsync(tenant.Id);
+                    _logger.LogDebug("Tenant {TenantId}: {DirtyCount} dirty tiles pending", tenant.Id, dirtyCount);
+
                     var rebuiltCount = await tileService.RebuildIncompleteZoomTilesAsync(
                         tenant.Id,
                         gridStorage,

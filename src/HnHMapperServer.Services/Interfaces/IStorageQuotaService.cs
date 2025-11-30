@@ -48,4 +48,14 @@ public interface IStorageQuotaService
     /// <param name="gridStorage">Base grid storage path</param>
     /// <returns>Recalculated usage in MB</returns>
     Task<double> RecalculateStorageUsageAsync(string tenantId, string gridStorage);
+
+    /// <summary>
+    /// Updates storage usage from pre-calculated values (avoids duplicate filesystem scan).
+    /// Use this when you've already calculated the directory size to avoid redundant I/O.
+    /// </summary>
+    /// <param name="tenantId">Tenant ID</param>
+    /// <param name="gridStorage">Base grid storage path (for writing .storage.json)</param>
+    /// <param name="totalSizeBytes">Pre-calculated total size in bytes</param>
+    /// <param name="fileCount">Pre-calculated file count</param>
+    Task UpdateStorageFromCalculationAsync(string tenantId, string gridStorage, long totalSizeBytes, int fileCount);
 }

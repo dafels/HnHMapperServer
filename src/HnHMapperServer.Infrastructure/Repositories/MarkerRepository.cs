@@ -260,6 +260,54 @@ public class MarkerRepository : IMarkerRepository
         return newMarkers.Count;
     }
 
+    public async Task<List<Marker>> GetMarkersByTenantAsync(string tenantId)
+    {
+        // Explicit tenant filtering - bypasses global query filter for background services
+        var entities = await _context.Markers
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(m => m.TenantId == tenantId)
+            .ToListAsync();
+
+        return entities.Select(MapToDomain).ToList();
+    }
+
+    public async Task<int> BatchUpdateReadinessAsync(List<(int markerId, bool ready, long maxReady, long minReady)> updates, string tenantId)
+    {
+        if (updates.Count == 0)
+            return 0;
+
+        var markerIds = updates.Select(u => u.markerId).ToList();
+
+        // Fetch all markers to update in one query
+        var markers = await _context.Markers
+            .IgnoreQueryFilters()
+            .Where(m => m.TenantId == tenantId && markerIds.Contains(m.Id))
+            .ToListAsync();
+
+        if (markers.Count == 0)
+            return 0;
+
+        // Create a lookup for the updates
+        var updateLookup = updates.ToDictionary(u => u.markerId, u => u);
+
+        // Apply updates
+        foreach (var marker in markers)
+        {
+            if (updateLookup.TryGetValue(marker.Id, out var update))
+            {
+                marker.Ready = update.ready;
+                marker.MaxReady = update.maxReady;
+                marker.MinReady = update.minReady;
+            }
+        }
+
+        // Single SaveChanges for all updates
+        await _context.SaveChangesAsync();
+
+        return markers.Count;
+    }
+
     private static Marker MapToDomain(MarkerEntity entity) => new Marker
     {
         Id = entity.Id,
