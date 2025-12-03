@@ -7,6 +7,7 @@ import { TileSize, HnHMaxZoom } from './leaflet-config.js';
 const characters = {};
 let currentMapId = 0;
 let updateIntervalMs = 2000;
+let showTooltips = true; // Track tooltip visibility state
 
 /**
  * Set the current map ID for character filtering
@@ -68,7 +69,11 @@ export function addCharacter(characterData, mapInstance) {
     });
 
     marker.addTo(mapInstance);
-    marker.closeTooltip(); // Start with tooltip hidden
+    if (showTooltips) {
+        marker.openTooltip();
+    } else {
+        marker.closeTooltip();
+    }
 
     characters[characterData.id] = {
         marker: marker,
@@ -269,6 +274,7 @@ export function applyCharacterDelta(delta, mapInstance) {
  * @returns {boolean} - Always true
  */
 export function toggleCharacterTooltips(visible) {
+    showTooltips = visible; // Track state for new characters
     Object.values(characters).forEach(char => {
         if (visible) {
             char.marker.openTooltip();
