@@ -30,16 +30,7 @@ export function setUpdateInterval(intervalMs) {
  * @returns {boolean} - True if character was added
  */
 export function addCharacter(characterData, mapInstance) {
-    console.log('[Character] addCharacter called:', {
-        id: characterData.id,
-        name: characterData.name,
-        characterMap: characterData.map,
-        currentMapId: currentMapId,
-        willAdd: characterData.map === currentMapId
-    });
-
     if (characterData.map !== currentMapId) {
-        console.warn('[Character] Skipping character - wrong map:', characterData.map, 'current:', currentMapId);
         return false;
     }
 
@@ -221,7 +212,6 @@ export function setCharactersSnapshot(charactersData, mapInstance) {
         }
     }
 
-    console.log('[Characters] setCharactersSnapshot: added', added, ', updated', updated, 'characters, skipped', skippedWrongMap, 'wrong map');
     return true;
 }
 
@@ -259,10 +249,6 @@ export function applyCharacterDelta(delta, mapInstance) {
                 deleted++;
             }
         }
-    }
-
-    if (updated > 0 || deleted > 0) {
-        console.debug('[Characters] applyCharacterDelta: updated', updated, ', deleted', deleted);
     }
 
     return true;

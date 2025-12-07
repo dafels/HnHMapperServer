@@ -305,17 +305,9 @@ function connectSse() {
 
         // Characters snapshot event (initial full state)
         eventSource.addEventListener('charactersSnapshot', function (event) {
-            console.warn('[SSE] ===== charactersSnapshot event received =====');
-            console.warn('[SSE] Raw event data:', event.data);
             try {
                 const characters = JSON.parse(event.data);
-                console.warn('[SSE] Parsed characters array, length:', characters.length);
-                if (characters.length > 0) {
-                    console.warn('[SSE] First character:', characters[0]);
-                }
-                console.warn('[SSE] Calling OnSseCharactersSnapshot...');
                 invokeDotNetSafe('OnSseCharactersSnapshot', characters);
-                console.warn('[SSE] OnSseCharactersSnapshot call completed');
             } catch (e) {
                 console.error('[SSE] Error parsing charactersSnapshot event:', e);
             }
@@ -323,11 +315,8 @@ function connectSse() {
 
         // Character delta event (incremental updates)
         eventSource.addEventListener('characterDelta', function (event) {
-            console.warn('[SSE] ===== characterDelta event received =====');
-            console.warn('[SSE] Raw delta data:', event.data);
             try {
                 const delta = JSON.parse(event.data);
-                console.warn('[SSE] Parsed delta:', delta);
                 invokeDotNetSafe('OnSseCharacterDelta', delta);
             } catch (e) {
                 console.error('[SSE] Error parsing characterDelta event:', e);
