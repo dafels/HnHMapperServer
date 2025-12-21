@@ -110,7 +110,16 @@ public static partial class ClientEndpoints
             return Results.BadRequest("Invalid grid update payload");
 
         var gridStorage = configuration["GridStorage"] ?? "map";
-        var response = await gridService.ProcessGridUpdateAsync(gridUpdate, gridStorage);
+
+        GridRequestDto response;
+        try
+        {
+            response = await gridService.ProcessGridUpdateAsync(gridUpdate, gridStorage);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("disabled"))
+        {
+            return Results.Json(new { error = ex.Message }, statusCode: 403);
+        }
 
         // Bump map revision and notify clients to invalidate cache
         var newRevision = revisionCache.Increment(response.Map);
@@ -134,6 +143,7 @@ public static partial class ClientEndpoints
         IStorageQuotaService quotaService,
         ITenantFilePathService filePathService,
         ITenantActivityService activityService,
+        IConfigRepository configRepository,
         ILogger<Program> logger)
     {
         if (!await ClientTokenHelpers.HasUploadAsync(context, db, tokenService, token, logger))
@@ -145,6 +155,14 @@ public static partial class ClientEndpoints
         {
             logger.LogError("GridUpload: TenantId not found in context");
             return Results.Unauthorized();
+        }
+
+        // Check if grid updates are allowed for this tenant
+        var config = await configRepository.GetConfigAsync();
+        if (!config.AllowGridUpdates)
+        {
+            logger.LogWarning("GridUpload: Grid updates are disabled for tenant {TenantId}", tenantId);
+            return Results.Json(new { error = "Grid updates are disabled for this tenant" }, statusCode: 403);
         }
 
         // Record tenant activity

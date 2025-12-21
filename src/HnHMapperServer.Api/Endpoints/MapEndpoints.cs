@@ -269,7 +269,9 @@ public static class MapEndpoints
         {
             Title = config.Title,
             Permissions = permissions,
-            MainMapId = config.MainMapId
+            MainMapId = config.MainMapId,
+            AllowGridUpdates = config.AllowGridUpdates,
+            AllowNewMaps = config.AllowNewMaps
         };
 
         return Results.Json(response);

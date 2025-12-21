@@ -121,6 +121,51 @@
                 }
             </MudPaper>
 
+            @* Map Upload Settings *@
+            <MudPaper Elevation="2" Class="pa-4">
+                <MudText Typo="Typo.h6" Class="mb-3">
+                    <MudIcon Icon="@Icons.Material.Filled.Map" Class="me-2" />
+                    Map Upload Settings
+                </MudText>
+                <MudText Typo="Typo.body2" Class="mb-3">
+                    Control whether game clients can upload new tiles or create new maps.
+                </MudText>
+
+                <MudStack Spacing="2">
+                    <MudSwitch @bind-Value="@_allowGridUpdates"
+                              Label="Allow tile uploads to existing maps"
+                              Color="Color.Primary" />
+                    <MudText Typo="Typo.caption" Color="Color.Secondary" Class="ms-12">
+                        When disabled, game clients cannot upload new tiles to existing grids.
+                    </MudText>
+
+                    <MudSwitch @bind-Value="@_allowNewMaps"
+                              Label="Allow new map creation"
+                              Color="Color.Primary"
+                              Class="mt-2" />
+                    <MudText Typo="Typo.caption" Color="Color.Secondary" Class="ms-12">
+                        When disabled, game clients cannot create new maps (useful for locking down the map).
+                    </MudText>
+                </MudStack>
+
+                <MudButton Variant="Variant.Filled"
+                          Color="Color.Primary"
+                          StartIcon="@Icons.Material.Filled.Save"
+                          OnClick="SaveMapUploadSettings"
+                          Disabled="@_isSavingMapSettings"
+                          Class="mt-4">
+                    @if (_isSavingMapSettings)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                        <span>Saving...</span>
+                    }
+                    else
+                    {
+                        <span>Save Map Settings</span>
+                    }
+                </MudButton>
+            </MudPaper>
+
             @* Discord Integration *@
             <MudPaper Elevation="2" Class="pa-4">
                 <MudText Typo="Typo.h6" Class="mb-3">
@@ -249,6 +294,11 @@
     private bool _isSavingDiscord = false;
     private bool _isTestingDiscord = false;
 
+    // Map upload settings fields
+    private bool _allowGridUpdates = true;
+    private bool _allowNewMaps = true;
+    private bool _isSavingMapSettings = false;
+
     protected override async Task OnInitializedAsync()
     {
         await Task.WhenAll(LoadSettings(), LoadMaps());
@@ -365,7 +415,7 @@
                 }
             }
 
-            // Load current config to get main map ID
+            // Load current config to get main map ID and map upload settings
             var configResponse = await httpClient.GetAsync("/map/api/config");
             if (configResponse.IsSuccessStatusCode)
             {
@@ -373,6 +423,8 @@
                 if (config != null)
                 {
                     _selectedMainMapId = config.MainMapId;
+                    _allowGridUpdates = config.AllowGridUpdates;
+                    _allowNewMaps = config.AllowNewMaps;
                 }
             }
         }
@@ -430,6 +482,54 @@
         finally
         {
             _isSavingMainMap = false;
+        }
+    }
+
+    private async Task SaveMapUploadSettings()
+    {
+        _isSavingMapSettings = true;
+        try
+        {
+            var tenantId = TenantContext.CurrentTenant?.Id;
+            if (string.IsNullOrEmpty(tenantId))
+            {
+                var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+                tenantId = authState.User.FindFirst(HnHMapperServer.Core.Constants.AuthorizationConstants.ClaimTypes.TenantId)?.Value;
+            }
+
+            if (string.IsNullOrEmpty(tenantId))
+            {
+                Snackbar.Add("Unable to determine your tenant.", Severity.Error);
+                return;
+            }
+
+            var httpClient = HttpClientFactory.CreateClient("API");
+            var payload = new
+            {
+                AllowGridUpdates = _allowGridUpdates,
+                AllowNewMaps = _allowNewMaps
+            };
+            var response = await httpClient.PutAsJsonAsync($"/api/tenants/{tenantId}/config/map-upload-settings", payload);
+
+            if (response.IsSuccessStatusCode)
+            {
+                Snackbar.Add("Map upload settings saved successfully!", Severity.Success);
+            }
+            else
+            {
+                var error = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to save map upload settings: {StatusCode} - {Error}", response.StatusCode, error);
+                Snackbar.Add("Failed to save map upload settings.", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error saving map upload settings");
+            Snackbar.Add("Failed to save map upload settings.", Severity.Error);
+        }
+        finally
+        {
+            _isSavingMapSettings = false;
         }
     }
 

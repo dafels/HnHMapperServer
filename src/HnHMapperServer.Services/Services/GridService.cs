@@ -65,6 +65,13 @@ public class GridService : IGridService
             var config = await _configRepository.GetConfigAsync();
             var tenantId = _tenantContext.GetRequiredTenantId();
 
+            // Check if new map creation is allowed for this tenant
+            if (!config.AllowNewMaps)
+            {
+                _logger.LogWarning("New map creation is disabled for tenant {TenantId}", tenantId);
+                throw new InvalidOperationException("New map creation is disabled for this tenant");
+            }
+
             // Generate unique icon-based name (e.g., "arrow-wagon-4273")
             var mapName = await _mapNameService.GenerateUniqueIdentifierAsync(tenantId);
 

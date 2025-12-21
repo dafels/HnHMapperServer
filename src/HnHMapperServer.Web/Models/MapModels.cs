@@ -94,6 +94,8 @@ public class MapConfig
     public string Title { get; set; } = string.Empty;
     public List<string> Permissions { get; set; } = new();
     public int? MainMapId { get; set; }
+    public bool AllowGridUpdates { get; set; } = true;
+    public bool AllowNewMaps { get; set; } = true;
 }
 
 public class CharacterDeltaModel

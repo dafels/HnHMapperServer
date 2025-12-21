@@ -40,6 +40,16 @@ public class ConfigRepository : IConfigRepository
         if (mainMapEntity != null && int.TryParse(mainMapEntity.Value, out var mainMapId))
             config.MainMapId = mainMapId;
 
+        // AllowGridUpdates is tenant-scoped (default true if not set)
+        var allowGridUpdatesEntity = await _context.Config
+            .FirstOrDefaultAsync(c => c.Key == "allowGridUpdates");
+        config.AllowGridUpdates = allowGridUpdatesEntity == null || allowGridUpdatesEntity.Value == "true";
+
+        // AllowNewMaps is tenant-scoped (default true if not set)
+        var allowNewMapsEntity = await _context.Config
+            .FirstOrDefaultAsync(c => c.Key == "allowNewMaps");
+        config.AllowNewMaps = allowNewMapsEntity == null || allowNewMapsEntity.Value == "true";
+
         return config;
     }
 
@@ -68,6 +78,26 @@ public class ConfigRepository : IConfigRepository
         else
         {
             await DeleteValueAsync("mainMap");
+        }
+
+        // AllowGridUpdates is tenant-scoped (only store if false, default is true)
+        if (!config.AllowGridUpdates)
+        {
+            await SetValueAsync("allowGridUpdates", "false");
+        }
+        else
+        {
+            await DeleteValueAsync("allowGridUpdates");
+        }
+
+        // AllowNewMaps is tenant-scoped (only store if false, default is true)
+        if (!config.AllowNewMaps)
+        {
+            await SetValueAsync("allowNewMaps", "false");
+        }
+        else
+        {
+            await DeleteValueAsync("allowNewMaps");
         }
     }
 

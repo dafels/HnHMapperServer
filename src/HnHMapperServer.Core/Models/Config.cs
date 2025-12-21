@@ -9,6 +9,8 @@ public class Config
     public string Prefix { get; set; } = "https://hnhmap.xyz";
     public bool DefaultHide { get; set; }
     public int? MainMapId { get; set; }
+    public bool AllowGridUpdates { get; set; } = true;
+    public bool AllowNewMaps { get; set; } = true;
 }
 
 /// <summary>
