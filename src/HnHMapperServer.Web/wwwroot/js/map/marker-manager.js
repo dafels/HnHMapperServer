@@ -137,7 +137,7 @@ export function addMarker(markerData, mapInstance, skipStorage = false) {
         return false;
     }
 
-    const iconUrl = `${markerData.image}.png`;
+    const iconUrl = `/${markerData.image}.png`;
     const isCustom = markerData.image === "gfx/terobjs/mm/custom";
     const isCave = markerData.name.toLowerCase() === "cave";
     const isThingwall = markerData.type === "thingwall";
@@ -160,7 +160,7 @@ export function addMarker(markerData, mapInstance, skipStorage = false) {
     let icon;
     if (markerData.timerText) {
         // Use divIcon for markers with timers to allow HTML overlay
-        const actualIconUrl = isCave ? 'gfx/hud/mmap/cave.png' : iconUrl;
+        const actualIconUrl = isCave ? '/gfx/hud/mmap/cave.png' : iconUrl;
         icon = L.divIcon({
             html: `
                 <div class="marker-with-timer">
@@ -176,7 +176,7 @@ export function addMarker(markerData, mapInstance, skipStorage = false) {
     } else {
         // Use regular icon for markers without timers
         icon = L.icon({
-            iconUrl: isCave ? 'gfx/hud/mmap/cave.png' : iconUrl,
+            iconUrl: isCave ? '/gfx/hud/mmap/cave.png' : iconUrl,
             iconSize: iconSize,
             iconAnchor: iconAnchor
         });
