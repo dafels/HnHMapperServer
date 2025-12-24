@@ -1033,6 +1033,9 @@ export function setClusteringEnabled(enabled) {
     MarkerManager.setMarkerLayers(markerLayer, detailedMarkerLayer);
     CustomMarkerManager.initializeCustomMarkerManager(customMarkerLayer, invokeDotNetSafe);
 
+    // Re-apply filter visibility (CSS styles were lost when markers moved between layers)
+    MarkerManager.refreshMarkerVisibility(mapInstance);
+
     console.log('[Leaflet] Clustering', enabled ? 'enabled' : 'disabled',
         '- moved', markersList.length, 'game markers and', customMarkersList.length, 'custom markers');
 

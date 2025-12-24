@@ -199,6 +199,10 @@ function connectSse() {
 
         // Game marker created event
         eventSource.addEventListener('markerCreated', function (event) {
+            // Skip while tab is hidden to prevent queue buildup
+            if (document.hidden) {
+                return;
+            }
             try {
                 const marker = JSON.parse(event.data);
                 invokeDotNetSafe('OnMarkerCreated', marker);
@@ -209,6 +213,10 @@ function connectSse() {
 
         // Game marker updated event
         eventSource.addEventListener('markerUpdated', function (event) {
+            // Skip while tab is hidden to prevent queue buildup
+            if (document.hidden) {
+                return;
+            }
             try {
                 const marker = JSON.parse(event.data);
                 invokeDotNetSafe('OnMarkerUpdated', marker);
@@ -329,6 +337,10 @@ function connectSse() {
 
         // Characters snapshot event (initial full state)
         eventSource.addEventListener('charactersSnapshot', function (event) {
+            // Skip snapshots while tab is hidden to prevent freeze on tab return
+            if (document.hidden) {
+                return;
+            }
             try {
                 const characters = JSON.parse(event.data);
                 invokeDotNetSafe('OnSseCharactersSnapshot', characters);
