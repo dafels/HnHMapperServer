@@ -7,30 +7,6 @@ let isConnecting = false;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY = 5000; // 5 seconds max backoff
 
-// Tab visibility tracking - skip stale events when tab is hidden
-let tabJustBecameVisible = false;
-
-// Handle tab visibility changes to prevent freeze on tab switch
-document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
-        // Tab became visible - flag to skip animations on next delta
-        tabJustBecameVisible = true;
-        console.log('[SSE] Tab became visible - will skip animations on next update');
-    }
-});
-
-/**
- * Check if animations should be skipped (tab just became visible)
- * Returns true once, then resets the flag
- */
-export function shouldSkipAnimations() {
-    if (tabJustBecameVisible) {
-        tabJustBecameVisible = false;
-        return true;
-    }
-    return false;
-}
-
 /**
  * Initialize SSE connection to /map/updates with browser cookies
  * @param {object} dotnetReference - DotNet object reference for callbacks
@@ -199,10 +175,6 @@ function connectSse() {
 
         // Game marker created event
         eventSource.addEventListener('markerCreated', function (event) {
-            // Skip while tab is hidden to prevent queue buildup
-            if (document.hidden) {
-                return;
-            }
             try {
                 const marker = JSON.parse(event.data);
                 invokeDotNetSafe('OnMarkerCreated', marker);
@@ -213,10 +185,6 @@ function connectSse() {
 
         // Game marker updated event
         eventSource.addEventListener('markerUpdated', function (event) {
-            // Skip while tab is hidden to prevent queue buildup
-            if (document.hidden) {
-                return;
-            }
             try {
                 const marker = JSON.parse(event.data);
                 invokeDotNetSafe('OnMarkerUpdated', marker);
@@ -337,10 +305,6 @@ function connectSse() {
 
         // Characters snapshot event (initial full state)
         eventSource.addEventListener('charactersSnapshot', function (event) {
-            // Skip snapshots while tab is hidden to prevent freeze on tab return
-            if (document.hidden) {
-                return;
-            }
             try {
                 const characters = JSON.parse(event.data);
                 invokeDotNetSafe('OnSseCharactersSnapshot', characters);
@@ -351,10 +315,6 @@ function connectSse() {
 
         // Character delta event (incremental updates)
         eventSource.addEventListener('characterDelta', function (event) {
-            // Skip deltas while tab is hidden to prevent queue buildup
-            if (document.hidden) {
-                return;
-            }
             try {
                 const delta = JSON.parse(event.data);
                 invokeDotNetSafe('OnSseCharacterDelta', delta);

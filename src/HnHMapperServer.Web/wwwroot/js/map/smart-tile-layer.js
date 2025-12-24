@@ -34,11 +34,6 @@ export const SmartTileLayer = L.TileLayer.extend({
             return '';  // Return empty string to skip tile request
         }
 
-        // Skip tile requests while tab is hidden to prevent queue buildup
-        if (document.hidden) {
-            return '';
-        }
-
         // Get grid offsets (in grid coordinates, constant across zoom)
         const gridOffsetX = this.offsetX || 0;
         const gridOffsetY = this.offsetY || 0;

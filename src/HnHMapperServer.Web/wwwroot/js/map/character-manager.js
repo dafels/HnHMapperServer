@@ -10,23 +10,6 @@ let updateIntervalMs = 2000;
 let showTooltips = true; // Track tooltip visibility state
 let myCharacterName = null; // Name of "my character" for highlighting
 
-// Tab visibility tracking - skip animations when tab becomes visible to prevent freeze
-let skipNextAnimation = false;
-document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
-        // Tab just became visible - skip animation on next update
-        skipNextAnimation = true;
-    }
-});
-
-function shouldSkipAnimations() {
-    if (skipNextAnimation) {
-        skipNextAnimation = false;
-        return true;
-    }
-    return false;
-}
-
 // Icon cache to avoid recreating L.icon objects on every update (40 allocations/sec → ~0)
 // Key format: "iconUrl:size:className"
 const iconCache = {};
@@ -167,14 +150,12 @@ export function addCharacter(characterData, mapInstance) {
         data: characterData
     };
 
-    // Animate movement (skip animation if tab just became visible to prevent freeze)
-    if (!shouldSkipAnimations()) {
-        const slideTo = getSlideToPosition(characterData.speed, characterData.rotation, characterData.position.x, characterData.position.y);
-        const slidePosition = mapInstance.unproject([slideTo.x, slideTo.y], HnHMaxZoom);
+    // Animate movement
+    const slideTo = getSlideToPosition(characterData.speed, characterData.rotation, characterData.position.x, characterData.position.y);
+    const slidePosition = mapInstance.unproject([slideTo.x, slideTo.y], HnHMaxZoom);
 
-        if (marker.slideTo) {
-            marker.slideTo(slidePosition, { duration: updateIntervalMs });
-        }
+    if (marker.slideTo) {
+        marker.slideTo(slidePosition, { duration: updateIntervalMs });
     }
 
     return true;
@@ -221,14 +202,12 @@ export function updateCharacter(characterId, characterData, mapInstance) {
         marker.setRotationAngle(characterData.rotation);
     }
 
-    // Animate movement (skip animation if tab just became visible to prevent freeze)
-    if (!shouldSkipAnimations()) {
-        const slideTo = getSlideToPosition(characterData.speed, characterData.rotation, characterData.position.x, characterData.position.y);
-        const slidePosition = mapInstance.unproject([slideTo.x, slideTo.y], HnHMaxZoom);
+    // Animate movement
+    const slideTo = getSlideToPosition(characterData.speed, characterData.rotation, characterData.position.x, characterData.position.y);
+    const slidePosition = mapInstance.unproject([slideTo.x, slideTo.y], HnHMaxZoom);
 
-        if (marker.slideTo) {
-            marker.slideTo(slidePosition, { duration: updateIntervalMs });
-        }
+    if (marker.slideTo) {
+        marker.slideTo(slidePosition, { duration: updateIntervalMs });
     }
 
     char.data = characterData;

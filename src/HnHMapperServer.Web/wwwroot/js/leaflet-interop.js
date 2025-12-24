@@ -290,11 +290,6 @@ export async function initializeMap(mapElementId, dotnetReference) {
     // Use 'zoomend' instead of 'zoom' to avoid triggering Blazor render cycles during zoom animation
     // Debounce expensive operations (prefetch, cache clearing, callbacks) to reduce excessive requests during rapid zoom
     mapInstance.on('zoomend', () => {
-        // Skip all zoomend processing while tab is hidden to prevent freeze on tab return
-        if (document.hidden) {
-            return;
-        }
-
         const zoom = mapInstance.getZoom();
 
         // IMMEDIATE: Show/hide detailed markers (zoom-dependent UI - no debounce needed)
