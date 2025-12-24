@@ -322,22 +322,17 @@ export const SmartTileLayer = L.TileLayer.extend({
         // Track loading state
         this.tilesLoading++;
 
-        // Update loading overlay if it exists
-        this._updateLoadingOverlay();
-
         // Wrap the done callback to track when tile finishes loading
         const originalDone = done;
         const self = this;
 
         tile.addEventListener('load', function() {
             self.tilesLoading = Math.max(0, self.tilesLoading - 1);
-            self._updateLoadingOverlay();
             if (originalDone) originalDone(null, tile);
         });
 
         tile.addEventListener('error', function() {
             self.tilesLoading = Math.max(0, self.tilesLoading - 1);
-            self._updateLoadingOverlay();
             // Hide the broken image by clearing src and making invisible
             tile.src = '';
             tile.style.visibility = 'hidden';
