@@ -83,27 +83,26 @@ export function getHiddenMarkerTypes() {
 
 /**
  * Refresh marker visibility based on current hidden types
- * Removes markers that should be hidden, keeps visible ones
+ * Uses CSS display toggle for existing markers, adds markers that weren't loaded due to filter
  * @param {object} mapInstance - Leaflet map instance
  */
 export function refreshMarkerVisibility(mapInstance) {
-    // Remove markers whose type is now hidden
-    const idsToRemove = [];
-    Object.keys(markers).forEach(id => {
-        const mark = markers[id];
-        if (hiddenMarkerTypes.has(mark.data.image)) {
-            // Remove from the appropriate layer group
-            if (markerLayer && markerLayer.hasLayer(mark.marker)) {
-                markerLayer.removeLayer(mark.marker);
-            }
-            if (detailedMarkerLayer && detailedMarkerLayer.hasLayer(mark.marker)) {
-                detailedMarkerLayer.removeLayer(mark.marker);
-            }
-            idsToRemove.push(id);
+    // 1. Toggle visibility of existing markers via CSS (fast, reversible)
+    Object.values(markers).forEach(mark => {
+        const isHidden = hiddenMarkerTypes.has(mark.data.image);
+        const el = mark.marker.getElement();
+        if (el) {
+            el.style.display = isHidden ? 'none' : '';
         }
     });
-    // Clean up markers object
-    idsToRemove.forEach(id => delete markers[id]);
+
+    // 2. Add markers from allMarkerData that are now visible but weren't loaded
+    // (because they were hidden when initially added)
+    Object.values(allMarkerData).forEach(markerData => {
+        if (!markers[markerData.id] && !hiddenMarkerTypes.has(markerData.image)) {
+            addMarker(markerData, mapInstance, true); // skipStorage=true
+        }
+    });
 }
 
 /**
