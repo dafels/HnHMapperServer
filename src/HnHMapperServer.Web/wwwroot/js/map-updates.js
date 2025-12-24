@@ -359,7 +359,13 @@ function scheduleManualReconnect() {
     console.debug(`[SSE] Scheduling manual reconnect in ${delay}ms`);
 
     setTimeout(() => {
-        if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
+        // Clean up closed EventSource before reconnecting
+        if (eventSource && eventSource.readyState === EventSource.CLOSED) {
+            eventSource.close(); // Ensure cleanup
+            eventSource = null;
+        }
+
+        if (!eventSource) {
             connectSse();
         }
     }, delay);

@@ -13,6 +13,8 @@ export const SmartTileLayer = L.TileLayer.extend({
     revisionDebounce: {},   // Map ID → timeout handle for debouncing revision updates
     negativeCache: {},      // Temporary negative cache: cacheKey → expiry timestamp (Date.now() + TTL)
     negativeCacheTTL: 30000, // 30 seconds TTL for negative cache (reduced from 2 minutes for faster retry)
+    negativeCacheKeys: [],  // Track insertion order for LRU eviction
+    negativeCacheMaxSize: 10000, // Maximum entries to prevent memory bloat
     tileStates: {},         // Track tile loading state: tileKey → 'new'|'loaded'|'refreshing'
     tilesLoading: 0,        // Count of currently loading tiles
     tileQueue: [],          // Progressive loading queue: sorted by distance from center
@@ -228,7 +230,7 @@ export const SmartTileLayer = L.TileLayer.extend({
 
         preloader.onerror = () => {
             // Mark as temporarily unavailable but keep old tile visible
-            self.negativeCache[cacheKey] = Date.now() + self.negativeCacheTTL;
+            self._addToNegativeCache(cacheKey);
             // Reset state
             self.tileStates[cacheKey] = tileState;
         };
@@ -367,6 +369,49 @@ export const SmartTileLayer = L.TileLayer.extend({
         });
 
         return tile;
+    },
+
+    // Add entry to negative cache with LRU eviction
+    _addToNegativeCache: function (cacheKey) {
+        const now = Date.now();
+
+        // If key already exists, just update expiry
+        if (this.negativeCache[cacheKey]) {
+            this.negativeCache[cacheKey] = now + this.negativeCacheTTL;
+            return;
+        }
+
+        // Evict oldest entries if at max size
+        while (this.negativeCacheKeys.length >= this.negativeCacheMaxSize) {
+            const oldestKey = this.negativeCacheKeys.shift();
+            delete this.negativeCache[oldestKey];
+        }
+
+        // Also clean up expired entries periodically (every 100 insertions)
+        if (this.negativeCacheKeys.length > 0 && this.negativeCacheKeys.length % 100 === 0) {
+            this._cleanExpiredNegativeCache();
+        }
+
+        // Add new entry
+        this.negativeCache[cacheKey] = now + this.negativeCacheTTL;
+        this.negativeCacheKeys.push(cacheKey);
+    },
+
+    // Remove expired entries from negative cache
+    _cleanExpiredNegativeCache: function () {
+        const now = Date.now();
+        const validKeys = [];
+
+        for (let i = 0; i < this.negativeCacheKeys.length; i++) {
+            const key = this.negativeCacheKeys[i];
+            if (this.negativeCache[key] && this.negativeCache[key] > now) {
+                validKeys.push(key);
+            } else {
+                delete this.negativeCache[key];
+            }
+        }
+
+        this.negativeCacheKeys = validKeys;
     },
 
     // Update loading overlay based on tiles loading
