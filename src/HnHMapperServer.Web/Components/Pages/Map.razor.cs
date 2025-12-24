@@ -470,14 +470,17 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             // No delay needed - this is called from HandleMapInitialized after Leaflet 'load' event
             // The map is guaranteed to be ready at this point (event-driven architecture)
 
-            // Load markers for current map
-            var markersToLoad = MarkerState.GetMarkersForMap(MapNavigation.CurrentMapId).ToList();
+            // Load markers for current map (only if markers layer is enabled)
+            if (LayerVisibility.ShowMarkers)
+            {
+                var markersToLoad = MarkerState.GetMarkersForMap(MapNavigation.CurrentMapId).ToList();
 
-            // Enrich markers with timer data before adding to map
-            EnrichMarkersWithTimerData(markersToLoad);
+                // Enrich markers with timer data before adding to map
+                EnrichMarkersWithTimerData(markersToLoad);
 
-            // Batch add all markers in a single JS interop call for performance
-            await mapView.AddMarkersAsync(markersToLoad);
+                // Batch add all markers in a single JS interop call for performance
+                await mapView.AddMarkersAsync(markersToLoad);
+            }
 
             // Load custom markers
             await TryRenderPendingCustomMarkersAsync();

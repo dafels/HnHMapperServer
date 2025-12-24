@@ -22,7 +22,7 @@ public class LayerVisibilityService
     /// <summary>
     /// Whether to show markers
     /// </summary>
-    private bool _showMarkers = true;
+    private bool _showMarkers = false;
 
     /// <summary>
     /// Whether to show thingwall markers
@@ -364,7 +364,7 @@ public class LayerVisibilityService
     {
         _showPlayers = true;
         _showPlayerTooltips = true;
-        _showMarkers = true;
+        _showMarkers = false;
         _showThingwalls = true;
         _showThingwallTooltips = false;
         _showQuests = true;

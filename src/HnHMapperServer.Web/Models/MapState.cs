@@ -10,7 +10,7 @@ public class MapState
 
     // Visibility toggles
     public bool ShowGridCoordinates { get; set; }
-    public bool ShowMarkers { get; set; } = true;
+    public bool ShowMarkers { get; set; } = false;
     public bool ShowCustomMarkers { get; set; } = true;
     public bool ShowThingwalls { get; set; } = true;
     public bool ShowQuests { get; set; }
