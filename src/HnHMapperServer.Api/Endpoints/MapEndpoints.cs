@@ -445,9 +445,12 @@ public static class MapEndpoints
         bool hasPointerAuth = HasPermission(context.User, Permission.Pointer);
 
         context.Response.ContentType = "text/event-stream; charset=utf-8";
-        context.Response.Headers.Append("Cache-Control", "no-cache");
-        context.Response.Headers.Append("X-Accel-Buffering", "no");
+        context.Response.Headers.Append("Cache-Control", "no-cache, no-store, must-revalidate");
+        context.Response.Headers.Append("X-Accel-Buffering", "no");  // nginx
+        context.Response.Headers.Append("X-Content-Type-Options", "nosniff");
         context.Response.Headers.Append("Connection", "keep-alive");
+        context.Response.Headers.Append("Pragma", "no-cache");  // HTTP/1.0 proxies
+        context.Response.Headers.Append("Expires", "0");
 
         // Disable Kestrel's MinResponseDataRate to prevent SSE connection timeout
         // Without this, Kestrel will abort connections that don't send ~240 bytes/second
@@ -1047,9 +1050,10 @@ public static class MapEndpoints
                 else
                 {
                     // Heartbeat: keep the SSE connection alive even when there are no updates
-                    // Send a comment event every ~15 seconds (30 x 500ms ticks)
+                    // Send a comment event every ~5 seconds (10 x 500ms ticks)
+                    // Reduced from 15s to 5s because VPNs/proxies often timeout idle connections at 10s
                     idleTicks++;
-                    if (idleTicks % 30 == 0)
+                    if (idleTicks % 10 == 0)
                     {
                         await context.Response.WriteAsync(": keep-alive\n\n");
                         await context.Response.Body.FlushAsync();

@@ -7,6 +7,19 @@ let isConnecting = false;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY = 5000; // 5 seconds max backoff
 
+// Polling fallback configuration (for VPN users where SSE fails)
+let isPollingMode = false;
+let pollInterval = null;
+let sseFailureCount = 0;
+const SSE_FAILURE_THRESHOLD = 3;  // Switch to polling after 3 consecutive SSE failures
+const POLL_INTERVAL_MS = 3000;    // Poll every 3 seconds
+
+// Connection health monitoring
+let lastEventTime = 0;
+let healthCheckInterval = null;
+const HEALTH_CHECK_INTERVAL = 8000;  // Check every 8 seconds
+const CONNECTION_TIMEOUT = 12000;    // 12 seconds without data = unhealthy
+
 // Track the highest tile cache token (T) we've seen.
 //
 // Why:
@@ -19,10 +32,13 @@ const MAX_RECONNECT_DELAY = 5000; // 5 seconds max backoff
 // - This assumes tile cache tokens (T) are monotonically increasing in practice (timestamp-like).
 let lastTileCache = 0;
 
+// Track if initial data has been loaded via HTTP
+let initialDataLoaded = false;
+
 /**
- * Initialize SSE connection to /map/updates with browser cookies
+ * Initialize map updates - fetches initial data via HTTP first, then tries SSE for real-time updates
  * @param {object} dotnetReference - DotNet object reference for callbacks
- * @returns {Promise<boolean>} - true if connection initiated successfully
+ * @returns {Promise<boolean>} - true if initialization successful
  */
 export async function initializeSseUpdates(dotnetReference) {
     console.warn('[SSE] ===== initializeSseUpdates called =====');
@@ -41,6 +57,28 @@ export async function initializeSseUpdates(dotnetReference) {
         }
     }
 
+    // If already in polling mode, just ensure polling is running
+    if (isPollingMode) {
+        console.warn('[SSE] Already in polling mode, ensuring polling is active');
+        if (!pollInterval) startPolling();
+        return true;
+    }
+
+    // STEP 1: Fetch initial data via HTTP immediately (doesn't depend on SSE)
+    // This ensures the map loads even if SSE is blocked by VPN/proxy
+    if (!initialDataLoaded) {
+        console.warn('[HTTP] Fetching initial map data via HTTP...');
+        try {
+            await fetchInitialData();
+            initialDataLoaded = true;
+            console.warn('[HTTP] Initial data loaded successfully');
+        } catch (error) {
+            console.error('[HTTP] Failed to fetch initial data:', error);
+            // Continue anyway - SSE might still work
+        }
+    }
+
+    // STEP 2: Try to establish SSE connection for real-time updates
     console.warn('[SSE] Calling connectSse...');
     const result = connectSse();
     console.warn('[SSE] connectSse returned:', result);
@@ -99,10 +137,17 @@ function connectSse() {
             console.warn('[SSE] ===== CONNECTED to /map/updates =====');
             isConnecting = false;
             reconnectAttempts = 0;
+            sseFailureCount = 0;  // Reset failure count on successful connection
+            lastEventTime = Date.now();
+            startHealthCheck();
+
+            // Notify Blazor of connection mode
+            invokeDotNetSafe('OnConnectionModeChanged', 'sse');
         };
 
         // Default message handler (tile updates - batched every 5s)
         eventSource.onmessage = function (event) {
+            lastEventTime = Date.now();  // Track last event for health monitoring
             try {
                 // NOTE:
                 // The server may stream a large initial tile cache as many smaller SSE messages.
@@ -385,9 +430,17 @@ function connectSse() {
             console.error('[SSE] ReadyState meanings: 0=CONNECTING, 1=OPEN, 2=CLOSED');
             isConnecting = false;
 
-            // EventSource automatically reconnects; we just track for logging
+            // Track consecutive failures
             reconnectAttempts++;
-            console.error('[SSE] Reconnect attempt:', reconnectAttempts);
+            sseFailureCount++;
+            console.error('[SSE] Reconnect attempt:', reconnectAttempts, 'SSE failure count:', sseFailureCount);
+
+            // Switch to polling mode if SSE consistently fails (VPN/proxy blocking)
+            if (sseFailureCount >= SSE_FAILURE_THRESHOLD) {
+                console.warn('[SSE] Too many failures (' + sseFailureCount + '), switching to polling mode');
+                switchToPollingMode();
+                return;
+            }
 
             // If auth fails (401), EventSource will keep retrying
             // The server-side fix ensures cookies work, so this should resolve
@@ -474,5 +527,234 @@ export function isSseConnected() {
     return eventSource !== null && eventSource.readyState === EventSource.OPEN;
 }
 
+/**
+ * Get current connection mode
+ * @returns {string} 'sse', 'polling', 'connecting', or 'disconnected'
+ */
+export function getConnectionMode() {
+    if (isPollingMode) return 'polling';
+    if (eventSource && eventSource.readyState === EventSource.OPEN) return 'sse';
+    if (isConnecting) return 'connecting';
+    return 'disconnected';
+}
 
+/**
+ * Start connection health monitoring
+ * Detects stale connections and forces reconnect
+ */
+function startHealthCheck() {
+    stopHealthCheck();
+    healthCheckInterval = setInterval(() => {
+        const timeSinceLastEvent = Date.now() - lastEventTime;
+        if (timeSinceLastEvent > CONNECTION_TIMEOUT && eventSource) {
+            console.warn('[SSE] Connection appears stale (no events for ' + Math.round(timeSinceLastEvent / 1000) + 's), forcing reconnect');
+            sseFailureCount++;
 
+            if (sseFailureCount >= SSE_FAILURE_THRESHOLD) {
+                console.warn('[SSE] Too many stale connections, switching to polling mode');
+                switchToPollingMode();
+            } else {
+                // Force reconnect
+                if (eventSource) {
+                    eventSource.close();
+                    eventSource = null;
+                }
+                scheduleManualReconnect();
+            }
+        }
+    }, HEALTH_CHECK_INTERVAL);
+}
+
+/**
+ * Stop health check interval
+ */
+function stopHealthCheck() {
+    if (healthCheckInterval) {
+        clearInterval(healthCheckInterval);
+        healthCheckInterval = null;
+    }
+}
+
+/**
+ * Switch to polling mode when SSE consistently fails
+ */
+function switchToPollingMode() {
+    if (isPollingMode) return;
+
+    console.log('[POLL] Switching to polling mode');
+    isPollingMode = true;
+
+    // Clean up SSE connection
+    stopHealthCheck();
+    if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+    }
+    isConnecting = false;
+
+    // Notify Blazor of mode change
+    invokeDotNetSafe('OnConnectionModeChanged', 'polling');
+
+    // Start polling
+    startPolling();
+}
+
+/**
+ * Start polling interval
+ */
+function startPolling() {
+    stopPolling();
+
+    // Initial poll immediately
+    poll();
+
+    // Regular polling
+    pollInterval = setInterval(poll, POLL_INTERVAL_MS);
+}
+
+/**
+ * Stop polling interval
+ */
+function stopPolling() {
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
+}
+
+/**
+ * Fetch initial map data via HTTP (called before SSE connection attempt)
+ * This ensures the map loads immediately even if SSE is blocked
+ */
+async function fetchInitialData() {
+    const response = await fetch('/map/api/v1/poll', {
+        credentials: 'include'
+    });
+
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Process tiles (initial full load)
+    if (data.tiles && data.tiles.length > 0) {
+        console.log('[HTTP] Received', data.tiles.length, 'tiles');
+
+        // Update lastTileCache
+        for (const t of data.tiles) {
+            const cache = t.T ?? t.t;
+            if (typeof cache === 'number' && Number.isFinite(cache) && cache > lastTileCache) {
+                lastTileCache = cache;
+            }
+        }
+
+        // Apply tile updates
+        try {
+            const fastApply = window?.hnhMapper?.applyTileUpdates;
+            if (typeof fastApply === 'function') {
+                fastApply(data.tiles);
+            } else {
+                invokeDotNetSafe('OnSseTileUpdates', data.tiles);
+            }
+        } catch (e) {
+            console.error('[HTTP] Error applying tile updates:', e);
+        }
+    }
+
+    // Process characters
+    if (data.characters) {
+        console.log('[HTTP] Received', data.characters.length, 'characters');
+        invokeDotNetSafe('OnSseCharactersSnapshot', data.characters);
+    }
+
+    // Process map revisions
+    if (data.mapRevisions) {
+        for (const [mapId, revision] of Object.entries(data.mapRevisions)) {
+            const mapIdNum = parseInt(mapId, 10);
+            if (Number.isFinite(mapIdNum) && Number.isFinite(revision)) {
+                invokeDotNetSafe('OnSseMapRevision', mapIdNum, revision);
+            }
+        }
+    }
+}
+
+/**
+ * Poll the server for updates (fallback when SSE fails)
+ */
+async function poll() {
+    try {
+        const params = new URLSearchParams();
+        if (typeof lastTileCache === 'number' && Number.isFinite(lastTileCache) && lastTileCache > 0) {
+            params.set('since', String(lastTileCache));
+        }
+
+        const response = await fetch(`/map/api/v1/poll?${params.toString()}`, {
+            credentials: 'include'
+        });
+
+        if (!response.ok) {
+            console.error('[POLL] Request failed:', response.status);
+            return;
+        }
+
+        const data = await response.json();
+
+        // Process tiles
+        if (data.tiles && data.tiles.length > 0) {
+            // Update lastTileCache
+            for (const t of data.tiles) {
+                const cache = t.T ?? t.t;
+                if (typeof cache === 'number' && Number.isFinite(cache) && cache > lastTileCache) {
+                    lastTileCache = cache;
+                }
+            }
+
+            // Apply tile updates
+            try {
+                const fastApply = window?.hnhMapper?.applyTileUpdates;
+                if (typeof fastApply === 'function') {
+                    fastApply(data.tiles);
+                } else {
+                    invokeDotNetSafe('OnSseTileUpdates', data.tiles);
+                }
+            } catch (e) {
+                console.error('[POLL] Error applying tile updates:', e);
+            }
+        }
+
+        // Process characters as snapshot
+        if (data.characters) {
+            invokeDotNetSafe('OnSseCharactersSnapshot', data.characters);
+        }
+
+        // Process map revisions
+        if (data.mapRevisions) {
+            for (const [mapId, revision] of Object.entries(data.mapRevisions)) {
+                const mapIdNum = parseInt(mapId, 10);
+                if (Number.isFinite(mapIdNum) && Number.isFinite(revision)) {
+                    invokeDotNetSafe('OnSseMapRevision', mapIdNum, revision);
+                }
+            }
+        }
+
+    } catch (error) {
+        console.error('[POLL] Error:', error);
+    }
+}
+
+/**
+ * Retry SSE connection from polling mode
+ * @returns {boolean} true if retry initiated
+ */
+export function retrySseConnection() {
+    if (!isPollingMode) return false;
+
+    console.log('[SSE] Retrying SSE connection from polling mode');
+    stopPolling();
+    isPollingMode = false;
+    sseFailureCount = 0;
+    reconnectAttempts = 0;
+
+    return connectSse();
+}

@@ -112,6 +112,16 @@
                     </MudChip>
                 }
 
+                <!-- Polling Mode Indicator (floating) - shown when SSE fails and polling fallback is active -->
+                @if (connectionMode == "polling")
+                {
+                    <MudChip T="string" Color="Color.Warning"
+                             Icon="@Icons.Material.Filled.Sync"
+                             Style="@GetPollingIndicatorStyle()">
+                        Polling Mode
+                    </MudChip>
+                }
+
                 <!-- Overlay Toggle Buttons - Top Left (below Leaflet zoom controls) -->
                 <div style="position: fixed; top: 160px; left: 16px; z-index: 1400; display: flex; flex-direction: column; gap: 8px;">
                     <MudTooltip Text="Toggle Player Claims" Placement="Placement.Right">

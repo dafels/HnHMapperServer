@@ -86,6 +86,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     private bool isReconnecting = false;
     private bool circuitFullyReady = false;  // Prevents JS->NET calls during circuit initialization
     private bool hiddenMarkerGroupsLoaded = false;  // Ensures filter state is loaded before markers
+    private string connectionMode = "connecting";  // Current connection mode: sse, polling, connecting, disconnected
 
     private Timer? markerUpdateTimer;
     private Timer? permissionCheckTimer;
@@ -1935,6 +1936,36 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         HandleMapRevision(mapId, revision);
     }
 
+    /// <summary>
+    /// Called from JavaScript when connection mode changes (SSE vs polling)
+    /// </summary>
+    [JSInvokable]
+    public void OnConnectionModeChanged(string mode)
+    {
+        Logger.LogInformation("Connection mode changed to: {Mode}", mode);
+        connectionMode = mode;
+
+        // Show notification when switching to polling mode
+        if (mode == "polling")
+        {
+            Snackbar.Add("Real-time connection unavailable. Using polling mode (updates every 3s).", Severity.Warning, config =>
+            {
+                config.ShowCloseIcon = true;
+                config.VisibleStateDuration = 10000;
+            });
+        }
+        else if (mode == "sse" && connectionMode == "polling")
+        {
+            Snackbar.Add("Real-time connection restored.", Severity.Success, config =>
+            {
+                config.ShowCloseIcon = true;
+                config.VisibleStateDuration = 5000;
+            });
+        }
+
+        InvokeAsync(StateHasChanged);
+    }
+
     [JSInvokable]
     public async Task OnSseCharactersSnapshot(List<CharacterModel> characters)
     {
@@ -2292,6 +2323,13 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         var rightPosition = isSidebarOpen ? $"calc({DrawerWidthCss} + 16px)" : "16px";
         return $"position: fixed; bottom: 16px; right: {rightPosition}; z-index: 1400; transition: right 0.3s ease; max-width: 320px;";
+    }
+
+    private string GetPollingIndicatorStyle()
+    {
+        // Position below following indicator if present, otherwise at top
+        var topPosition = isFollowing && followingCharacterId.HasValue ? "56px" : "16px";
+        return $"position: absolute; top: {topPosition}; left: 16px; z-index: 1400;";
     }
 
     #endregion

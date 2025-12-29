@@ -718,6 +718,7 @@ app.MapIdentityEndpoints();
 app.MapClientEndpoints();
 app.MapMapEndpoints();
 app.MapCustomMarkerEndpoints();
+app.MapPollingEndpoints(); // Polling fallback for SSE (VPN users)
 app.MapRoadEndpoints();
 app.MapPingEndpoints();
 app.MapNotificationEndpoints(); // Notification system endpoints
