@@ -87,8 +87,6 @@ public static partial class ClientEndpoints
         ITokenService tokenService,
         IGridService gridService,
         IConfiguration configuration,
-        HnHMapperServer.Api.Services.MapRevisionCache revisionCache,
-        IUpdateNotificationService updateNotificationService,
         ITenantActivityService activityService,
         ILogger<Program> logger)
     {
@@ -121,10 +119,6 @@ public static partial class ClientEndpoints
             return Results.Json(new { error = ex.Message }, statusCode: 403);
         }
 
-        // Bump map revision and notify clients to invalidate cache
-        var newRevision = revisionCache.Increment(response.Map);
-        updateNotificationService.NotifyMapRevision(response.Map, newRevision);
-        logger.LogDebug("GridUpdate: Bumped revision for map {MapId} to {Revision}", response.Map, newRevision);
 
         return Results.Json(response);
     }
@@ -138,8 +132,6 @@ public static partial class ClientEndpoints
         ITileService tileService,
         TileCacheService tileCacheService,
         IConfiguration configuration,
-        HnHMapperServer.Api.Services.MapRevisionCache revisionCache,
-        IUpdateNotificationService updateNotificationService,
         IStorageQuotaService quotaService,
         ITenantFilePathService filePathService,
         ITenantActivityService activityService,
@@ -337,12 +329,6 @@ public static partial class ClientEndpoints
                 await tileService.UpdateZoomLevelAsync(grid.Map, c, z, tenantId, gridStorage);
             }
 
-            // Bump map revision and notify clients to invalidate cache
-            var newRevision = revisionCache.Increment(grid.Map);
-            updateNotificationService.NotifyMapRevision(grid.Map, newRevision);
-            logger.LogDebug("GridUpload: Bumped revision for map {MapId} to {Revision}", grid.Map, newRevision);
-
-            // Invalidate tile cache for current tenant (tiles were modified - SSE clients need fresh data)
             await tileCacheService.InvalidateCacheAsync(tenantId);
         }
 

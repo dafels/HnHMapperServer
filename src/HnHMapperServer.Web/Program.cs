@@ -493,6 +493,46 @@ app.MapGet("/map/updates", async (HttpContext context, IHttpClientFactory httpCl
     }
 }).RequireAuthorization();
 
+// Polling proxy endpoint - forwards poll requests to API service (fallback for SSE)
+// This is needed for VPN users where SSE connections fail
+app.MapGet("/map/api/v1/poll", async (HttpContext context, IHttpClientFactory httpClientFactory, [FromQuery] long? since) =>
+{
+    if (!context.User.Identity?.IsAuthenticated ?? true)
+        return Results.Unauthorized();
+
+    var hasMapAuth = context.User.Claims.Any(c =>
+        c.Type == AuthorizationConstants.ClaimTypes.TenantPermission &&
+        c.Value.Equals(Permission.Map.ToClaimValue(), StringComparison.OrdinalIgnoreCase));
+    if (!hasMapAuth)
+        return Results.Unauthorized();
+
+    try
+    {
+        var apiClient = httpClientFactory.CreateClient("API");
+        var requestUri = since.HasValue ? $"/map/api/v1/poll?since={since}" : "/map/api/v1/poll";
+
+        // Forward auth cookie to API
+        if (context.Request.Headers.TryGetValue("Cookie", out var cookie))
+        {
+            apiClient.DefaultRequestHeaders.Add("Cookie", cookie.ToString());
+        }
+
+        var response = await apiClient.GetAsync(requestUri, context.RequestAborted);
+
+        if (!response.IsSuccessStatusCode)
+            return Results.StatusCode((int)response.StatusCode);
+
+        var content = await response.Content.ReadAsStringAsync(context.RequestAborted);
+        return Results.Content(content, "application/json");
+    }
+    catch (Exception ex)
+    {
+        var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+        logger.LogError(ex, "[Poll Proxy] Exception while proxying poll request");
+        return Results.StatusCode(500);
+    }
+}).RequireAuthorization();
+
 // Grid IDs endpoint - queries database directly (like tile serving)
 app.MapGet("/map/api/v1/grids", async (
     HttpContext context,
