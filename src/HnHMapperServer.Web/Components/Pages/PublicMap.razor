@@ -38,8 +38,7 @@
                        MaxY="@(mapInfo?.MaxY ?? 0)"
                        UrlX="@urlX"
                        UrlY="@urlY"
-                       UrlZ="@urlZ"
-                       OnPositionChanged="HandlePositionChanged" />
+                       UrlZ="@urlZ" />
     }
 </div>
 
@@ -70,8 +69,9 @@
     private PublicMapInfoDto? mapInfo;
     private bool isLoading = true;
     private string? errorMessage;
+    private string? loadedSlug;
 
-    // URL coordinate parameters for bookmarking
+    // URL coordinate parameters for bookmarking (only used on initial load)
     private int? urlX;
     private int? urlY;
     private int? urlZ;
@@ -89,14 +89,10 @@
         await LoadMapInfoAsync();
     }
 
-    private void HandlePositionChanged((int x, int y, int z) coords)
-    {
-        NavigationManager.NavigateTo($"/public/{Slug}?x={coords.x}&y={coords.y}&z={coords.z}", false);
-    }
-
     protected override async Task OnParametersSetAsync()
     {
-        if (!string.IsNullOrEmpty(Slug))
+        // Only reload if the slug actually changed
+        if (!string.IsNullOrEmpty(Slug) && Slug != loadedSlug)
         {
             await LoadMapInfoAsync();
         }
@@ -118,6 +114,7 @@
             if (response.IsSuccessStatusCode)
             {
                 mapInfo = await response.Content.ReadFromJsonAsync<PublicMapInfoDto>();
+                loadedSlug = Slug;
             }
             else if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
