@@ -42,6 +42,18 @@ let tileLayer = null;
 let markerLayer = null;
 let currentSlug = null;
 let zoomDebounceTimer = null;
+let preloadDebounceTimer = null;
+
+// Preload configuration
+const PRELOAD_CONFIG = {
+    enabled: true,
+    concurrency: 6,           // Parallel fetches (don't overwhelm browser)
+    extendViewport: 3,        // Tiles beyond viewport in each direction
+    preloadAdjacentZooms: true // Also preload zoom +/- 1
+};
+
+// Track preloaded tiles to avoid duplicates
+const preloadedTiles = new Set();
 
 // Update URL with current map position using history.replaceState (bypasses Blazor)
 function updateUrlWithPosition() {
@@ -54,6 +66,103 @@ function updateUrlWithPosition() {
 
     const newUrl = `/public/${currentSlug}?x=${x}&y=${y}&z=${z}`;
     history.replaceState(null, '', newUrl);
+}
+
+/**
+ * Calculate which tiles to preload based on viewport bounds
+ */
+function calculateTilesToPreload(bounds, zoom) {
+    const tiles = [];
+    const extend = PRELOAD_CONFIG.extendViewport;
+
+    // Convert bounds to tile coordinates at this zoom
+    const nw = mapInstance.project(bounds.getNorthWest(), HnHMaxZoom);
+    const se = mapInstance.project(bounds.getSouthEast(), HnHMaxZoom);
+
+    // Scale factor for this zoom level
+    const scale = SCALE_FACTORS[zoom];
+
+    const minTileX = Math.floor(nw.x / TileSize / scale) - extend;
+    const maxTileX = Math.floor(se.x / TileSize / scale) + extend;
+    const minTileY = Math.floor(nw.y / TileSize / scale) - extend;
+    const maxTileY = Math.floor(se.y / TileSize / scale) + extend;
+
+    for (let x = minTileX; x <= maxTileX; x++) {
+        for (let y = minTileY; y <= maxTileY; y++) {
+            const url = `/public/${currentSlug}/tiles/${zoom}/${x}_${y}.png`;
+            if (!preloadedTiles.has(url)) {
+                tiles.push(url);
+            }
+        }
+    }
+
+    return tiles;
+}
+
+/**
+ * Preload tiles with concurrency limit
+ */
+async function preloadTilesWithLimit(urls, limit) {
+    const queue = [...urls];
+    const active = [];
+
+    while (queue.length > 0 || active.length > 0) {
+        // Start new fetches up to limit
+        while (active.length < limit && queue.length > 0) {
+            const url = queue.shift();
+            preloadedTiles.add(url);
+
+            const promise = fetch(url, { priority: 'low' })
+                .then(() => {
+                    active.splice(active.indexOf(promise), 1);
+                })
+                .catch(() => {
+                    active.splice(active.indexOf(promise), 1);
+                });
+
+            active.push(promise);
+        }
+
+        // Wait for at least one to complete
+        if (active.length > 0) {
+            await Promise.race(active);
+        }
+    }
+}
+
+/**
+ * Preload tiles in background after map is ready
+ */
+async function startBackgroundPreload() {
+    if (!PRELOAD_CONFIG.enabled || !mapInstance || !currentSlug) return;
+
+    // Get current viewport bounds
+    const bounds = mapInstance.getBounds();
+    const zoom = mapInstance.getZoom();
+
+    // Calculate tile coordinates for extended viewport
+    const tilesToPreload = calculateTilesToPreload(bounds, zoom);
+
+    if (tilesToPreload.length > 0) {
+        console.log(`[PublicMap] Preloading ${tilesToPreload.length} tiles for zoom ${zoom}`);
+
+        // Preload with concurrency limit
+        await preloadTilesWithLimit(tilesToPreload, PRELOAD_CONFIG.concurrency);
+    }
+
+    // Optionally preload adjacent zoom levels
+    if (PRELOAD_CONFIG.preloadAdjacentZooms) {
+        const adjacentZooms = [zoom - 1, zoom + 1].filter(z => z >= HnHMinZoom && z <= HnHMaxZoom);
+        for (const adjZoom of adjacentZooms) {
+            const adjTiles = calculateTilesToPreload(bounds, adjZoom);
+            if (adjTiles.length > 0) {
+                // Limit adjacent zoom preloading to avoid excessive requests
+                const limitedTiles = adjTiles.slice(0, 50);
+                console.log(`[PublicMap] Preloading ${limitedTiles.length} tiles for adjacent zoom ${adjZoom}`);
+                await preloadTilesWithLimit(limitedTiles, PRELOAD_CONFIG.concurrency);
+            }
+        }
+    }
 }
 
 // Public Map Tile Layer - simple version that passes coordinates through directly
@@ -140,9 +249,23 @@ export async function initializePublicMap(mapElement, slug, centerX, centerY, in
                     zoomDebounceTimer = setTimeout(() => {
                         updateUrlWithPosition();
                     }, 300);
+
+                    // Also trigger preload for new zoom level
+                    clearTimeout(preloadDebounceTimer);
+                    preloadDebounceTimer = setTimeout(startBackgroundPreload, 1000);
+                });
+
+                // Add dragend handler to preload tiles after panning
+                mapInstance.on('dragend', () => {
+                    clearTimeout(preloadDebounceTimer);
+                    preloadDebounceTimer = setTimeout(startBackgroundPreload, 500);
                 });
 
                 console.log('[PublicMap] Initialized at center:', centerLatLng, 'zoom:', initialZoom);
+
+                // Start background preloading after a short delay to let the map render first
+                setTimeout(startBackgroundPreload, 500);
+
                 resolve();
             } catch (ex) {
                 console.error('[PublicMap] Failed to initialize:', ex);
@@ -217,9 +340,14 @@ export function updateTileUrl(slug) {
 export function dispose() {
     console.log('[PublicMap] Disposing');
 
-    // Clear debounce timer
+    // Clear debounce timers
     clearTimeout(zoomDebounceTimer);
     zoomDebounceTimer = null;
+    clearTimeout(preloadDebounceTimer);
+    preloadDebounceTimer = null;
+
+    // Clear preloaded tiles tracking
+    preloadedTiles.clear();
 
     if (markerLayer) {
         markerLayer.clearLayers();
