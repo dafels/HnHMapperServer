@@ -91,6 +91,10 @@ builder.Services.AddScoped<HnHMapperServer.Web.Services.ReconnectionState>(); //
 builder.Services.AddSingleton<HnHMapperServer.Services.Interfaces.IBuildInfoProvider, HnHMapperServer.Services.Services.BuildInfoProvider>();
 builder.Services.AddScoped<HnHMapperServer.Web.Services.VersionClient>();
 
+// Register public tile cache services for in-memory tile serving
+builder.Services.AddSingleton<HnHMapperServer.Web.Services.PublicTileCacheService>();
+builder.Services.AddHostedService<HnHMapperServer.Web.Services.PublicTileCacheHostedService>();
+
 // Register multi-tenancy services
 builder.Services.AddScoped<HnHMapperServer.Web.Services.TenantContextService>();
 builder.Services.AddScoped<HnHMapperServer.Web.Services.ITenantService, HnHMapperServer.Web.Services.TenantService>();
@@ -398,7 +402,24 @@ if (app.Configuration.GetValue<bool>("EnableHttpsRedirect", false))
     app.UseHttpsRedirection();
 }
 
-app.UseStaticFiles();
+// Configure static file caching for better performance
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = ctx =>
+    {
+        // Cache JS and CSS files for 1 week
+        var path = ctx.File.Name;
+        if (path.EndsWith(".js") || path.EndsWith(".css"))
+        {
+            ctx.Context.Response.Headers.CacheControl = "public, max-age=604800"; // 1 week
+        }
+        // Cache images for 1 day
+        else if (path.EndsWith(".png") || path.EndsWith(".jpg") || path.EndsWith(".gif") || path.EndsWith(".ico"))
+        {
+            ctx.Context.Response.Headers.CacheControl = "public, max-age=86400"; // 1 day
+        }
+    }
+});
 
 // Use authentication and authorization
 app.UseAuthentication();
@@ -784,54 +805,47 @@ app.MapGet("/map/grids/{**path}", async (
       .SetVaryByRouteValue("path")       // Vary by tile path (mapId/zoom/x_y)
       .Tag("tiles"));                     // Tag for bulk invalidation if needed
 
-// Public map proxy endpoints - forwards requests to API service
-// These endpoints don't require authentication (public maps are unauthenticated)
-app.MapGet("/public/{slug}/tiles/{**path}", async (
+// Public map tile endpoint - serves tiles from in-memory cache (fastest)
+// Falls back to filesystem for tiles loaded after startup
+app.MapGet("/public/{slug}/tiles/{**path}", (
     HttpContext context,
     string slug,
     string path,
-    IHttpClientFactory httpClientFactory,
-    ILogger<Program> logger) =>
+    PublicTileCacheService tileCache,
+    IConfiguration configuration) =>
 {
-    try
+    // Validate and sanitize path to prevent directory traversal
+    if (string.IsNullOrEmpty(path) || path.Contains(".."))
+        return Results.BadRequest();
+
+    // Try in-memory cache first (instant, no disk I/O)
+    if (tileCache.TryGetTile(slug, path, out var cachedData) && cachedData != null)
     {
-        var apiClient = httpClientFactory.CreateClient("API");
-        var requestUri = $"/public/{slug}/tiles/{path}";
-
-        // Forward any query string (e.g., cache busting parameters)
-        if (context.Request.QueryString.HasValue)
-            requestUri += context.Request.QueryString.Value;
-
-        var response = await apiClient.GetAsync(requestUri, context.RequestAborted);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            // Forward cache headers even for 404s
-            if (response.Headers.TryGetValues("Cache-Control", out var cacheValues))
-                context.Response.Headers.CacheControl = string.Join(", ", cacheValues);
-
-            return Results.StatusCode((int)response.StatusCode);
-        }
-
-        // Forward response headers
-        if (response.Headers.TryGetValues("Cache-Control", out var cacheControl))
-            context.Response.Headers.CacheControl = string.Join(", ", cacheControl);
-        if (response.Headers.TryGetValues("ETag", out var etag))
-            context.Response.Headers.ETag = string.Join(", ", etag);
-        if (response.Content.Headers.TryGetValues("Last-Modified", out var lastModified))
-            context.Response.Headers["Last-Modified"] = string.Join(", ", lastModified);
-
-        var content = await response.Content.ReadAsByteArrayAsync(context.RequestAborted);
-        return Results.File(content, "image/png");
+        context.Response.Headers.CacheControl = "public, max-age=31536000, immutable";
+        return Results.File(cachedData, "image/png");
     }
-    catch (Exception ex)
+
+    // Fallback to filesystem for tiles added after startup
+    var gridStorage = configuration["GridStorage"] ?? "map";
+    var filePath = Path.Combine(gridStorage, "public", slug, path);
+
+    if (!File.Exists(filePath))
     {
-        logger.LogError(ex, "[Public Tile Proxy] Error proxying tile request for {Slug}/{Path}", slug, path);
-        return Results.StatusCode(500);
+        // Cache 404s for 5 minutes to reduce repeated requests for missing tiles
+        context.Response.Headers.CacheControl = "public, max-age=300, stale-while-revalidate=60";
+        return Results.NotFound();
     }
+
+    // Load from disk and add to cache for future requests
+    var bytes = File.ReadAllBytes(filePath);
+    tileCache.AddTile(slug, path, bytes);
+
+    // Set aggressive caching headers - tiles are immutable once generated
+    context.Response.Headers.CacheControl = "public, max-age=31536000, immutable";
+    return Results.File(bytes, "image/png");
 }).AllowAnonymous()
   .CacheOutput(policy => policy
-      .Expire(TimeSpan.FromSeconds(60))
+      .Expire(TimeSpan.FromMinutes(10))
       .SetVaryByRouteValue("slug", "path")
       .SetVaryByQuery("v")
       .Tag("public-tiles"));
@@ -864,7 +878,7 @@ app.MapGet("/public/{slug}/info", async (
     }
 }).AllowAnonymous()
   .CacheOutput(policy => policy
-      .Expire(TimeSpan.FromSeconds(60))
+      .Expire(TimeSpan.FromMinutes(5))
       .SetVaryByRouteValue("slug"));
 
 // Public maps list proxy - forwards list request to API service
@@ -891,7 +905,7 @@ app.MapGet("/public/", async (
     }
 }).AllowAnonymous()
   .CacheOutput(policy => policy
-      .Expire(TimeSpan.FromSeconds(60)));
+      .Expire(TimeSpan.FromMinutes(5)));
 
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();

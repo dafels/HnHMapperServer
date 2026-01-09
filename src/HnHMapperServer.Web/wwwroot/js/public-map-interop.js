@@ -108,7 +108,9 @@ export async function initializePublicMap(mapElement, slug, centerX, centerY, in
                     zoomReverse: true,
                     updateWhenZooming: false,
                     updateWhenIdle: true,
-                    keepBuffer: 2
+                    keepBuffer: 6,              // Keep more tiles in memory
+                    updateInterval: 200,        // Throttle tile updates (ms)
+                    zoomAnimationThreshold: 4   // Disable animation for large zooms
                 });
 
                 tileLayer.slug = slug;
