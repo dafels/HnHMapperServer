@@ -22,9 +22,14 @@
     [Parameter] public int MaxX { get; set; }
     [Parameter] public int MinY { get; set; }
     [Parameter] public int MaxY { get; set; }
+    [Parameter] public int? UrlX { get; set; }
+    [Parameter] public int? UrlY { get; set; }
+    [Parameter] public int? UrlZ { get; set; }
+    [Parameter] public EventCallback<(int x, int y, int z)> OnPositionChanged { get; set; }
 
     private ElementReference mapElement;
     private IJSObjectReference? jsModule;
+    private DotNetObjectReference<PublicMapView>? dotNetRef;
     private bool initialized = false;
     private bool disposed = false;
 
@@ -55,17 +60,17 @@
             jsModule = await JS.InvokeAsync<IJSObjectReference>(
                 "import", "./js/public-map-interop.js");
 
-            // Calculate center from bounds
-            var centerX = (MinX + MaxX) / 2.0;
-            var centerY = (MinY + MaxY) / 2.0;
+            // Use URL coordinates if provided, otherwise calculate center from bounds
+            var centerX = UrlX ?? (MinX + MaxX) / 2.0;
+            var centerY = UrlY ?? (MinY + MaxY) / 2.0;
 
-            // Calculate appropriate zoom based on map span
+            // Calculate appropriate zoom based on map span (used if URL zoom not provided)
             var spanX = MaxX - MinX + 1;
             var spanY = MaxY - MinY + 1;
             var maxSpan = Math.Max(spanX, spanY);
 
             // Determine initial zoom - larger maps start more zoomed out
-            int initialZoom = maxSpan switch
+            int calculatedZoom = maxSpan switch
             {
                 <= 10 => 7,   // Very small - detailed view
                 <= 25 => 6,
@@ -76,8 +81,13 @@
                 _ => 1        // Large map - overview
             };
 
+            int initialZoom = UrlZ ?? calculatedZoom;
+
+            // Create DotNetObjectReference for JS callbacks
+            dotNetRef = DotNetObjectReference.Create(this);
+
             // Initialize map with center and zoom
-            await jsModule.InvokeVoidAsync("initializePublicMap", mapElement, Slug, centerX, centerY, initialZoom, MinX, MaxX, MinY, MaxY);
+            await jsModule.InvokeVoidAsync("initializePublicMap", mapElement, Slug, centerX, centerY, initialZoom, MinX, MaxX, MinY, MaxY, dotNetRef);
 
             // Fetch thingwall markers from API and pass to JavaScript
             await LoadMarkersAsync();
@@ -89,6 +99,12 @@
         {
             Logger.LogError(ex, "Failed to initialize public map for slug: {Slug}", Slug);
         }
+    }
+
+    [JSInvokable]
+    public async Task OnMapMoved(int x, int y, int z)
+    {
+        await OnPositionChanged.InvokeAsync((x, y, z));
     }
 
     private async Task LoadMarkersAsync()
@@ -147,6 +163,10 @@
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Error disposing public map");
+        }
+        finally
+        {
+            dotNetRef?.Dispose();
         }
     }
 }

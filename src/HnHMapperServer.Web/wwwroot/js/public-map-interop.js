@@ -41,6 +41,8 @@ let mapInstance = null;
 let tileLayer = null;
 let markerLayer = null;
 let currentSlug = null;
+let dotNetReference = null;
+let zoomDebounceTimer = null;
 
 // Public Map Tile Layer - simple version that passes coordinates through directly
 // like the main map layer does (no offset, Leaflet coords = HnH coords)
@@ -64,12 +66,13 @@ const PublicTileLayer = L.TileLayer.extend({
     }
 });
 
-export async function initializePublicMap(mapElement, slug, centerX, centerY, initialZoom, minX, maxX, minY, maxY) {
+export async function initializePublicMap(mapElement, slug, centerX, centerY, initialZoom, minX, maxX, minY, maxY, dotNetRef) {
     console.log('[PublicMap] Initializing for slug:', slug,
         'center:', { centerX, centerY },
         'initialZoom:', initialZoom,
         'bounds:', { minX, maxX, minY, maxY });
     currentSlug = slug;
+    dotNetReference = dotNetRef;
 
     // Ensure DOM element is ready
     await new Promise(resolve => {
@@ -112,6 +115,29 @@ export async function initializePublicMap(mapElement, slug, centerX, centerY, in
 
                 // Set view to calculated center with appropriate zoom
                 mapInstance.setView(centerLatLng, initialZoom);
+
+                // Add dragend handler to update URL when user pans the map
+                mapInstance.on('dragend', () => {
+                    if (!dotNetReference) return;
+                    const point = mapInstance.project(mapInstance.getCenter(), HnHMaxZoom);
+                    const x = Math.floor(point.x / TileSize);
+                    const y = Math.floor(point.y / TileSize);
+                    const z = mapInstance.getZoom();
+                    dotNetReference.invokeMethodAsync('OnMapMoved', x, y, z);
+                });
+
+                // Add zoomend handler with debounce to update URL when user zooms
+                mapInstance.on('zoomend', () => {
+                    if (!dotNetReference) return;
+                    clearTimeout(zoomDebounceTimer);
+                    zoomDebounceTimer = setTimeout(() => {
+                        const point = mapInstance.project(mapInstance.getCenter(), HnHMaxZoom);
+                        const x = Math.floor(point.x / TileSize);
+                        const y = Math.floor(point.y / TileSize);
+                        const z = mapInstance.getZoom();
+                        dotNetReference.invokeMethodAsync('OnMapMoved', x, y, z);
+                    }, 500);
+                });
 
                 console.log('[PublicMap] Initialized at center:', centerLatLng, 'zoom:', initialZoom);
                 resolve();
@@ -187,6 +213,13 @@ export function updateTileUrl(slug) {
 
 export function dispose() {
     console.log('[PublicMap] Disposing');
+
+    // Clear debounce timer
+    clearTimeout(zoomDebounceTimer);
+    zoomDebounceTimer = null;
+
+    // Clear dotNet reference
+    dotNetReference = null;
 
     if (markerLayer) {
         markerLayer.clearLayers();

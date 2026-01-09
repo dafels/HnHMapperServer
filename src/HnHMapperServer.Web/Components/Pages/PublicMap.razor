@@ -3,6 +3,7 @@
 @attribute [Microsoft.AspNetCore.Authorization.AllowAnonymous]
 @using HnHMapperServer.Web.Components.Public
 @using System.Net.Http.Json
+@using System.Web
 @inject IHttpClientFactory HttpClientFactory
 @inject NavigationManager NavigationManager
 @inject ILogger<PublicMap> Logger
@@ -34,7 +35,11 @@
                        MinX="@(mapInfo?.MinX ?? 0)"
                        MaxX="@(mapInfo?.MaxX ?? 0)"
                        MinY="@(mapInfo?.MinY ?? 0)"
-                       MaxY="@(mapInfo?.MaxY ?? 0)" />
+                       MaxY="@(mapInfo?.MaxY ?? 0)"
+                       UrlX="@urlX"
+                       UrlY="@urlY"
+                       UrlZ="@urlZ"
+                       OnPositionChanged="HandlePositionChanged" />
     }
 </div>
 
@@ -66,9 +71,27 @@
     private bool isLoading = true;
     private string? errorMessage;
 
+    // URL coordinate parameters for bookmarking
+    private int? urlX;
+    private int? urlY;
+    private int? urlZ;
+
     protected override async Task OnInitializedAsync()
     {
+        // Parse query string for bookmark support
+        var uri = new Uri(NavigationManager.Uri);
+        var query = HttpUtility.ParseQueryString(uri.Query);
+
+        urlX = int.TryParse(query["x"], out var x) ? x : null;
+        urlY = int.TryParse(query["y"], out var y) ? y : null;
+        urlZ = int.TryParse(query["z"], out var z) ? z : null;
+
         await LoadMapInfoAsync();
+    }
+
+    private void HandlePositionChanged((int x, int y, int z) coords)
+    {
+        NavigationManager.NavigateTo($"/public/{Slug}?x={coords.x}&y={coords.y}&z={coords.z}", false);
     }
 
     protected override async Task OnParametersSetAsync()
