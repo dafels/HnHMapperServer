@@ -73,6 +73,10 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
     // Performance optimization tables
     public DbSet<DirtyZoomTileEntity> DirtyZoomTiles => Set<DirtyZoomTileEntity>();
 
+    // Public map tables (global, not tenant-scoped)
+    public DbSet<PublicMapEntity> PublicMaps => Set<PublicMapEntity>();
+    public DbSet<PublicMapSourceEntity> PublicMapSources => Set<PublicMapSourceEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -715,6 +719,66 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
             entity.HasOne<MapInfoEntity>()
                 .WithMany()
                 .HasForeignKey(e => e.MapId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Public map entity configurations (global tables - no tenant filters)
+        modelBuilder.Entity<PublicMapEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.IsActive).IsRequired().HasDefaultValue(true);
+            entity.Property(e => e.CreatedAt).IsRequired();
+            entity.Property(e => e.CreatedBy).IsRequired();
+
+            // Generation settings
+            entity.Property(e => e.AutoRegenerate).IsRequired().HasDefaultValue(false);
+            entity.Property(e => e.RegenerateIntervalMinutes).IsRequired(false);
+
+            // Generation status
+            entity.Property(e => e.GenerationStatus).IsRequired().HasDefaultValue("pending");
+            entity.Property(e => e.LastGeneratedAt).IsRequired(false);
+            entity.Property(e => e.LastGenerationDurationSeconds).IsRequired(false);
+            entity.Property(e => e.TileCount).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.GenerationProgress).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.GenerationError).IsRequired(false);
+
+            // Cached bounds
+            entity.Property(e => e.MinX).IsRequired(false);
+            entity.Property(e => e.MaxX).IsRequired(false);
+            entity.Property(e => e.MinY).IsRequired(false);
+            entity.Property(e => e.MaxY).IsRequired(false);
+
+            // Indexes
+            entity.HasIndex(e => e.IsActive);
+            entity.HasIndex(e => e.GenerationStatus);
+        });
+
+        modelBuilder.Entity<PublicMapSourceEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.PublicMapId).IsRequired();
+            entity.Property(e => e.TenantId).IsRequired();
+            entity.Property(e => e.MapId).IsRequired();
+            entity.Property(e => e.Priority).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.AddedAt).IsRequired();
+            entity.Property(e => e.AddedBy).IsRequired();
+
+            // Unique constraint: prevent duplicate sources
+            entity.HasIndex(e => new { e.PublicMapId, e.TenantId, e.MapId }).IsUnique();
+            entity.HasIndex(e => e.PublicMapId);
+            entity.HasIndex(e => e.TenantId);
+
+            // Foreign key to PublicMapEntity
+            entity.HasOne<PublicMapEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.PublicMapId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Foreign key to TenantEntity
+            entity.HasOne<TenantEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.TenantId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
@@ -1450,4 +1514,138 @@ public sealed class OverlayOffsetEntity
     /// UTC timestamp when this offset was last updated
     /// </summary>
     public DateTime UpdatedAt { get; set; }
+}
+
+/// <summary>
+/// Represents a public map that combines tiles from multiple tenant maps.
+/// This is a global table - not tenant-scoped.
+/// </summary>
+public sealed class PublicMapEntity
+{
+    /// <summary>
+    /// Primary key - URL slug (e.g., "world-map")
+    /// </summary>
+    public string Id { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Display name for the public map
+    /// </summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether the public map is active and accessible
+    /// </summary>
+    public bool IsActive { get; set; } = true;
+
+    /// <summary>
+    /// UTC timestamp when the public map was created
+    /// </summary>
+    public DateTime CreatedAt { get; set; }
+
+    /// <summary>
+    /// User ID of the SuperAdmin who created this public map
+    /// </summary>
+    public string CreatedBy { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether to automatically regenerate on a schedule
+    /// </summary>
+    public bool AutoRegenerate { get; set; }
+
+    /// <summary>
+    /// Interval in minutes for automatic regeneration (if AutoRegenerate is true)
+    /// </summary>
+    public int? RegenerateIntervalMinutes { get; set; }
+
+    /// <summary>
+    /// Current generation status: pending, running, completed, failed
+    /// </summary>
+    public string GenerationStatus { get; set; } = "pending";
+
+    /// <summary>
+    /// UTC timestamp when generation last completed
+    /// </summary>
+    public DateTime? LastGeneratedAt { get; set; }
+
+    /// <summary>
+    /// Duration of the last generation in seconds
+    /// </summary>
+    public int? LastGenerationDurationSeconds { get; set; }
+
+    /// <summary>
+    /// Number of tiles generated
+    /// </summary>
+    public int TileCount { get; set; }
+
+    /// <summary>
+    /// Current generation progress (0-100)
+    /// </summary>
+    public int GenerationProgress { get; set; }
+
+    /// <summary>
+    /// Error message if generation failed
+    /// </summary>
+    public string? GenerationError { get; set; }
+
+    /// <summary>
+    /// Minimum X coordinate (cached bounds)
+    /// </summary>
+    public int? MinX { get; set; }
+
+    /// <summary>
+    /// Maximum X coordinate (cached bounds)
+    /// </summary>
+    public int? MaxX { get; set; }
+
+    /// <summary>
+    /// Minimum Y coordinate (cached bounds)
+    /// </summary>
+    public int? MinY { get; set; }
+
+    /// <summary>
+    /// Maximum Y coordinate (cached bounds)
+    /// </summary>
+    public int? MaxY { get; set; }
+}
+
+/// <summary>
+/// Represents a source map that contributes tiles to a public map.
+/// This is a global table - not tenant-scoped.
+/// </summary>
+public sealed class PublicMapSourceEntity
+{
+    /// <summary>
+    /// Primary key
+    /// </summary>
+    public int Id { get; set; }
+
+    /// <summary>
+    /// Foreign key to PublicMapEntity
+    /// </summary>
+    public string PublicMapId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Tenant ID of the source map
+    /// </summary>
+    public string TenantId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Map ID within the tenant
+    /// </summary>
+    public int MapId { get; set; }
+
+    /// <summary>
+    /// Display priority (higher = displayed first in UI)
+    /// </summary>
+    public int Priority { get; set; }
+
+    /// <summary>
+    /// UTC timestamp when this source was added
+    /// </summary>
+    public DateTime AddedAt { get; set; }
+
+    /// <summary>
+    /// User ID of the SuperAdmin who added this source
+    /// </summary>
+    public string AddedBy { get; set; } = string.Empty;
 }

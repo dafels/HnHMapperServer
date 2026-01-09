@@ -1,0 +1,131 @@
+@page "/public/{Slug}"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+@using HnHMapperServer.Web.Components.Public
+@using System.Net.Http.Json
+@inject IHttpClientFactory HttpClientFactory
+@inject NavigationManager NavigationManager
+@inject ILogger<PublicMap> Logger
+
+<PageTitle>@(mapInfo?.Name ?? "Public Map")</PageTitle>
+
+<div class="public-map-page">
+    @if (isLoading)
+    {
+        <div class="loading-overlay">
+            <MudProgressCircular Color="Color.Primary" Indeterminate="true" Size="Size.Large" />
+            <MudText Typo="Typo.h6" Class="mt-4">Loading map...</MudText>
+        </div>
+    }
+    else if (errorMessage != null)
+    {
+        <div class="error-overlay">
+            <MudIcon Icon="@Icons.Material.Filled.Error" Size="Size.Large" Color="Color.Error" Class="mb-4" />
+            <MudText Typo="Typo.h5" Class="mb-2">Map Not Found</MudText>
+            <MudText Typo="Typo.body1" Color="Color.Secondary">@errorMessage</MudText>
+            <MudButton Variant="Variant.Outlined" Color="Color.Primary" Class="mt-4" Href="/">
+                Go Home
+            </MudButton>
+        </div>
+    }
+    else
+    {
+        <PublicMapView Slug="@Slug"
+                       MinX="@(mapInfo?.MinX ?? 0)"
+                       MaxX="@(mapInfo?.MaxX ?? 0)"
+                       MinY="@(mapInfo?.MinY ?? 0)"
+                       MaxY="@(mapInfo?.MaxY ?? 0)" />
+    }
+</div>
+
+<style>
+    .public-map-page {
+        height: 100vh;
+        width: 100vw;
+        display: flex;
+        flex-direction: column;
+        background-color: #1a1a2e;
+    }
+
+    .loading-overlay,
+    .error-overlay {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: white;
+    }
+</style>
+
+@code {
+    [Parameter]
+    public string Slug { get; set; } = string.Empty;
+
+    private PublicMapInfoDto? mapInfo;
+    private bool isLoading = true;
+    private string? errorMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadMapInfoAsync();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!string.IsNullOrEmpty(Slug))
+        {
+            await LoadMapInfoAsync();
+        }
+    }
+
+    private async Task LoadMapInfoAsync()
+    {
+        isLoading = true;
+        errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            // Use the API client to get map info from the public endpoint
+            var client = HttpClientFactory.CreateClient("API");
+            Logger.LogInformation("Loading public map info for slug: {Slug}", Slug);
+            var response = await client.GetAsync($"/public/{Slug}/info");
+
+            if (response.IsSuccessStatusCode)
+            {
+                mapInfo = await response.Content.ReadFromJsonAsync<PublicMapInfoDto>();
+            }
+            else if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                Logger.LogWarning("Public map not found: {Slug}", Slug);
+                errorMessage = "This public map does not exist or is not active.";
+            }
+            else
+            {
+                var body = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to load public map {Slug}: {StatusCode} - {Body}", Slug, response.StatusCode, body);
+                errorMessage = "Failed to load map information.";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error loading map: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private class PublicMapInfoDto
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public int? MinX { get; set; }
+        public int? MaxX { get; set; }
+        public int? MinY { get; set; }
+        public int? MaxY { get; set; }
+    }
+}

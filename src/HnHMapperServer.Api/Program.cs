@@ -146,6 +146,10 @@ builder.Services.AddScoped<ITimerWarningService, TimerWarningService>();  // Tim
 builder.Services.AddScoped<IHmapImportService, HmapImportService>();  // .hmap file import service
 builder.Services.AddSingleton<ImportLockService>();  // Import lock and cooldown management
 
+// Public maps services (global, not tenant-scoped)
+builder.Services.AddScoped<IPublicMapService, PublicMapService>();
+builder.Services.AddSingleton<IPublicMapGenerationService, PublicMapGenerationService>();
+
 // Register memory cache for preview URL signing service
 builder.Services.AddMemoryCache();
 
@@ -196,6 +200,7 @@ builder.Services.AddHostedService<PreviewCleanupService>(); // Map preview clean
 builder.Services.AddHostedService<HmapTempCleanupService>(); // HMAP temp file cleanup service (7 day retention)
 builder.Services.AddHostedService<OrphanedMarkerCleanupService>(); // Orphaned marker cleanup service
 builder.Services.AddHostedService<TenantActivityFlushService>(); // Tenant activity flush service (2-min interval)
+builder.Services.AddHostedService<PublicMapGenerationBackgroundService>(); // Public map tile generation
 
 // Configure shared data protection for cookie sharing with Web
 var dataProtectionPath = Path.Combine(
@@ -729,6 +734,7 @@ app.MapMapAdminEndpoints(); // Map admin endpoints (tenant-scoped map management
 app.MapSuperadminEndpoints(); // Phase 5: Superadmin endpoints (global tenant management)
 app.MapAuditEndpoints(); // Phase 6: Audit log viewer endpoints
 app.MapDatabaseEndpoints();
+app.MapPublicMapEndpoints(); // Public map viewing (no auth required)
 
 // Public version endpoint - returns build information (no authentication required)
 app.MapGet("/version", (IBuildInfoProvider buildInfo) => 

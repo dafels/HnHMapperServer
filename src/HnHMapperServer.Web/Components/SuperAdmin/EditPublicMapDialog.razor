@@ -1,0 +1,171 @@
+@using HnHMapperServer.Core.DTOs
+@using MudBlazor
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject ILogger<EditPublicMapDialog> Logger
+
+<MudDialog>
+    <DialogContent>
+        <MudText Typo="Typo.h6" Class="mb-4">Edit Public Map</MudText>
+
+        <MudStack Spacing="3">
+            <MudTextField @bind-Value="_name"
+                          Label="Display Name"
+                          Variant="Variant.Outlined"
+                          Required="true"
+                          HelperText="Human-friendly name for the public map" />
+
+            <MudTextField Value="@PublicMap.Id"
+                          Label="URL Slug"
+                          Variant="Variant.Outlined"
+                          Disabled="true"
+                          HelperText="URL slug cannot be changed after creation"
+                          Adornment="Adornment.Start"
+                          AdornmentText="/public/" />
+
+            <MudSwitch @bind-Value="_isActive"
+                       Color="Color.Success"
+                       Label="@(_isActive ? "Active (publicly accessible)" : "Inactive (hidden)")" />
+
+            <MudDivider Class="my-2" />
+
+            <MudText Typo="Typo.subtitle1">Auto-Regeneration</MudText>
+
+            <MudSwitch @bind-Value="_autoRegenerate"
+                       Color="Color.Info"
+                       Label="@(_autoRegenerate ? "Enabled" : "Disabled")" />
+
+            @if (_autoRegenerate)
+            {
+                <MudSelect T="int" @bind-Value="_regenerateIntervalMinutes"
+                           Label="Regeneration Interval"
+                           Variant="Variant.Outlined"
+                           HelperText="How often to automatically regenerate tiles">
+                    <MudSelectItem Value="15">Every 15 minutes</MudSelectItem>
+                    <MudSelectItem Value="30">Every 30 minutes</MudSelectItem>
+                    <MudSelectItem Value="60">Every hour</MudSelectItem>
+                    <MudSelectItem Value="360">Every 6 hours</MudSelectItem>
+                    <MudSelectItem Value="1440">Every 24 hours</MudSelectItem>
+                </MudSelect>
+            }
+        </MudStack>
+
+        @if (_errorMessage != null)
+        {
+            <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">
+                @_errorMessage
+            </MudAlert>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel" Disabled="@_isSaving">Cancel</MudButton>
+        <MudButton Color="Color.Primary"
+                   Variant="Variant.Filled"
+                   OnClick="SaveChanges"
+                   Disabled="@(_isSaving || string.IsNullOrWhiteSpace(_name))">
+            @if (_isSaving)
+            {
+                <MudProgressCircular Class="ms-n1" Size="Size.Small" Indeterminate="true" />
+                <MudText Class="ms-2">Saving...</MudText>
+            }
+            else
+            {
+                <MudIcon Icon="@Icons.Material.Filled.Save" Class="me-1" />
+                <MudText>Save</MudText>
+            }
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] IMudDialogInstance? MudDialog { get; set; }
+    [Parameter] public PublicMapDto PublicMap { get; set; } = null!;
+
+    private string _name = string.Empty;
+    private bool _isActive = true;
+    private bool _autoRegenerate = false;
+    private int _regenerateIntervalMinutes = 60;
+    private bool _isSaving = false;
+    private string? _errorMessage = null;
+
+    protected override void OnInitialized()
+    {
+        if (PublicMap != null)
+        {
+            _name = PublicMap.Name;
+            _isActive = PublicMap.IsActive;
+            _autoRegenerate = PublicMap.AutoRegenerate;
+            _regenerateIntervalMinutes = PublicMap.RegenerateIntervalMinutes ?? 60;
+        }
+    }
+
+    private void Cancel()
+    {
+        MudDialog?.Cancel();
+    }
+
+    private async Task SaveChanges()
+    {
+        if (string.IsNullOrWhiteSpace(_name))
+        {
+            Snackbar.Add("Name is required", Severity.Error);
+            return;
+        }
+
+        _isSaving = true;
+        _errorMessage = null;
+
+        try
+        {
+            var httpClient = HttpClientFactory.CreateClient("API");
+            var request = new UpdatePublicMapDto
+            {
+                Name = _name,
+                IsActive = _isActive,
+                AutoRegenerate = _autoRegenerate,
+                RegenerateIntervalMinutes = _autoRegenerate ? _regenerateIntervalMinutes : null
+            };
+
+            var response = await httpClient.PutAsJsonAsync($"/api/superadmin/public-maps/{PublicMap.Id}", request);
+
+            if (response.IsSuccessStatusCode)
+            {
+                Snackbar.Add($"Public map '{_name}' updated successfully", Severity.Success);
+                MudDialog?.Close(DialogResult.Ok(true));
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to update public map: {StatusCode}, Body={Body}", response.StatusCode, errorBody);
+
+                try
+                {
+                    var errorObj = System.Text.Json.JsonSerializer.Deserialize<ErrorResponse>(errorBody,
+                        new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    _errorMessage = errorObj?.Error ?? $"Failed to update public map: {response.StatusCode}";
+                }
+                catch
+                {
+                    _errorMessage = $"Failed to update public map: {response.StatusCode}";
+                }
+
+                Snackbar.Add(_errorMessage, Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error updating public map");
+            _errorMessage = $"Error updating public map: {ex.Message}";
+            Snackbar.Add(_errorMessage, Severity.Error);
+        }
+        finally
+        {
+            _isSaving = false;
+        }
+    }
+
+    private class ErrorResponse
+    {
+        public string Error { get; set; } = string.Empty;
+    }
+}

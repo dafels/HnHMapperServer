@@ -1,0 +1,152 @@
+@using Microsoft.JSInterop
+@using System.Net.Http.Json
+@inject IJSRuntime JS
+@inject IHttpClientFactory HttpClientFactory
+@inject ILogger<PublicMapView> Logger
+@implements IAsyncDisposable
+
+<div @ref="mapElement" class="public-leaflet-map"></div>
+
+<style>
+    .public-leaflet-map {
+        flex: 1;
+        width: 100%;
+        height: 100%;
+        background-color: #1a1a2e;
+    }
+</style>
+
+@code {
+    [Parameter] public string Slug { get; set; } = string.Empty;
+    [Parameter] public int MinX { get; set; }
+    [Parameter] public int MaxX { get; set; }
+    [Parameter] public int MinY { get; set; }
+    [Parameter] public int MaxY { get; set; }
+
+    private ElementReference mapElement;
+    private IJSObjectReference? jsModule;
+    private bool initialized = false;
+    private bool disposed = false;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !string.IsNullOrEmpty(Slug))
+        {
+            await InitializeMapAsync();
+        }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // If slug changes, reinitialize the map
+        if (initialized && jsModule != null && !string.IsNullOrEmpty(Slug))
+        {
+            await jsModule.InvokeVoidAsync("updateTileUrl", Slug);
+        }
+    }
+
+    private async Task InitializeMapAsync()
+    {
+        try
+        {
+            Logger.LogInformation("Initializing public map for slug: {Slug}", Slug);
+
+            // Load JavaScript module
+            jsModule = await JS.InvokeAsync<IJSObjectReference>(
+                "import", "./js/public-map-interop.js");
+
+            // Calculate center from bounds
+            var centerX = (MinX + MaxX) / 2.0;
+            var centerY = (MinY + MaxY) / 2.0;
+
+            // Calculate appropriate zoom based on map span
+            var spanX = MaxX - MinX + 1;
+            var spanY = MaxY - MinY + 1;
+            var maxSpan = Math.Max(spanX, spanY);
+
+            // Determine initial zoom - larger maps start more zoomed out
+            int initialZoom = maxSpan switch
+            {
+                <= 10 => 7,   // Very small - detailed view
+                <= 25 => 6,
+                <= 50 => 5,
+                <= 100 => 4,
+                <= 200 => 3,
+                <= 400 => 2,
+                _ => 1        // Large map - overview
+            };
+
+            // Initialize map with center and zoom
+            await jsModule.InvokeVoidAsync("initializePublicMap", mapElement, Slug, centerX, centerY, initialZoom, MinX, MaxX, MinY, MaxY);
+
+            // Fetch thingwall markers from API and pass to JavaScript
+            await LoadMarkersAsync();
+
+            initialized = true;
+            Logger.LogInformation("Public map initialized successfully for slug: {Slug} at zoom {Zoom}", Slug, initialZoom);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to initialize public map for slug: {Slug}", Slug);
+        }
+    }
+
+    private async Task LoadMarkersAsync()
+    {
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.GetAsync($"/public/{Slug}/markers");
+
+            if (response.IsSuccessStatusCode)
+            {
+                var markers = await response.Content.ReadFromJsonAsync<List<MarkerDto>>();
+                if (markers != null && markers.Count > 0 && jsModule != null)
+                {
+                    await jsModule.InvokeVoidAsync("loadMarkersData", markers);
+                    Logger.LogInformation("Loaded {Count} thingwall markers for public map {Slug}", markers.Count, Slug);
+                }
+            }
+            else
+            {
+                Logger.LogWarning("Failed to load markers for public map {Slug}: {StatusCode}", Slug, response.StatusCode);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Error loading markers for public map {Slug}", Slug);
+        }
+    }
+
+    private class MarkerDto
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public int X { get; set; }
+        public int Y { get; set; }
+        public string Image { get; set; } = string.Empty;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (disposed) return;
+        disposed = true;
+
+        try
+        {
+            if (jsModule != null)
+            {
+                await jsModule.InvokeVoidAsync("dispose");
+                await jsModule.DisposeAsync();
+            }
+        }
+        catch (JSDisconnectedException)
+        {
+            // Circuit disconnected, ignore
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Error disposing public map");
+        }
+    }
+}

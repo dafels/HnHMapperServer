@@ -1,0 +1,173 @@
+@using HnHMapperServer.Core.DTOs
+@using MudBlazor
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject ILogger<CreatePublicMapDialog> Logger
+
+<MudDialog>
+    <DialogContent>
+        <MudText Typo="Typo.h6" Class="mb-4">Create New Public Map</MudText>
+
+        <MudAlert Severity="Severity.Info" Dense="true" Class="mb-4">
+            <MudText Typo="Typo.body2">
+                A public map combines tiles from multiple tenant maps into a single unauthenticated view.
+                The URL will be <strong>/public/@(_slug ?? "slug")</strong>
+            </MudText>
+        </MudAlert>
+
+        <MudStack Spacing="3">
+            <MudTextField @bind-Value="_name"
+                          Label="Display Name"
+                          Variant="Variant.Outlined"
+                          Required="true"
+                          HelperText="Human-friendly name for the public map"
+                          OnKeyUp="@HandleNameChange" />
+
+            <MudTextField @bind-Value="_slug"
+                          Label="URL Slug"
+                          Variant="Variant.Outlined"
+                          Required="true"
+                          HelperText="URL-safe identifier (auto-generated from name)"
+                          Adornment="Adornment.Start"
+                          AdornmentText="/public/" />
+
+            <MudSwitch @bind-Value="_isActive"
+                       Color="Color.Success"
+                       Label="@(_isActive ? "Active (publicly accessible)" : "Inactive (hidden)")" />
+        </MudStack>
+
+        @if (_errorMessage != null)
+        {
+            <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">
+                @_errorMessage
+            </MudAlert>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel" Disabled="@_isCreating">Cancel</MudButton>
+        <MudButton Color="Color.Primary"
+                   Variant="Variant.Filled"
+                   OnClick="CreatePublicMap"
+                   Disabled="@(_isCreating || string.IsNullOrWhiteSpace(_name))">
+            @if (_isCreating)
+            {
+                <MudProgressCircular Class="ms-n1" Size="Size.Small" Indeterminate="true" />
+                <MudText Class="ms-2">Creating...</MudText>
+            }
+            else
+            {
+                <MudIcon Icon="@Icons.Material.Filled.Add" Class="me-1" />
+                <MudText>Create</MudText>
+            }
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] IMudDialogInstance? MudDialog { get; set; }
+
+    private string _name = string.Empty;
+    private string _slug = string.Empty;
+    private bool _isActive = true;
+    private bool _isCreating = false;
+    private string? _errorMessage = null;
+
+    private void HandleNameChange(KeyboardEventArgs args)
+    {
+        // Auto-generate slug from name
+        if (!string.IsNullOrWhiteSpace(_name))
+        {
+            _slug = GenerateSlug(_name);
+        }
+    }
+
+    private static string GenerateSlug(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return string.Empty;
+
+        var slug = name.ToLowerInvariant();
+        slug = System.Text.RegularExpressions.Regex.Replace(slug, @"[^a-z0-9\-]", "-");
+        slug = System.Text.RegularExpressions.Regex.Replace(slug, @"-+", "-");
+        slug = slug.Trim('-');
+
+        if (slug.Length < 3)
+            slug = $"map-{slug}";
+        if (slug.Length > 50)
+            slug = slug[..50].TrimEnd('-');
+
+        return slug;
+    }
+
+    private void Cancel()
+    {
+        MudDialog?.Cancel();
+    }
+
+    private async Task CreatePublicMap()
+    {
+        if (string.IsNullOrWhiteSpace(_name))
+        {
+            Snackbar.Add("Name is required", Severity.Error);
+            return;
+        }
+
+        _isCreating = true;
+        _errorMessage = null;
+
+        try
+        {
+            var httpClient = HttpClientFactory.CreateClient("API");
+            var request = new CreatePublicMapDto
+            {
+                Name = _name,
+                Slug = string.IsNullOrWhiteSpace(_slug) ? null : _slug,
+                IsActive = _isActive
+            };
+
+            var response = await httpClient.PostAsJsonAsync("/api/superadmin/public-maps", request);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var created = await response.Content.ReadFromJsonAsync<PublicMapDto>(
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                Snackbar.Add($"Public map '{created?.Name ?? _name}' created successfully", Severity.Success);
+                MudDialog?.Close(DialogResult.Ok(created));
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to create public map: {StatusCode}, Body={Body}", response.StatusCode, errorBody);
+
+                try
+                {
+                    var errorObj = System.Text.Json.JsonSerializer.Deserialize<ErrorResponse>(errorBody,
+                        new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    _errorMessage = errorObj?.Error ?? $"Failed to create public map: {response.StatusCode}";
+                }
+                catch
+                {
+                    _errorMessage = $"Failed to create public map: {response.StatusCode}";
+                }
+
+                Snackbar.Add(_errorMessage, Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error creating public map");
+            _errorMessage = $"Error creating public map: {ex.Message}";
+            Snackbar.Add(_errorMessage, Severity.Error);
+        }
+        finally
+        {
+            _isCreating = false;
+        }
+    }
+
+    private class ErrorResponse
+    {
+        public string Error { get; set; } = string.Empty;
+    }
+}

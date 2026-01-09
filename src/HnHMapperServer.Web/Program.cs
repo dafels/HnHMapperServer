@@ -784,6 +784,115 @@ app.MapGet("/map/grids/{**path}", async (
       .SetVaryByRouteValue("path")       // Vary by tile path (mapId/zoom/x_y)
       .Tag("tiles"));                     // Tag for bulk invalidation if needed
 
+// Public map proxy endpoints - forwards requests to API service
+// These endpoints don't require authentication (public maps are unauthenticated)
+app.MapGet("/public/{slug}/tiles/{**path}", async (
+    HttpContext context,
+    string slug,
+    string path,
+    IHttpClientFactory httpClientFactory,
+    ILogger<Program> logger) =>
+{
+    try
+    {
+        var apiClient = httpClientFactory.CreateClient("API");
+        var requestUri = $"/public/{slug}/tiles/{path}";
+
+        // Forward any query string (e.g., cache busting parameters)
+        if (context.Request.QueryString.HasValue)
+            requestUri += context.Request.QueryString.Value;
+
+        var response = await apiClient.GetAsync(requestUri, context.RequestAborted);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            // Forward cache headers even for 404s
+            if (response.Headers.TryGetValues("Cache-Control", out var cacheValues))
+                context.Response.Headers.CacheControl = string.Join(", ", cacheValues);
+
+            return Results.StatusCode((int)response.StatusCode);
+        }
+
+        // Forward response headers
+        if (response.Headers.TryGetValues("Cache-Control", out var cacheControl))
+            context.Response.Headers.CacheControl = string.Join(", ", cacheControl);
+        if (response.Headers.TryGetValues("ETag", out var etag))
+            context.Response.Headers.ETag = string.Join(", ", etag);
+        if (response.Content.Headers.TryGetValues("Last-Modified", out var lastModified))
+            context.Response.Headers["Last-Modified"] = string.Join(", ", lastModified);
+
+        var content = await response.Content.ReadAsByteArrayAsync(context.RequestAborted);
+        return Results.File(content, "image/png");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "[Public Tile Proxy] Error proxying tile request for {Slug}/{Path}", slug, path);
+        return Results.StatusCode(500);
+    }
+}).AllowAnonymous()
+  .CacheOutput(policy => policy
+      .Expire(TimeSpan.FromSeconds(60))
+      .SetVaryByRouteValue("slug", "path")
+      .SetVaryByQuery("v")
+      .Tag("public-tiles"));
+
+// Public map info proxy - forwards map info requests to API service
+app.MapGet("/public/{slug}/info", async (
+    HttpContext context,
+    string slug,
+    IHttpClientFactory httpClientFactory,
+    ILogger<Program> logger) =>
+{
+    try
+    {
+        var apiClient = httpClientFactory.CreateClient("API");
+        var response = await apiClient.GetAsync($"/public/{slug}/info", context.RequestAborted);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorContent = await response.Content.ReadAsStringAsync(context.RequestAborted);
+            return Results.Content(errorContent, "application/json", statusCode: (int)response.StatusCode);
+        }
+
+        var content = await response.Content.ReadAsStringAsync(context.RequestAborted);
+        return Results.Content(content, "application/json");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "[Public Map Proxy] Error proxying info request for {Slug}", slug);
+        return Results.StatusCode(500);
+    }
+}).AllowAnonymous()
+  .CacheOutput(policy => policy
+      .Expire(TimeSpan.FromSeconds(60))
+      .SetVaryByRouteValue("slug"));
+
+// Public maps list proxy - forwards list request to API service
+app.MapGet("/public/", async (
+    HttpContext context,
+    IHttpClientFactory httpClientFactory,
+    ILogger<Program> logger) =>
+{
+    try
+    {
+        var apiClient = httpClientFactory.CreateClient("API");
+        var response = await apiClient.GetAsync("/public/", context.RequestAborted);
+
+        if (!response.IsSuccessStatusCode)
+            return Results.StatusCode((int)response.StatusCode);
+
+        var content = await response.Content.ReadAsStringAsync(context.RequestAborted);
+        return Results.Content(content, "application/json");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "[Public Map Proxy] Error proxying list request");
+        return Results.StatusCode(500);
+    }
+}).AllowAnonymous()
+  .CacheOutput(policy => policy
+      .Expire(TimeSpan.FromSeconds(60)));
+
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 

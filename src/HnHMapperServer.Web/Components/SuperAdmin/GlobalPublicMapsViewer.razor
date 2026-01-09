@@ -1,0 +1,378 @@
+@using HnHMapperServer.Core.DTOs
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@inject NavigationManager NavigationManager
+@inject ILogger<GlobalPublicMapsViewer> Logger
+
+<MudPaper Class="pa-4">
+    <MudStack Spacing="3">
+        <div class="d-flex justify-space-between align-center">
+            <MudText Typo="Typo.h5">
+                <MudIcon Icon="@Icons.Material.Filled.Public" Class="me-2" />
+                Public Maps
+            </MudText>
+            <MudStack Row="true" Spacing="2">
+                <MudButton Variant="Variant.Filled"
+                          Color="Color.Success"
+                          StartIcon="@Icons.Material.Filled.Add"
+                          OnClick="CreatePublicMap"
+                          Disabled="@_isLoading">
+                    Create Public Map
+                </MudButton>
+                <MudButton Variant="Variant.Filled"
+                          Color="Color.Primary"
+                          StartIcon="@Icons.Material.Filled.Refresh"
+                          OnClick="LoadPublicMaps"
+                          Disabled="@_isLoading">
+                    Refresh
+                </MudButton>
+            </MudStack>
+        </div>
+
+        @if (_isLoading)
+        {
+            <MudProgressLinear Indeterminate="true" />
+        }
+        else if (!_publicMaps.Any())
+        {
+            <MudAlert Severity="Severity.Info">
+                No public maps found. Create one to share map tiles publicly without authentication.
+            </MudAlert>
+        }
+        else
+        {
+            <MudTable T="PublicMapDto" Items="@_publicMaps" Hover="true" Dense="true">
+                <HeaderContent>
+                    <MudTh>Name</MudTh>
+                    <MudTh>Slug</MudTh>
+                    <MudTh>Status</MudTh>
+                    <MudTh>Generation</MudTh>
+                    <MudTh>Tiles</MudTh>
+                    <MudTh>Sources</MudTh>
+                    <MudTh>Last Generated</MudTh>
+                    <MudTh>Actions</MudTh>
+                </HeaderContent>
+                <RowTemplate>
+                    <MudTd DataLabel="Name">
+                        <MudText Typo="Typo.body2">@context.Name</MudText>
+                    </MudTd>
+                    <MudTd DataLabel="Slug">
+                        <code>@context.Id</code>
+                    </MudTd>
+                    <MudTd DataLabel="Status">
+                        <MudChip T="string" Size="Size.Small" Color="@(context.IsActive ? Color.Success : Color.Error)">
+                            @(context.IsActive ? "Active" : "Inactive")
+                        </MudChip>
+                    </MudTd>
+                    <MudTd DataLabel="Generation">
+                        @{
+                            var statusColor = context.GenerationStatus switch
+                            {
+                                "completed" => Color.Success,
+                                "running" => Color.Info,
+                                "failed" => Color.Error,
+                                _ => Color.Default
+                            };
+                        }
+                        <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center">
+                            <MudChip T="string" Size="Size.Small" Color="@statusColor">
+                                @context.GenerationStatus
+                            </MudChip>
+                            @if (context.GenerationStatus == "running" && context.GenerationProgress > 0)
+                            {
+                                <MudProgressLinear Value="@context.GenerationProgress" Color="Color.Primary" Style="width: 60px;" />
+                                <MudText Typo="Typo.caption">@context.GenerationProgress%</MudText>
+                            }
+                        </MudStack>
+                    </MudTd>
+                    <MudTd DataLabel="Tiles">
+                        <MudText Typo="Typo.body2">@context.TileCount.ToString("N0")</MudText>
+                    </MudTd>
+                    <MudTd DataLabel="Sources">
+                        <MudChip T="string" Size="Size.Small" Color="Color.Default">
+                            @context.Sources.Count sources
+                        </MudChip>
+                    </MudTd>
+                    <MudTd DataLabel="Last Generated">
+                        @if (context.LastGeneratedAt.HasValue)
+                        {
+                            <MudTooltip Text="@($"{context.LastGeneratedAt.Value:yyyy-MM-dd HH:mm:ss} UTC ({context.LastGenerationDurationSeconds}s)")">
+                                <MudText Typo="Typo.body2">@FormatTimeAgo(context.LastGeneratedAt.Value)</MudText>
+                            </MudTooltip>
+                        }
+                        else
+                        {
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">Never</MudText>
+                        }
+                    </MudTd>
+                    <MudTd DataLabel="Actions">
+                        <MudStack Row="true" Spacing="1">
+                            <MudTooltip Text="View Public Map">
+                                <MudIconButton Icon="@Icons.Material.Filled.OpenInNew"
+                                              Color="Color.Primary"
+                                              Size="Size.Small"
+                                              Href="@($"/public/{context.Id}")"
+                                              Target="_blank"
+                                              Disabled="@(!context.IsActive)" />
+                            </MudTooltip>
+                            <MudTooltip Text="Manage Sources">
+                                <MudIconButton Icon="@Icons.Material.Filled.Source"
+                                              Color="Color.Info"
+                                              Size="Size.Small"
+                                              OnClick="@(() => ManageSources(context))" />
+                            </MudTooltip>
+                            <MudTooltip Text="@(context.GenerationStatus == "running" ? "Generation in progress..." : "Regenerate Now")">
+                                <MudIconButton Icon="@Icons.Material.Filled.Autorenew"
+                                              Color="Color.Warning"
+                                              Size="Size.Small"
+                                              Disabled="@(context.GenerationStatus == "running")"
+                                              OnClick="@(() => RegenerateMap(context))" />
+                            </MudTooltip>
+                            <MudTooltip Text="Edit">
+                                <MudIconButton Icon="@Icons.Material.Filled.Edit"
+                                              Color="Color.Default"
+                                              Size="Size.Small"
+                                              OnClick="@(() => EditPublicMap(context))" />
+                            </MudTooltip>
+                            <MudTooltip Text="Delete">
+                                <MudIconButton Icon="@Icons.Material.Filled.Delete"
+                                              Color="Color.Error"
+                                              Size="Size.Small"
+                                              OnClick="@(() => DeletePublicMap(context))" />
+                            </MudTooltip>
+                        </MudStack>
+                    </MudTd>
+                </RowTemplate>
+            </MudTable>
+        }
+
+        @if (_hasRunningGenerations)
+        {
+            <MudAlert Severity="Severity.Info" Icon="@Icons.Material.Filled.Autorenew">
+                Generation in progress. Status will update automatically.
+            </MudAlert>
+        }
+    </MudStack>
+</MudPaper>
+
+@code {
+    private List<PublicMapDto> _publicMaps = new();
+    private bool _isLoading = true;
+    private bool _hasRunningGenerations = false;
+    private System.Timers.Timer? _pollTimer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadPublicMaps();
+    }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender)
+        {
+            // Start polling if there are running generations
+            StartPollingIfNeeded();
+        }
+    }
+
+    private void StartPollingIfNeeded()
+    {
+        if (_hasRunningGenerations && _pollTimer == null)
+        {
+            _pollTimer = new System.Timers.Timer(3000); // Poll every 3 seconds
+            _pollTimer.Elapsed += async (sender, e) => await PollStatus();
+            _pollTimer.Start();
+        }
+    }
+
+    private void StopPolling()
+    {
+        if (_pollTimer != null)
+        {
+            _pollTimer.Stop();
+            _pollTimer.Dispose();
+            _pollTimer = null;
+        }
+    }
+
+    private async Task PollStatus()
+    {
+        try
+        {
+            await LoadPublicMaps();
+            await InvokeAsync(StateHasChanged);
+
+            // Stop polling if no more running generations
+            if (!_hasRunningGenerations)
+            {
+                StopPolling();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Error polling generation status");
+        }
+    }
+
+    private async Task LoadPublicMaps()
+    {
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.GetAsync("/api/superadmin/public-maps");
+
+            if (response.IsSuccessStatusCode)
+            {
+                _publicMaps = await response.Content.ReadFromJsonAsync<List<PublicMapDto>>() ?? new();
+                _hasRunningGenerations = _publicMaps.Any(m => m.GenerationStatus == "running");
+                StartPollingIfNeeded();
+            }
+            else
+            {
+                Snackbar.Add("Failed to load public maps", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error loading public maps");
+            Snackbar.Add("Error loading public maps", Severity.Error);
+        }
+        finally
+        {
+            _isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task CreatePublicMap()
+    {
+        var parameters = new DialogParameters<CreatePublicMapDialog>();
+        var options = new DialogOptions { MaxWidth = MaxWidth.Small, FullWidth = true };
+
+        var dialog = await DialogService.ShowAsync<CreatePublicMapDialog>("Create Public Map", parameters, options);
+        var result = await dialog.Result;
+
+        if (!result.Canceled)
+        {
+            await LoadPublicMaps();
+        }
+    }
+
+    private async Task EditPublicMap(PublicMapDto publicMap)
+    {
+        var parameters = new DialogParameters<EditPublicMapDialog>
+        {
+            { x => x.PublicMap, publicMap }
+        };
+        var options = new DialogOptions { MaxWidth = MaxWidth.Small, FullWidth = true };
+
+        var dialog = await DialogService.ShowAsync<EditPublicMapDialog>("Edit Public Map", parameters, options);
+        var result = await dialog.Result;
+
+        if (!result.Canceled)
+        {
+            await LoadPublicMaps();
+        }
+    }
+
+    private async Task ManageSources(PublicMapDto publicMap)
+    {
+        var parameters = new DialogParameters<ManagePublicMapSourcesDialog>
+        {
+            { x => x.PublicMap, publicMap }
+        };
+        var options = new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true };
+
+        var dialog = await DialogService.ShowAsync<ManagePublicMapSourcesDialog>("Manage Sources", parameters, options);
+        var result = await dialog.Result;
+
+        if (!result.Canceled)
+        {
+            await LoadPublicMaps();
+        }
+    }
+
+    private async Task RegenerateMap(PublicMapDto publicMap)
+    {
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.PostAsync($"/api/superadmin/public-maps/{publicMap.Id}/regenerate", null);
+
+            if (response.IsSuccessStatusCode)
+            {
+                Snackbar.Add($"Regeneration started for '{publicMap.Name}'", Severity.Success);
+                await LoadPublicMaps();
+            }
+            else if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+            {
+                Snackbar.Add("Generation already in progress", Severity.Warning);
+            }
+            else
+            {
+                Snackbar.Add("Failed to start regeneration", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error triggering regeneration for {PublicMapId}", publicMap.Id);
+            Snackbar.Add("Error starting regeneration", Severity.Error);
+        }
+    }
+
+    private async Task DeletePublicMap(PublicMapDto publicMap)
+    {
+        var confirmed = await DialogService.ShowMessageBox(
+            "Delete Public Map",
+            $"Are you sure you want to delete '{publicMap.Name}'? This will also delete all generated tiles.",
+            "Delete", cancelText: "Cancel");
+
+        if (confirmed == true)
+        {
+            try
+            {
+                var client = HttpClientFactory.CreateClient("API");
+                var response = await client.DeleteAsync($"/api/superadmin/public-maps/{publicMap.Id}");
+
+                if (response.IsSuccessStatusCode)
+                {
+                    Snackbar.Add($"Deleted public map '{publicMap.Name}'", Severity.Success);
+                    await LoadPublicMaps();
+                }
+                else
+                {
+                    Snackbar.Add("Failed to delete public map", Severity.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Error deleting public map {PublicMapId}", publicMap.Id);
+                Snackbar.Add("Error deleting public map", Severity.Error);
+            }
+        }
+    }
+
+    private static string FormatTimeAgo(DateTime utcTime)
+    {
+        var timeSpan = DateTime.UtcNow - utcTime;
+
+        if (timeSpan.TotalMinutes < 1)
+            return "just now";
+        if (timeSpan.TotalMinutes < 60)
+            return $"{(int)timeSpan.TotalMinutes}m ago";
+        if (timeSpan.TotalHours < 24)
+            return $"{(int)timeSpan.TotalHours}h ago";
+        if (timeSpan.TotalDays < 30)
+            return $"{(int)timeSpan.TotalDays}d ago";
+        return utcTime.ToString("yyyy-MM-dd");
+    }
+
+    public void Dispose()
+    {
+        StopPolling();
+    }
+}

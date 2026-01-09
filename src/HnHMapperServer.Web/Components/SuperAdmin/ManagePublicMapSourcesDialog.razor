@@ -1,0 +1,352 @@
+@using HnHMapperServer.Core.DTOs
+@using MudBlazor
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject ILogger<ManagePublicMapSourcesDialog> Logger
+
+<MudDialog>
+    <DialogContent>
+        <MudText Typo="Typo.h6" Class="mb-2">Manage Sources for "@PublicMap.Name"</MudText>
+        <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
+            Add tenant maps to include in this public map. When tiles overlap, the newest upload wins.
+        </MudText>
+
+        <!-- Current Sources -->
+        <MudText Typo="Typo.subtitle1" Class="mb-2">Current Sources (@_sources.Count)</MudText>
+
+        @if (_isLoadingSources)
+        {
+            <MudProgressLinear Indeterminate="true" Class="mb-4" />
+        }
+        else if (!_sources.Any())
+        {
+            <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-4">
+                No sources configured. Add tenant maps below to generate tiles.
+            </MudAlert>
+        }
+        else
+        {
+            <MudTable T="PublicMapSourceDto" Items="@_sources" Dense="true" Hover="true" Class="mb-4">
+                <HeaderContent>
+                    <MudTh>Tenant</MudTh>
+                    <MudTh>Map</MudTh>
+                    <MudTh>Added</MudTh>
+                    <MudTh>Actions</MudTh>
+                </HeaderContent>
+                <RowTemplate>
+                    <MudTd DataLabel="Tenant">
+                        <MudText Typo="Typo.body2">@context.TenantName</MudText>
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">@context.TenantId</MudText>
+                    </MudTd>
+                    <MudTd DataLabel="Map">
+                        <MudText Typo="Typo.body2">@context.MapName</MudText>
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">ID: @context.MapId</MudText>
+                    </MudTd>
+                    <MudTd DataLabel="Added">
+                        <MudText Typo="Typo.body2">@context.AddedAt.ToString("yyyy-MM-dd")</MudText>
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">by @context.AddedBy</MudText>
+                    </MudTd>
+                    <MudTd DataLabel="Actions">
+                        <MudIconButton Icon="@Icons.Material.Filled.Delete"
+                                      Color="Color.Error"
+                                      Size="Size.Small"
+                                      OnClick="@(() => RemoveSource(context))"
+                                      Disabled="@_isAddingOrRemoving"
+                                      Title="Remove source" />
+                    </MudTd>
+                </RowTemplate>
+            </MudTable>
+            <MudAlert Severity="Severity.Info" Dense="true" Class="mb-4">
+                <MudIcon Icon="@Icons.Material.Filled.AutoAwesome" Size="Size.Small" Class="me-1" />
+                Maps are automatically aligned using shared grid IDs during generation.
+            </MudAlert>
+        }
+
+        <MudDivider Class="my-4" />
+
+        <!-- Add New Source -->
+        <MudText Typo="Typo.subtitle1" Class="mb-2">Add Source</MudText>
+
+        @if (_isLoadingAvailableMaps)
+        {
+            <MudProgressLinear Indeterminate="true" />
+        }
+        else
+        {
+            <MudStack Spacing="3">
+                <MudSelect T="string" Value="_selectedTenantId"
+                           Label="Tenant"
+                           Variant="Variant.Outlined"
+                           HelperText="Select a tenant"
+                           ValueChanged="OnTenantChanged">
+                    @foreach (var tenant in _availableTenants)
+                    {
+                        <MudSelectItem Value="@tenant">@tenant</MudSelectItem>
+                    }
+                </MudSelect>
+
+                <MudSelect T="int?" @bind-Value="_selectedMapId"
+                           Label="Map"
+                           Variant="Variant.Outlined"
+                           Disabled="@(string.IsNullOrEmpty(_selectedTenantId))"
+                           HelperText="Select a map from the tenant">
+                    @foreach (var map in _filteredMaps)
+                    {
+                        <MudSelectItem Value="@((int?)map.MapId)">@map.MapName (@map.TileCount tiles)</MudSelectItem>
+                    }
+                </MudSelect>
+
+                <MudButton Variant="Variant.Filled"
+                           Color="Color.Success"
+                           StartIcon="@Icons.Material.Filled.Add"
+                           OnClick="AddSource"
+                           Disabled="@(_selectedMapId == null || _isAddingOrRemoving)">
+                    @if (_isAddingOrRemoving)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                        <span>Adding...</span>
+                    }
+                    else
+                    {
+                        <span>Add Source</span>
+                    }
+                </MudButton>
+            </MudStack>
+        }
+
+        @if (_errorMessage != null)
+        {
+            <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">
+                @_errorMessage
+            </MudAlert>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Close">Close</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] IMudDialogInstance? MudDialog { get; set; }
+    [Parameter] public PublicMapDto PublicMap { get; set; } = null!;
+
+    private List<PublicMapSourceDto> _sources = new();
+    private List<AvailableTenantMapDto> _availableMaps = new();
+    private List<AvailableTenantMapDto> _filteredMaps = new();
+    private List<string> _availableTenants = new();
+
+    private string? _selectedTenantId;
+    private int? _selectedMapId;
+
+    private bool _isLoadingSources = true;
+    private bool _isLoadingAvailableMaps = true;
+    private bool _isAddingOrRemoving = false;
+    private string? _errorMessage = null;
+    private bool _hasChanges = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Task.WhenAll(LoadSources(), LoadAvailableMaps());
+    }
+
+    private async Task LoadSources()
+    {
+        _isLoadingSources = true;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.GetAsync($"/api/superadmin/public-maps/{PublicMap.Id}");
+
+            if (response.IsSuccessStatusCode)
+            {
+                var publicMap = await response.Content.ReadFromJsonAsync<PublicMapDto>(
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                _sources = publicMap?.Sources ?? new();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error loading sources");
+            Snackbar.Add("Failed to load sources", Severity.Error);
+        }
+        finally
+        {
+            _isLoadingSources = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task LoadAvailableMaps()
+    {
+        _isLoadingAvailableMaps = true;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.GetAsync("/api/superadmin/available-tenant-maps");
+
+            if (response.IsSuccessStatusCode)
+            {
+                _availableMaps = await response.Content.ReadFromJsonAsync<List<AvailableTenantMapDto>>(
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
+
+                _availableTenants = _availableMaps
+                    .Select(m => m.TenantId)
+                    .Distinct()
+                    .OrderBy(t => t)
+                    .ToList();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error loading available maps");
+            Snackbar.Add("Failed to load available maps", Severity.Error);
+        }
+        finally
+        {
+            _isLoadingAvailableMaps = false;
+            StateHasChanged();
+        }
+    }
+
+    private void OnTenantChanged(string? tenantId)
+    {
+        _selectedTenantId = tenantId;
+        _selectedMapId = null;
+
+        if (!string.IsNullOrEmpty(tenantId))
+        {
+            // Filter maps by tenant and exclude already-added sources
+            var existingSourceKeys = _sources.Select(s => $"{s.TenantId}:{s.MapId}").ToHashSet();
+
+            _filteredMaps = _availableMaps
+                .Where(m => m.TenantId == tenantId)
+                .Where(m => !existingSourceKeys.Contains($"{m.TenantId}:{m.MapId}"))
+                .ToList();
+        }
+        else
+        {
+            _filteredMaps = new();
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task AddSource()
+    {
+        if (string.IsNullOrEmpty(_selectedTenantId) || _selectedMapId == null)
+        {
+            Snackbar.Add("Select a tenant and map", Severity.Warning);
+            return;
+        }
+
+        _isAddingOrRemoving = true;
+        _errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var request = new AddPublicMapSourceDto
+            {
+                TenantId = _selectedTenantId,
+                MapId = _selectedMapId.Value,
+                Priority = 0
+            };
+
+            var response = await client.PostAsJsonAsync($"/api/superadmin/public-maps/{PublicMap.Id}/sources", request);
+
+            if (response.IsSuccessStatusCode)
+            {
+                Snackbar.Add("Source added successfully", Severity.Success);
+                _hasChanges = true;
+                _selectedTenantId = null;
+                _selectedMapId = null;
+                _filteredMaps = new();
+                await LoadSources();
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                try
+                {
+                    var errorObj = System.Text.Json.JsonSerializer.Deserialize<ErrorResponse>(errorBody,
+                        new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    _errorMessage = errorObj?.Error ?? "Failed to add source";
+                }
+                catch
+                {
+                    _errorMessage = "Failed to add source";
+                }
+                Snackbar.Add(_errorMessage, Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error adding source");
+            _errorMessage = $"Error: {ex.Message}";
+            Snackbar.Add(_errorMessage, Severity.Error);
+        }
+        finally
+        {
+            _isAddingOrRemoving = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task RemoveSource(PublicMapSourceDto source)
+    {
+        _isAddingOrRemoving = true;
+        _errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.DeleteAsync($"/api/superadmin/public-maps/{PublicMap.Id}/sources/{source.Id}");
+
+            if (response.IsSuccessStatusCode)
+            {
+                Snackbar.Add("Source removed successfully", Severity.Success);
+                _hasChanges = true;
+                await LoadSources();
+                // Refresh available maps filter
+                OnTenantChanged(_selectedTenantId);
+            }
+            else
+            {
+                Snackbar.Add("Failed to remove source", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error removing source");
+            Snackbar.Add($"Error: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isAddingOrRemoving = false;
+            StateHasChanged();
+        }
+    }
+
+    private void Close()
+    {
+        if (_hasChanges)
+        {
+            MudDialog?.Close(DialogResult.Ok(true));
+        }
+        else
+        {
+            MudDialog?.Cancel();
+        }
+    }
+
+    private class ErrorResponse
+    {
+        public string Error { get; set; } = string.Empty;
+    }
+}

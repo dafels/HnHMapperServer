@@ -122,6 +122,38 @@ public static class SuperadminEndpoints
 
         // GET /api/superadmin/tenants/{tenantId}/custom-markers-data - Get custom markers for map viewing
         group.MapGet("/tenants/{tenantId}/custom-markers-data", GetTenantCustomMarkersData);
+
+        // === Public Maps Management ===
+
+        // GET /api/superadmin/public-maps - List all public maps
+        group.MapGet("/public-maps", GetAllPublicMaps);
+
+        // POST /api/superadmin/public-maps - Create a new public map
+        group.MapPost("/public-maps", CreatePublicMap);
+
+        // GET /api/superadmin/public-maps/{id} - Get public map with sources
+        group.MapGet("/public-maps/{id}", GetPublicMap);
+
+        // PUT /api/superadmin/public-maps/{id} - Update public map
+        group.MapPut("/public-maps/{id}", UpdatePublicMap);
+
+        // DELETE /api/superadmin/public-maps/{id} - Delete public map
+        group.MapDelete("/public-maps/{id}", DeletePublicMap);
+
+        // POST /api/superadmin/public-maps/{id}/sources - Add source map
+        group.MapPost("/public-maps/{id}/sources", AddPublicMapSource);
+
+        // DELETE /api/superadmin/public-maps/{id}/sources/{sourceId} - Remove source
+        group.MapDelete("/public-maps/{id}/sources/{sourceId}", RemovePublicMapSource);
+
+        // POST /api/superadmin/public-maps/{id}/regenerate - Trigger regeneration
+        group.MapPost("/public-maps/{id}/regenerate", TriggerPublicMapRegeneration);
+
+        // GET /api/superadmin/public-maps/{id}/status - Get generation status
+        group.MapGet("/public-maps/{id}/status", GetPublicMapGenerationStatus);
+
+        // GET /api/superadmin/available-tenant-maps - Get available tenant maps for source selection
+        group.MapGet("/available-tenant-maps", GetAvailableTenantMaps);
     }
 
     /// <summary>
@@ -1852,6 +1884,370 @@ public static class SuperadminEndpoints
         {
             logger.LogError(ex, "Error loading custom markers for tenant {TenantId}", tenantId);
             return Results.Problem("Failed to load custom markers");
+        }
+    }
+
+    // ===========================
+    // Public Maps Management Endpoints
+    // ===========================
+
+    /// <summary>
+    /// GET /api/superadmin/public-maps
+    /// Lists all public maps with generation status
+    /// </summary>
+    private static async Task<IResult> GetAllPublicMaps(
+        IPublicMapService publicMapService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var publicMaps = await publicMapService.GetAllPublicMapsAsync();
+            logger.LogInformation("SuperAdmin: Loaded {Count} public maps", publicMaps.Count);
+            return Results.Ok(publicMaps);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error loading public maps");
+            return Results.Problem("Failed to load public maps");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/public-maps
+    /// Creates a new public map
+    /// </summary>
+    private static async Task<IResult> CreatePublicMap(
+        CreatePublicMapDto dto,
+        IPublicMapService publicMapService,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var username = context.User.Identity?.Name ?? "Unknown";
+            var publicMap = await publicMapService.CreatePublicMapAsync(dto, username);
+
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = null, // Global
+                UserId = username,
+                Action = "PublicMapCreated",
+                EntityType = "PublicMap",
+                EntityId = publicMap.Id,
+                NewValue = $"Created public map '{publicMap.Name}' (slug: {publicMap.Id})"
+            });
+
+            logger.LogInformation("SuperAdmin {Username} created public map {PublicMapId}", username, publicMap.Id);
+            return Results.Created($"/api/superadmin/public-maps/{publicMap.Id}", publicMap);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error creating public map");
+            return Results.Problem("Failed to create public map");
+        }
+    }
+
+    /// <summary>
+    /// GET /api/superadmin/public-maps/{id}
+    /// Gets a public map with its sources
+    /// </summary>
+    private static async Task<IResult> GetPublicMap(
+        string id,
+        IPublicMapService publicMapService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var publicMap = await publicMapService.GetPublicMapAsync(id);
+            if (publicMap == null)
+            {
+                return Results.NotFound(new { error = "Public map not found" });
+            }
+
+            return Results.Ok(publicMap);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error loading public map {PublicMapId}", id);
+            return Results.Problem("Failed to load public map");
+        }
+    }
+
+    /// <summary>
+    /// PUT /api/superadmin/public-maps/{id}
+    /// Updates a public map
+    /// </summary>
+    private static async Task<IResult> UpdatePublicMap(
+        string id,
+        UpdatePublicMapDto dto,
+        IPublicMapService publicMapService,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var publicMap = await publicMapService.UpdatePublicMapAsync(id, dto);
+
+            var username = context.User.Identity?.Name ?? "Unknown";
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = null,
+                UserId = username,
+                Action = "PublicMapUpdated",
+                EntityType = "PublicMap",
+                EntityId = id,
+                NewValue = $"Updated public map: Name={dto.Name}, IsActive={dto.IsActive}, AutoRegenerate={dto.AutoRegenerate}"
+            });
+
+            logger.LogInformation("SuperAdmin {Username} updated public map {PublicMapId}", username, id);
+            return Results.Ok(publicMap);
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error updating public map {PublicMapId}", id);
+            return Results.Problem("Failed to update public map");
+        }
+    }
+
+    /// <summary>
+    /// DELETE /api/superadmin/public-maps/{id}
+    /// Deletes a public map and its generated tiles
+    /// </summary>
+    private static async Task<IResult> DeletePublicMap(
+        string id,
+        IPublicMapService publicMapService,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            await publicMapService.DeletePublicMapAsync(id);
+
+            var username = context.User.Identity?.Name ?? "Unknown";
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = null,
+                UserId = username,
+                Action = "PublicMapDeleted",
+                EntityType = "PublicMap",
+                EntityId = id,
+                NewValue = "Public map and tiles deleted"
+            });
+
+            logger.LogWarning("SuperAdmin {Username} deleted public map {PublicMapId}", username, id);
+            return Results.Ok(new { message = "Public map deleted successfully" });
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error deleting public map {PublicMapId}", id);
+            return Results.Problem("Failed to delete public map");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/public-maps/{id}/sources
+    /// Adds a source map to a public map
+    /// </summary>
+    private static async Task<IResult> AddPublicMapSource(
+        string id,
+        AddPublicMapSourceDto dto,
+        IPublicMapService publicMapService,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var username = context.User.Identity?.Name ?? "Unknown";
+            var source = await publicMapService.AddSourceAsync(id, dto, username);
+
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = dto.TenantId,
+                UserId = username,
+                Action = "PublicMapSourceAdded",
+                EntityType = "PublicMapSource",
+                EntityId = source.Id.ToString(),
+                NewValue = $"Added source map {dto.TenantId}/{dto.MapId} to public map {id}"
+            });
+
+            logger.LogInformation("SuperAdmin {Username} added source {TenantId}/{MapId} to public map {PublicMapId}",
+                username, dto.TenantId, dto.MapId, id);
+            return Results.Created($"/api/superadmin/public-maps/{id}/sources/{source.Id}", source);
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error adding source to public map {PublicMapId}", id);
+            return Results.Problem("Failed to add source to public map");
+        }
+    }
+
+    /// <summary>
+    /// DELETE /api/superadmin/public-maps/{id}/sources/{sourceId}
+    /// Removes a source from a public map
+    /// </summary>
+    private static async Task<IResult> RemovePublicMapSource(
+        string id,
+        int sourceId,
+        IPublicMapService publicMapService,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            await publicMapService.RemoveSourceAsync(id, sourceId);
+
+            var username = context.User.Identity?.Name ?? "Unknown";
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = null,
+                UserId = username,
+                Action = "PublicMapSourceRemoved",
+                EntityType = "PublicMapSource",
+                EntityId = sourceId.ToString(),
+                NewValue = $"Removed source {sourceId} from public map {id}"
+            });
+
+            logger.LogInformation("SuperAdmin {Username} removed source {SourceId} from public map {PublicMapId}",
+                username, sourceId, id);
+            return Results.Ok(new { message = "Source removed successfully" });
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error removing source {SourceId} from public map {PublicMapId}", sourceId, id);
+            return Results.Problem("Failed to remove source from public map");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/public-maps/{id}/regenerate
+    /// Triggers regeneration of a public map
+    /// </summary>
+    private static async Task<IResult> TriggerPublicMapRegeneration(
+        string id,
+        IPublicMapService publicMapService,
+        IPublicMapGenerationService generationService,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            // Verify public map exists
+            var publicMap = await publicMapService.GetPublicMapAsync(id);
+            if (publicMap == null)
+            {
+                return Results.NotFound(new { error = "Public map not found" });
+            }
+
+            // Check if already running
+            if (await generationService.IsGenerationRunningAsync(id))
+            {
+                return Results.Conflict(new { error = "Generation already in progress for this public map" });
+            }
+
+            // Queue the generation
+            generationService.QueueGeneration(id);
+
+            var username = context.User.Identity?.Name ?? "Unknown";
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = null,
+                UserId = username,
+                Action = "PublicMapRegenerationTriggered",
+                EntityType = "PublicMap",
+                EntityId = id,
+                NewValue = "Manual regeneration triggered"
+            });
+
+            logger.LogInformation("SuperAdmin {Username} triggered regeneration for public map {PublicMapId}", username, id);
+            return Results.Accepted(value: new { message = "Regeneration queued successfully" });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error triggering regeneration for public map {PublicMapId}", id);
+            return Results.Problem("Failed to trigger regeneration");
+        }
+    }
+
+    /// <summary>
+    /// GET /api/superadmin/public-maps/{id}/status
+    /// Gets generation status for a public map
+    /// </summary>
+    private static async Task<IResult> GetPublicMapGenerationStatus(
+        string id,
+        IPublicMapService publicMapService,
+        IPublicMapGenerationService generationService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var status = await publicMapService.GetGenerationStatusAsync(id);
+            if (status == null)
+            {
+                return Results.NotFound(new { error = "Public map not found" });
+            }
+
+            // Add real-time running status
+            var isRunning = await generationService.IsGenerationRunningAsync(id);
+
+            return Results.Ok(new
+            {
+                status.PublicMapId,
+                status.Status,
+                status.Progress,
+                status.TileCount,
+                status.LastGeneratedAt,
+                status.LastGenerationDurationSeconds,
+                status.Error,
+                IsCurrentlyRunning = isRunning
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error getting generation status for public map {PublicMapId}", id);
+            return Results.Problem("Failed to get generation status");
+        }
+    }
+
+    /// <summary>
+    /// GET /api/superadmin/available-tenant-maps
+    /// Gets available tenant maps for public map source selection
+    /// </summary>
+    private static async Task<IResult> GetAvailableTenantMaps(
+        IPublicMapService publicMapService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var availableMaps = await publicMapService.GetAvailableTenantMapsAsync();
+            logger.LogInformation("SuperAdmin: Loaded {Count} available tenant maps", availableMaps.Count);
+            return Results.Ok(availableMaps);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error loading available tenant maps");
+            return Results.Problem("Failed to load available tenant maps");
         }
     }
 }
