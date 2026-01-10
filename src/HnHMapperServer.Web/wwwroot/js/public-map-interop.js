@@ -2,14 +2,16 @@
 // Simplified Leaflet map for public (unauthenticated) map viewing
 // Displays tiles and thingwall markers with highlighted styling
 
-// Map constants (same as main map)
-const TileSize = 100;
+// Map constants - using 400x400 tiles for better performance (16x fewer HTTP requests)
+// Each 400x400 tile contains 4x4 = 16 original 100x100 grid cells
+const TileSize = 400;
+const BaseTileSize = 100;  // Original grid cell size (for coordinate conversion)
 const HnHMaxZoom = 7;
 const HnHMinZoom = 1;
 
-// Coordinate normalization factors
-const latNormalization = 90.0 * TileSize / 2500000.0;
-const lngNormalization = 180.0 * TileSize / 2500000.0;
+// Coordinate normalization factors (based on original 100px grid cells, not display tile size)
+const latNormalization = 90.0 * BaseTileSize / 2500000.0;
+const lngNormalization = 180.0 * BaseTileSize / 2500000.0;
 
 // Pre-computed scale factors for each zoom level
 const SCALE_FACTORS = {};
@@ -56,12 +58,14 @@ const PRELOAD_CONFIG = {
 const preloadedTiles = new Set();
 
 // Update URL with current map position using history.replaceState (bypasses Blazor)
+// Coordinates in URL are in original grid units (100x100) for consistency with API bounds
 function updateUrlWithPosition() {
     if (!mapInstance || !currentSlug) return;
 
     const point = mapInstance.project(mapInstance.getCenter(), HnHMaxZoom);
-    const x = Math.floor(point.x / TileSize);
-    const y = Math.floor(point.y / TileSize);
+    // Use BaseTileSize for URL coordinates (consistent with API bounds)
+    const x = Math.floor(point.x / BaseTileSize);
+    const y = Math.floor(point.y / BaseTileSize);
     const z = mapInstance.getZoom();
 
     const newUrl = `/public/${currentSlug}?x=${x}&y=${y}&z=${z}`;
@@ -89,7 +93,7 @@ function calculateTilesToPreload(bounds, zoom) {
 
     for (let x = minTileX; x <= maxTileX; x++) {
         for (let y = minTileY; y <= maxTileY; y++) {
-            const url = `/public/${currentSlug}/tiles/${zoom}/${x}_${y}.png`;
+            const url = `/public/${currentSlug}/tiles/${zoom}/${x}_${y}.webp`;
             if (!preloadedTiles.has(url)) {
                 tiles.push(url);
             }
@@ -182,8 +186,8 @@ const PublicTileLayer = L.TileLayer.extend({
         const x = coords.x;
         const y = coords.y;
 
-        // Build URL for public tiles
-        return `/public/${this.slug}/tiles/${hnhZoom}/${x}_${y}.png`;
+        // Build URL for public tiles (WebP for better compression)
+        return `/public/${this.slug}/tiles/${hnhZoom}/${x}_${y}.webp`;
     }
 });
 
@@ -198,27 +202,27 @@ export async function initializePublicMap(mapElement, slug, centerX, centerY, in
     await new Promise(resolve => {
         requestAnimationFrame(() => {
             try {
-                // Create map
+                // Create map with smooth interactions enabled
                 mapInstance = L.map(mapElement, {
                     minZoom: HnHMinZoom,
                     maxZoom: HnHMaxZoom,
                     crs: HnHCRS,
                     attributionControl: false,
-                    inertia: false,
                     zoomAnimation: true,
-                    fadeAnimation: false
+                    fadeAnimation: true,        // Smooth tile fade-in
+                    zoomAnimationThreshold: 4   // Disable animation for large zoom jumps
                 });
 
-                // Create tile layer
+                // Create tile layer with optimized settings for smooth experience
                 tileLayer = new PublicTileLayer('', {
                     tileSize: TileSize,
                     maxZoom: HnHMaxZoom,
                     minZoom: HnHMinZoom,
                     zoomReverse: true,
-                    updateWhenZooming: false,
-                    updateWhenIdle: true,
-                    keepBuffer: 6,              // Keep more tiles in memory
-                    updateInterval: 200,        // Throttle tile updates (ms)
+                    updateWhenZooming: true,    // Load tiles during zoom for smoother experience
+                    updateWhenIdle: false,      // Don't wait for idle - load immediately
+                    keepBuffer: 10,             // Keep many tiles in memory for smooth panning
+                    updateInterval: 50,         // Fast tile updates for responsiveness
                     zoomAnimationThreshold: 4   // Disable animation for large zooms
                 });
 
@@ -230,9 +234,11 @@ export async function initializePublicMap(mapElement, slug, centerX, centerY, in
                 markerLayer.addTo(mapInstance);
 
                 // Calculate center position in pixels and convert to LatLng
-                // centerX/centerY are tile coordinates, convert to pixel position (center of tile)
-                const centerPixelX = (centerX + 0.5) * TileSize;
-                const centerPixelY = (centerY + 0.5) * TileSize;
+                // centerX/centerY are in original grid coordinates (100x100 units)
+                // Convert to pixel position: grid coord * BaseTileSize (100) gives absolute pixels
+                // The tile layer uses TileSize (400) for its grid, so we use absolute pixels directly
+                const centerPixelX = (centerX + 0.5) * BaseTileSize;
+                const centerPixelY = (centerY + 0.5) * BaseTileSize;
                 const centerLatLng = mapInstance.unproject([centerPixelX, centerPixelY], HnHMaxZoom);
 
                 // Set view to calculated center with appropriate zoom

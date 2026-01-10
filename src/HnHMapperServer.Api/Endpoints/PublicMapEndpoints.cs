@@ -65,7 +65,7 @@ public static class PublicMapEndpoints
             return Results.NotFound(new { error = "Public map not found" });
         }
 
-        // Parse path: {zoom}/{x}_{y}.png
+        // Parse path: {zoom}/{x}_{y}.webp
         var parts = path.Split('/');
         if (parts.Length != 2)
             return Results.NotFound();
@@ -73,7 +73,7 @@ public static class PublicMapEndpoints
         if (!int.TryParse(parts[0], out var zoom))
             return Results.NotFound();
 
-        var coordPart = parts[1].Replace(".png", "");
+        var coordPart = parts[1].Replace(".webp", "");
         var coords = coordPart.Split('_');
         if (coords.Length != 2)
             return Results.NotFound();
@@ -85,9 +85,7 @@ public static class PublicMapEndpoints
             return Results.NotFound();
 
         var gridStorage = configuration["GridStorage"] ?? "map";
-
-        // Build file path: public/{slug}/{zoom}/{x}_{y}.png
-        var filePath = Path.Combine(gridStorage, "public", slug, zoom.ToString(), $"{x}_{y}.png");
+        var filePath = Path.Combine(gridStorage, "public", slug, zoom.ToString(), $"{x}_{y}.webp");
 
         if (!File.Exists(filePath))
         {
@@ -131,7 +129,7 @@ public static class PublicMapEndpoints
         context.Response.Headers.Append("ETag", etagValue);
         context.Response.Headers.Append("Last-Modified", lastModified.ToString("R"));
 
-        return Results.File(filePath, "image/png");
+        return Results.File(filePath, "image/webp");
     }
 
     private static async Task<IResult> GetPublicMapInfo(

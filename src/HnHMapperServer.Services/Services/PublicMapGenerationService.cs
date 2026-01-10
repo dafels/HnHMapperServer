@@ -9,6 +9,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Webp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 
@@ -143,24 +144,13 @@ public class PublicMapGenerationService : IPublicMapGenerationService
                 }
             }
 
-            var totalTiles = allCoordinates.Count;
-            var processedTiles = 0;
-            var lastProgressUpdate = 0;
-
-            // Track bounds
+            // Track bounds in original grid coordinates
             int? minX = null, maxX = null, minY = null, maxY = null;
 
-            // Track coordinates that were actually copied (for zoom generation)
-            var copiedZoom0Coords = new HashSet<(int x, int y)>();
-
-            _logger.LogInformation("Copying {TileCount} zoom-0 tiles for public map {PublicMapId}", totalTiles, publicMapId);
-
-            foreach (var (coord, tileInfo) in allCoordinates)
+            // Calculate bounds from all zoom-0 coordinates
+            foreach (var (coord, _) in allCoordinates)
             {
                 var (zoom, x, y) = coord;
-                var (tenantId, mapId, file, _) = tileInfo;
-
-                // Update bounds (only for zoom 0)
                 if (zoom == 0)
                 {
                     minX = minX.HasValue ? Math.Min(minX.Value, x) : x;
@@ -168,49 +158,97 @@ public class PublicMapGenerationService : IPublicMapGenerationService
                     minY = minY.HasValue ? Math.Min(minY.Value, y) : y;
                     maxY = maxY.HasValue ? Math.Max(maxY.Value, y) : y;
                 }
+            }
 
-                // Source file path - use the File column from database which has the actual path
-                // Zoom 0 tiles use grids/{gridId}.png format, higher zooms use {mapId}/{zoom}/{x}_{y}.png
-                var sourcePath = Path.Combine(_gridStorage, file);
+            // Generate 400x400 tiles by combining 4x4 base tiles
+            // Each output tile (tx, ty) covers base tiles (4*tx to 4*tx+3, 4*ty to 4*ty+3)
+            var copiedZoom0Coords = new HashSet<(int x, int y)>();
+            var zoomDir = Path.Combine(outputPath, "0");
+            Directory.CreateDirectory(zoomDir);
 
-                // Destination file path
-                var destDir = Path.Combine(outputPath, zoom.ToString());
-                Directory.CreateDirectory(destDir);
-                var destPath = Path.Combine(destDir, $"{x}_{y}.png");
+            // Calculate output tile bounds (divide by 4, using floor for proper rounding)
+            var outMinX = minX.HasValue ? (int)Math.Floor(minX.Value / 4.0) : 0;
+            var outMaxX = maxX.HasValue ? (int)Math.Floor(maxX.Value / 4.0) : 0;
+            var outMinY = minY.HasValue ? (int)Math.Floor(minY.Value / 4.0) : 0;
+            var outMaxY = maxY.HasValue ? (int)Math.Floor(maxY.Value / 4.0) : 0;
 
-                // Copy tile and track success
-                if (File.Exists(sourcePath))
+            var totalOutputTiles = (outMaxX - outMinX + 1) * (outMaxY - outMinY + 1);
+            var processedTiles = 0;
+            var lastProgressUpdate = 0;
+
+            var webpEncoder = new WebpEncoder
+            {
+                Quality = 85,
+                Method = WebpEncodingMethod.Default
+            };
+
+            _logger.LogInformation("Generating {TileCount} 400x400 tiles for public map {PublicMapId} from {SourceCount} source tiles",
+                totalOutputTiles, publicMapId, allCoordinates.Count);
+
+            // Generate each 400x400 tile
+            for (var tx = outMinX; tx <= outMaxX; tx++)
+            {
+                for (var ty = outMinY; ty <= outMaxY; ty++)
                 {
-                    try
+                    // Create 400x400 transparent canvas
+                    using var img = new Image<Rgba32>(400, 400);
+                    img.Mutate(ctx => ctx.BackgroundColor(Color.Transparent));
+
+                    var hasAnyTile = false;
+
+                    // Load and place each of the 4x4 base tiles
+                    for (int dx = 0; dx < 4; dx++)
                     {
-                        File.Copy(sourcePath, destPath, overwrite: true);
-                        copiedZoom0Coords.Add((x, y));  // Track successful copy
+                        for (int dy = 0; dy < 4; dy++)
+                        {
+                            var baseX = tx * 4 + dx;
+                            var baseY = ty * 4 + dy;
+                            var key = (0, baseX, baseY);
+
+                            if (allCoordinates.TryGetValue(key, out var tileInfo))
+                            {
+                                var sourcePath = Path.Combine(_gridStorage, tileInfo.file);
+                                if (File.Exists(sourcePath))
+                                {
+                                    try
+                                    {
+                                        using var baseImg = await Image.LoadAsync<Rgba32>(sourcePath);
+                                        // Place 100x100 base tile at correct position in 400x400 canvas
+                                        img.Mutate(ctx => ctx.DrawImage(baseImg, new Point(dx * 100, dy * 100), 1f));
+                                        hasAnyTile = true;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        _logger.LogWarning(ex, "Failed to load base tile at ({X}, {Y})", baseX, baseY);
+                                    }
+                                }
+                            }
+                        }
                     }
-                    catch (Exception ex)
+
+                    // Only save if we had at least one base tile
+                    if (hasAnyTile)
                     {
-                        _logger.LogWarning(ex, "Failed to copy tile {SourcePath} to {DestPath}", sourcePath, destPath);
+                        var outputFile = Path.Combine(zoomDir, $"{tx}_{ty}.webp");
+                        await img.SaveAsWebpAsync(outputFile, webpEncoder);
+                        copiedZoom0Coords.Add((tx, ty));
                     }
-                }
-                else
-                {
-                    _logger.LogWarning("Source tile not found: {SourcePath} (tenant: {TenantId}, map: {MapId})",
-                        sourcePath, tenantId, mapId);
-                }
 
-                processedTiles++;
+                    processedTiles++;
 
-                // Update progress every 5%
-                var currentProgress = totalTiles > 0 ? (processedTiles * 50) / totalTiles : 50; // First 50% for copying
-                if (currentProgress >= lastProgressUpdate + 5 || processedTiles == totalTiles)
-                {
-                    lastProgressUpdate = currentProgress;
-                    publicMap.GenerationProgress = currentProgress;
-                    await dbContext.SaveChangesAsync();
+                    // Update progress every 5%
+                    var currentProgress = totalOutputTiles > 0 ? (processedTiles * 50) / totalOutputTiles : 50;
+                    if (currentProgress >= lastProgressUpdate + 5 || processedTiles == totalOutputTiles)
+                    {
+                        lastProgressUpdate = currentProgress;
+                        publicMap.GenerationProgress = currentProgress;
+                        await dbContext.SaveChangesAsync();
+                    }
                 }
             }
 
-            _logger.LogInformation("Successfully copied {CopiedCount} of {TotalCount} zoom-0 tiles for public map {PublicMapId}",
-                copiedZoom0Coords.Count, totalTiles, publicMapId);
+            _logger.LogInformation("Successfully generated {GeneratedCount} zoom-0 tiles (400x400) for public map {PublicMapId}",
+                copiedZoom0Coords.Count, publicMapId);
 
             // Extract and save thingwall markers from all sources
             var markerCount = await ExtractAndSaveMarkersAsync(dbContext, sources, sourceOffsets, outputPath, publicMapId);
@@ -220,13 +258,13 @@ public class PublicMapGenerationService : IPublicMapGenerationService
 
             stopwatch.Stop();
 
-            // Update total tile count to include zoom tiles
-            totalTiles += zoomTileCount;
+            // Calculate total tile count: zoom-0 tiles + zoom 1-6 tiles
+            var totalGeneratedTiles = copiedZoom0Coords.Count + zoomTileCount;
 
             // Update final status
             publicMap.GenerationStatus = "completed";
             publicMap.GenerationProgress = 100;
-            publicMap.TileCount = totalTiles;
+            publicMap.TileCount = totalGeneratedTiles;
             publicMap.LastGeneratedAt = DateTime.UtcNow;
             publicMap.LastGenerationDurationSeconds = (int)stopwatch.Elapsed.TotalSeconds;
             publicMap.MinX = minX;
@@ -237,7 +275,7 @@ public class PublicMapGenerationService : IPublicMapGenerationService
 
             _logger.LogInformation(
                 "Completed generation for public map {PublicMapId}: {TileCount} tiles in {Duration}s",
-                publicMapId, totalTiles, stopwatch.Elapsed.TotalSeconds);
+                publicMapId, totalGeneratedTiles, stopwatch.Elapsed.TotalSeconds);
 
             return true;
         }
@@ -426,32 +464,39 @@ public class PublicMapGenerationService : IPublicMapGenerationService
             var lastLogTime = DateTime.UtcNow;
             var parentList = parentCoords.ToList(); // Convert to list for progress tracking
 
+            // WebP encoder for consistent output
+            var webpEncoder = new WebpEncoder
+            {
+                Quality = 85,
+                Method = WebpEncodingMethod.Default
+            };
+
             foreach (var (px, py) in parentList)
             {
-                // Create 100x100 transparent canvas
-                using var img = new Image<Rgba32>(100, 100);
+                // Create 400x400 transparent canvas (matching tile size)
+                using var img = new Image<Rgba32>(400, 400);
                 img.Mutate(ctx => ctx.BackgroundColor(Color.Transparent));
 
                 var hasAnyChild = false;
 
-                // Load and place each of the 4 child tiles
+                // Load and place each of the 4 child tiles (now WebP format, 400x400 each)
                 for (int dx = 0; dx <= 1; dx++)
                 {
                     for (int dy = 0; dy <= 1; dy++)
                     {
                         var childX = px * 2 + dx;
                         var childY = py * 2 + dy;
-                        var childPath = Path.Combine(childDir, $"{childX}_{childY}.png");
+                        var childPath = Path.Combine(childDir, $"{childX}_{childY}.webp");
 
                         if (File.Exists(childPath))
                         {
                             try
                             {
                                 using var childImg = await Image.LoadAsync<Rgba32>(childPath);
-                                // Resize child tile to 50x50 (quarter of parent)
-                                childImg.Mutate(ctx => ctx.Resize(50, 50));
+                                // Resize 400x400 child tile to 200x200 (quarter of parent)
+                                childImg.Mutate(ctx => ctx.Resize(200, 200));
                                 // Place in appropriate quadrant
-                                img.Mutate(ctx => ctx.DrawImage(childImg, new Point(50 * dx, 50 * dy), 1f));
+                                img.Mutate(ctx => ctx.DrawImage(childImg, new Point(200 * dx, 200 * dy), 1f));
                                 hasAnyChild = true;
                             }
                             catch (Exception ex)
@@ -462,11 +507,11 @@ public class PublicMapGenerationService : IPublicMapGenerationService
                     }
                 }
 
-                // Only save if we had at least one child tile
+                // Only save if we had at least one child tile (WebP format, 400x400)
                 if (hasAnyChild)
                 {
-                    var outputFile = Path.Combine(zoomDir, $"{px}_{py}.png");
-                    await img.SaveAsPngAsync(outputFile);
+                    var outputFile = Path.Combine(zoomDir, $"{px}_{py}.webp");
+                    await img.SaveAsWebpAsync(outputFile, webpEncoder);
                     generatedCount++;
                 }
 
