@@ -1,7 +1,7 @@
 // Smart Tile Layer Module
 // Custom Leaflet tile layer with caching, revision management, and smooth transitions
 
-import { TileSize, HnHMinZoom, HnHMaxZoom } from './leaflet-config.js';
+import { TileSize, BaseTileSize, HnHMinZoom, HnHMaxZoom } from './leaflet-config.js';
 
 // Pre-computed scale factors for each zoom level (bit shift is 5x faster than Math.pow)
 const SCALE_FACTORS = {};
@@ -13,7 +13,7 @@ for (let z = HnHMinZoom; z <= HnHMaxZoom; z++) {
 export const SmartTileLayer = L.TileLayer.extend({
     cache: {},              // Per-map cache: { mapId: { tileKey: { etag, state } } }
     cacheKeys: [],          // Track insertion order for LRU eviction: [{ mapId, tileKey }]
-    maxCacheEntries: 1000,  // Maximum TOTAL cache entries across all maps (prevents GB memory usage)
+    maxCacheEntries: 5000,  // Maximum TOTAL cache entries across all maps (increased for zoomed-out views)
     mapId: 0,
     offsetX: 0,             // X offset for overlay comparison (in grid coordinates, zoom-independent)
     offsetY: 0,             // Y offset for overlay comparison (in grid coordinates, zoom-independent)

@@ -1,7 +1,7 @@
 // Custom Marker Manager Module
 // Handles user-placed custom marker management
 
-import { TileSize, HnHMaxZoom, HnHMinZoom } from './leaflet-config.js';
+import { TileSize, BaseTileSize, HnHMaxZoom, HnHMinZoom } from './leaflet-config.js';
 
 // Custom marker storage
 const customMarkers = {};
@@ -67,9 +67,9 @@ export function addCustomMarker(marker, mapInstance) {
         return;
     }
 
-    // Calculate absolute position from grid + local coords
-    const absX = normalized.coordX * TileSize + normalized.x;
-    const absY = normalized.coordY * TileSize + normalized.y;
+    // Calculate absolute position from grid + local coords (use BaseTileSize for 100x100 game grid)
+    const absX = normalized.coordX * BaseTileSize + normalized.x;
+    const absY = normalized.coordY * BaseTileSize + normalized.y;
 
     // Defensive check: mapInstance might be destroyed or circuit not ready
     try {

@@ -3,6 +3,8 @@
  * Manages temporary ping markers on the map with animations and auto-expiration
  */
 
+import { BaseTileSize, HnHMaxZoom } from './leaflet-config.js';
+
 // State variables
 let mapInstance = null;
 let activePings = {}; // pingId -> { marker, expiresAt, timeoutId, ping }
@@ -50,11 +52,9 @@ export function addPing(ping, playSound = true) {
         return;
     }
 
-    // Calculate absolute position from grid coordinates
-    const TileSize = 100;
-    const HnHMaxZoom = 7;
-    const absX = coordX * TileSize + x;
-    const absY = coordY * TileSize + y;
+    // Calculate absolute position from grid coordinates (use BaseTileSize for 100x100 game grid)
+    const absX = coordX * BaseTileSize + x;
+    const absY = coordY * BaseTileSize + y;
 
     console.log(`[PingManager] Absolute coords: (${absX}, ${absY})`);
 

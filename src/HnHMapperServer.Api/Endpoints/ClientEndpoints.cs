@@ -136,6 +136,7 @@ public static partial class ClientEndpoints
         ITenantFilePathService filePathService,
         ITenantActivityService activityService,
         IConfigRepository configRepository,
+        ILargeTileService largeTileService,
         ILogger<Program> logger)
     {
         if (!await ClientTokenHelpers.HasUploadAsync(context, db, tokenService, token, logger))
@@ -320,6 +321,9 @@ public static partial class ClientEndpoints
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 tenantId,
                 fileSizeBytes);
+
+            // Mark the corresponding large tile as dirty for regeneration
+            await largeTileService.MarkDirtyAsync(tenantId, grid.Map, grid.Coord.X, grid.Coord.Y);
 
             // Update zoom levels
             var c = grid.Coord;

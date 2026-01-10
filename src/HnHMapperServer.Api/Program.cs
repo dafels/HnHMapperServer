@@ -146,6 +146,9 @@ builder.Services.AddScoped<ITimerWarningService, TimerWarningService>();  // Tim
 builder.Services.AddScoped<IHmapImportService, HmapImportService>();  // .hmap file import service
 builder.Services.AddSingleton<ImportLockService>();  // Import lock and cooldown management
 
+// Large tile service for 400x400 WebP tiles (private maps)
+builder.Services.AddScoped<ILargeTileService, LargeTileService>();
+
 // Public maps services (global, not tenant-scoped)
 builder.Services.AddScoped<IPublicMapService, PublicMapService>();
 builder.Services.AddSingleton<IPublicMapGenerationService, PublicMapGenerationService>();
@@ -201,6 +204,8 @@ builder.Services.AddHostedService<HmapTempCleanupService>(); // HMAP temp file c
 builder.Services.AddHostedService<OrphanedMarkerCleanupService>(); // Orphaned marker cleanup service
 builder.Services.AddHostedService<TenantActivityFlushService>(); // Tenant activity flush service (2-min interval)
 builder.Services.AddHostedService<PublicMapGenerationBackgroundService>(); // Public map tile generation
+// Disabled: On-demand generation with caching is now efficient enough
+// builder.Services.AddHostedService<LargeTileGenerationService>(); // Private map 400x400 WebP tile generation
 
 // Configure shared data protection for cookie sharing with Web
 var dataProtectionPath = Path.Combine(

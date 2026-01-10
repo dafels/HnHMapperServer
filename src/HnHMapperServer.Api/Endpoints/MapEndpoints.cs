@@ -53,6 +53,16 @@ public static class MapEndpoints
                 .SetVaryByRouteValue("path")       // Vary by tile path (mapId/zoom/x_y)
                 .Tag("tiles"));                     // Tag for bulk invalidation if needed
 
+        // New endpoint for 400x400 WebP tiles (optimized for performance)
+        // Note: This is also registered in Web project for browser access
+        app.MapGet("/map/tiles/{mapId:int}/{zoom:int}/{coords}", ServeGridTileWebP)
+            .RequireAuthorization("TenantMapAccess")
+            .CacheOutput(policy => policy
+                .Expire(TimeSpan.FromSeconds(60))
+                .SetVaryByQuery("v")
+                .SetVaryByRouteValue("mapId", "zoom", "coords")
+                .Tag("tiles-webp"));
+
         // Public endpoint for Discord webhook preview images (HMAC-signed URLs, rate limited)
         app.MapGet("/map/preview/{previewId}", ServePreviewImage)
             .AllowAnonymous()
@@ -1211,6 +1221,70 @@ public static class MapEndpoints
     }
 
     /// <summary>
+    /// Serve 400x400 WebP tiles for optimized map viewing.
+    /// Generates tiles on-the-fly if they don't exist yet.
+    /// </summary>
+    private static async Task<IResult> ServeGridTileWebP(
+        HttpContext context,
+        [FromRoute] int mapId,
+        [FromRoute] int zoom,
+        [FromRoute] string coords,
+        ILargeTileService largeTileService)
+    {
+        if (!context.User.Identity?.IsAuthenticated ?? true)
+            return Results.Unauthorized();
+
+        var tenantId = context.Items["TenantId"] as string;
+        if (string.IsNullOrEmpty(tenantId))
+            return Results.Unauthorized();
+
+        // Strip .webp extension if present
+        var coordsClean = coords.EndsWith(".webp", StringComparison.OrdinalIgnoreCase)
+            ? coords[..^5]
+            : coords;
+
+        // Parse coords: x_y
+        var coordParts = coordsClean.Split('_');
+        if (coordParts.Length != 2)
+            return Results.NotFound();
+
+        if (!int.TryParse(coordParts[0], out var x))
+            return Results.NotFound();
+
+        if (!int.TryParse(coordParts[1], out var y))
+            return Results.NotFound();
+
+        // Get or generate the large tile (returns bytes from in-memory cache, disk, or generation)
+        var tileBytes = await largeTileService.GetOrGenerateLargeTileAsync(tenantId, mapId, zoom, x, y);
+
+        if (tileBytes == null)
+        {
+            // No source tiles exist for this area
+            context.Response.Headers.Append("Cache-Control", "public, max-age=300, stale-while-revalidate=60");
+            return Results.NotFound();
+        }
+
+        // Generate ETag from content hash (fast for cached bytes)
+        var etagValue = $"\"{tileBytes.Length}-{tileBytes.GetHashCode()}\"";
+
+        // Check If-None-Match header
+        var ifNoneMatch = context.Request.Headers["If-None-Match"].ToString();
+        if (!string.IsNullOrEmpty(ifNoneMatch) && ifNoneMatch == etagValue)
+        {
+            context.Response.StatusCode = StatusCodes.Status304NotModified;
+            context.Response.Headers.Append("ETag", etagValue);
+            context.Response.Headers.Append("Cache-Control", "public, max-age=31536000, immutable");
+            return Results.Empty;
+        }
+
+        // Set caching headers
+        context.Response.Headers.Append("Cache-Control", "public, max-age=31536000, immutable");
+        context.Response.Headers.Append("ETag", etagValue);
+
+        return Results.Bytes(tileBytes, "image/webp");
+    }
+
+    /// <summary>
     /// Serve map preview images for Discord webhook notifications.
     /// Public endpoint - no authentication required (Discord webhooks can't send auth headers).
     /// Preview ID format: {timestamp}_{mapId}_{coordX}_{coordY}.png
@@ -1444,8 +1518,8 @@ public static class MapEndpoints
         if (!context.User.Identity?.IsAuthenticated ?? true)
             return Results.Unauthorized();
 
-        // Limit bounds to prevent excessive queries
-        var maxRange = 50;
+        // Limit bounds to prevent excessive queries (150 allows viewing large zoomed-out areas)
+        var maxRange = 150;
         if (maxX - minX > maxRange || maxY - minY > maxRange)
         {
             return Results.BadRequest($"Coordinate range too large. Maximum {maxRange} tiles per dimension.");

@@ -2,7 +2,7 @@
 // Main orchestrator that coordinates specialized managers
 
 // Import modules
-import { TileSize, HnHMaxZoom, HnHMinZoom, HnHCRS } from './map/leaflet-config.js';
+import { TileSize, BaseTileSize, HnHMaxZoom, HnHMinZoom, HnHCRS } from './map/leaflet-config.js';
 import { SmartTileLayer } from './map/smart-tile-layer.js';
 import * as CharacterManager from './map/character-manager.js';
 import * as MarkerManager from './map/marker-manager.js';
@@ -144,10 +144,13 @@ export async function initializeMap(mapElementId, dotnetReference) {
                     maxZoom: HnHMaxZoom,
                     crs: HnHCRS,
                     attributionControl: false,
-                    inertia: false,
+                    inertia: true,              // Enable momentum scrolling for smooth panning
+                    inertiaDeceleration: 2000,  // Smooth deceleration
+                    inertiaMaxSpeed: 1500,      // Cap max speed for control
                     zoomAnimation: true,        // Enable smooth zoom transitions
-                    fadeAnimation: false,        // Disabled for performance (no tile fade = less repaints)
-                    markerZoomAnimation: false   // Disabled for performance (no marker animations during zoom)
+                    fadeAnimation: true,        // Smooth tile fade-in
+                    zoomAnimationThreshold: 4,  // Disable animation for large zoom jumps
+                    markerZoomAnimation: false  // Disabled for performance (no marker animations during zoom)
                 });
 
                 console.log('[Leaflet] Map instance created successfully');
@@ -159,19 +162,21 @@ export async function initializeMap(mapElementId, dotnetReference) {
         });
     });
 
-    // Main tile layer (with cache and revision parameters for cache busting)
-    // Performance optimizations for smooth zoom/pan: updateWhenZooming, keepBuffer, updateInterval, noWrap
-    mainLayer = new SmartTileLayer('/map/grids/{map}/{z}/{x}_{y}.png?v={v}&{cache}', {
+    // Main tile layer using 400x400 WebP tiles for better performance
+    // - 16x fewer HTTP requests (400x400 tiles contain 4x4 original 100x100 tiles)
+    // - WebP format for ~30% smaller file sizes
+    // - Smooth animations enabled
+    mainLayer = new SmartTileLayer('/map/tiles/{map}/{z}/{x}_{y}.webp?v={v}', {
         minZoom: HnHMinZoom,
         maxZoom: HnHMaxZoom,
         zoomOffset: 0,
         zoomReverse: true,
         tileSize: TileSize,
         errorTileUrl: '',          // Don't show any image for missing/error tiles
-        updateWhenIdle: true,      // Only load tiles when zoom/pan stops (better performance)
-        updateWhenZooming: false,  // DON'T load tiles during zoom animation (prevents 100+ requests per zoom)
-        keepBuffer: 1,             // Reduced from 2 to 1 for large maps (300k tiles) - saves ~50% tile memory
-        updateInterval: 100,       // Throttle tile updates during continuous pan (ms) - faster for snappier response
+        updateWhenIdle: false,     // Load tiles immediately for responsive feel
+        updateWhenZooming: true,   // Load tiles during zoom for smooth experience
+        keepBuffer: 4,             // Keep tiles in memory for panning (reduced for zoomed-out efficiency)
+        updateInterval: 50,        // Fast tile updates for responsiveness
         noWrap: true              // Don't wrap tiles at world edges (Haven map is finite)
     });
     mainLayer.mapId = 0; // Explicitly initialize to ensure it's always a number (not undefined)
@@ -261,12 +266,12 @@ export async function initializeMap(mapElementId, dotnetReference) {
             // Use last mouse position or map center
             const latlng = lastMouseLatLng || mapInstance.getCenter();
 
-            // Convert LatLng to game coordinates
+            // Convert LatLng to game coordinates (use BaseTileSize for 100x100 grid cells)
             const point = mapInstance.project(latlng, HnHMaxZoom);
-            const coordX = Math.floor(point.x / TileSize);
-            const coordY = Math.floor(point.y / TileSize);
-            const localX = Math.floor(((point.x % TileSize) + TileSize) % TileSize);
-            const localY = Math.floor(((point.y % TileSize) + TileSize) % TileSize);
+            const coordX = Math.floor(point.x / BaseTileSize);
+            const coordY = Math.floor(point.y / BaseTileSize);
+            const localX = Math.floor(((point.x % BaseTileSize) + BaseTileSize) % BaseTileSize);
+            const localY = Math.floor(((point.y % BaseTileSize) + BaseTileSize) % BaseTileSize);
 
             // Call Blazor to create ping
             invokeDotNetSafe('JsCreatePing', currentMapId, coordX, coordY, localX, localY);
@@ -278,9 +283,10 @@ export async function initializeMap(mapElementId, dotnetReference) {
     // This matches how zoom uses 'zoomend' - URL only updates when movement stops
     mapInstance.on('dragend', () => {
         const point = mapInstance.project(mapInstance.getCenter(), mapInstance.getZoom());
+        // Use BaseTileSize for game grid coordinates (100x100 cells)
         const coords = {
-            x: Math.floor(point.x / TileSize),
-            y: Math.floor(point.y / TileSize),
+            x: Math.floor(point.x / BaseTileSize),
+            y: Math.floor(point.y / BaseTileSize),
             z: mapInstance.getZoom()
         };
         invokeDotNetSafe('JsOnMapDragged', coords.x, coords.y, coords.z);
@@ -318,11 +324,11 @@ export async function initializeMap(mapElementId, dotnetReference) {
         // This prevents 75+ tile requests per zoom step during rapid zooming
         clearTimeout(zoomDebounceTimer);
         zoomDebounceTimer = setTimeout(() => {
-            // Calculate coords once zoom settles
+            // Calculate coords once zoom settles (use BaseTileSize for game grid coords)
             const point = mapInstance.project(mapInstance.getCenter(), mapInstance.getZoom());
             const coords = {
-                x: Math.floor(point.x / TileSize),
-                y: Math.floor(point.y / TileSize),
+                x: Math.floor(point.x / BaseTileSize),
+                y: Math.floor(point.y / BaseTileSize),
                 z: mapInstance.getZoom()
             };
 
@@ -358,11 +364,12 @@ export async function initializeMap(mapElementId, dotnetReference) {
         const rawCoordX = Number.isFinite(point.x) ? point.x : NaN;
         const rawCoordY = Number.isFinite(point.y) ? point.y : NaN;
 
-        const coordX = Math.floor(rawCoordX / TileSize);
-        const coordY = Math.floor(rawCoordY / TileSize);
+        // Use BaseTileSize for game grid coordinates (100x100 cells)
+        const coordX = Math.floor(rawCoordX / BaseTileSize);
+        const coordY = Math.floor(rawCoordY / BaseTileSize);
 
-        const localX = Math.floor(((rawCoordX % TileSize) + TileSize) % TileSize);
-        const localY = Math.floor(((rawCoordY % TileSize) + TileSize) % TileSize);
+        const localX = Math.floor(((rawCoordX % BaseTileSize) + BaseTileSize) % BaseTileSize);
+        const localY = Math.floor(((rawCoordY % BaseTileSize) + BaseTileSize) % BaseTileSize);
 
         console.debug('[MapClick] types', {
             mapId: typeof rawMapId,
@@ -445,9 +452,10 @@ export async function initializeMap(mapElementId, dotnetReference) {
         window.hnhMapper.applyTileUpdates = applyTileUpdates;
     } catch { /* ignore - non-browser/unsupported environment */ }
 
-    // Set initial view to zoom level 7 (max zoom, shows base tiles)
-    // This will trigger the 'load' event immediately
-    mapInstance.setView([0, 0], HnHMaxZoom);
+    // Don't set initial view here - Blazor will call setView after changeMap
+    // Setting view here would trigger tile requests for mapId=0 which doesn't exist,
+    // and those "failed" tiles get cached, causing blank areas when zooming out later.
+    // The map will be positioned correctly after Blazor calls changeMap() then setView().
 
     return true;
 }
@@ -515,7 +523,7 @@ function prefetchNextZoomTiles() {
                 }
 
                 // Build URL for prefetch
-                const tileUrl = `/map/grids/${mainLayer.mapId}/${hnhZoom}/${x}_${y}.png?v=${revision}`;
+                const tileUrl = `/map/tiles/${mainLayer.mapId}/${hnhZoom}/${x}_${y}.webp?v=${revision}`;
 
                 // Prefetch using Image() - this warms the browser cache
                 // Clean up after load/error to prevent memory leak
@@ -572,7 +580,7 @@ function prefetchNextZoomTiles() {
                 }
 
                 // Build URL for prefetch
-                const tileUrl = `/map/grids/${mainLayer.mapId}/${hnhZoom}/${x}_${y}.png?v=${revision}`;
+                const tileUrl = `/map/tiles/${mainLayer.mapId}/${hnhZoom}/${x}_${y}.webp?v=${revision}`;
 
                 // Prefetch using Image() - clean up after load/error to prevent memory leak
                 const prefetchImg = new Image();
@@ -593,6 +601,9 @@ function prefetchNextZoomTiles() {
     }
 }
 
+// Track if map has been given an initial view (for triggering 'load' event)
+let mapHasInitialView = false;
+
 export function changeMap(mapId) {
     // Guard: Skip expensive operations if already on this map
     // This prevents redundant marker clearing and tile redraws when Blazor re-renders
@@ -605,6 +616,14 @@ export function changeMap(mapId) {
 
     currentMapId = mapId;
     mainLayer.mapId = mapId;
+
+    // If this is the first changeMap call, set an initial view to trigger 'load' event
+    // This ensures OnMapReady fires after mapId is set (not with mapId=0)
+    if (!mapHasInitialView && mapInstance) {
+        console.log('[changeMap] Setting initial view to trigger load event');
+        mapInstance.setView([0, 0], HnHMinZoom);
+        mapHasInitialView = true;
+    }
 
     // Update manager states
     CharacterManager.setCurrentMapId(mapId);
@@ -679,7 +698,7 @@ export function setOverlayMap(mapId, offsetX = 0, offsetY = 0) {
     // Lazy-initialize overlay layer only when actually needed (mapId > 0)
     if (!overlayLayer && mapId > 0) {
         // Create overlay layer on-demand (same config as main layer but with opacity)
-        overlayLayer = new SmartTileLayer('/map/grids/{map}/{z}/{x}_{y}.png?v={v}&{cache}', {
+        overlayLayer = new SmartTileLayer('/map/tiles/{map}/{z}/{x}_{y}.webp?v={v}', {
             minZoom: HnHMinZoom,
             maxZoom: HnHMaxZoom,
             zoomOffset: 0,
@@ -687,10 +706,10 @@ export function setOverlayMap(mapId, offsetX = 0, offsetY = 0) {
             tileSize: TileSize,
             opacity: 0.6,
             errorTileUrl: '',          // Don't show any image for missing/error tiles
-            updateWhenIdle: true,      // Only load tiles when zoom/pan stops (better performance)
-            updateWhenZooming: false,  // DON'T load tiles during zoom animation (prevents 100+ requests per zoom)
-            keepBuffer: 1,             // Reduced from 2 to 1 for large maps (300k tiles) - saves ~50% tile memory
-            updateInterval: 100,       // Throttle tile updates during continuous pan (ms) - faster for snappier response
+            updateWhenIdle: false,     // Load tiles immediately for responsive feel
+            updateWhenZooming: true,   // Load tiles during zoom for smooth experience
+            keepBuffer: 4,             // Keep tiles in memory for panning (reduced for zoomed-out efficiency)
+            updateInterval: 50,        // Fast tile updates for responsiveness
             noWrap: true              // Don't wrap tiles at world edges (Haven map is finite)
         });
         overlayLayer.mapId = -1;
@@ -741,8 +760,9 @@ export function setOverlayOffset(offsetX, offsetY) {
 }
 
 export function setView(gridX, gridY, zoom) {
-    const x = gridX * 100;
-    const y = gridY * 100;
+    // Convert grid coordinates to pixel coordinates using BaseTileSize (100x100 game grid)
+    const x = gridX * BaseTileSize;
+    const y = gridY * BaseTileSize;
     const latlng = mapInstance.unproject([x, y], HnHMaxZoom);
     mapInstance.setView(latlng, zoom);
     return true;
@@ -1300,11 +1320,9 @@ export function jumpToLatestPing() {
     const ping = latestPing.ping;
     console.log('[leaflet-interop] Jumping to latest ping:', ping);
 
-    // Calculate absolute position from grid coordinates
-    const TileSize = 100;
-    const HnHMaxZoom = 7;
-    const absX = ping.CoordX * TileSize + ping.X;
-    const absY = ping.CoordY * TileSize + ping.Y;
+    // Calculate absolute position from grid coordinates (use BaseTileSize for 100x100 game grid)
+    const absX = ping.CoordX * BaseTileSize + ping.X;
+    const absY = ping.CoordY * BaseTileSize + ping.Y;
 
     // Convert to map coordinates
     const latLng = mapInstance.unproject([absX, absY], HnHMaxZoom);

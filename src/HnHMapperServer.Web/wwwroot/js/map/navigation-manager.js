@@ -1,7 +1,7 @@
 // Navigation Manager Module
 // Handles road pathfinding and route calculation
 
-import { TileSize, HnHMaxZoom } from './leaflet-config.js';
+import { BaseTileSize, HnHMaxZoom } from './leaflet-config.js';
 
 // Navigation state
 let currentRoute = null;
@@ -30,9 +30,10 @@ export function setMapInstance(mapInstance) {
  * @returns {object} - {x, y} in absolute pixels
  */
 function waypointToAbsolute(wp) {
+    // Use BaseTileSize for 100x100 game grid coordinates
     return {
-        x: wp.coordX * TileSize + wp.x,
-        y: wp.coordY * TileSize + wp.y
+        x: wp.coordX * BaseTileSize + wp.x,
+        y: wp.coordY * BaseTileSize + wp.y
     };
 }
 
@@ -43,11 +44,12 @@ function waypointToAbsolute(wp) {
  * @returns {object} - Waypoint format {coordX, coordY, x, y}
  */
 function absoluteToWaypoint(absX, absY) {
+    // Use BaseTileSize for 100x100 game grid coordinates
     return {
-        coordX: Math.floor(absX / TileSize),
-        coordY: Math.floor(absY / TileSize),
-        x: Math.floor(((absX % TileSize) + TileSize) % TileSize),
-        y: Math.floor(((absY % TileSize) + TileSize) % TileSize)
+        coordX: Math.floor(absX / BaseTileSize),
+        coordY: Math.floor(absY / BaseTileSize),
+        x: Math.floor(((absX % BaseTileSize) + BaseTileSize) % BaseTileSize),
+        y: Math.floor(((absY % BaseTileSize) + BaseTileSize) % BaseTileSize)
     };
 }
 

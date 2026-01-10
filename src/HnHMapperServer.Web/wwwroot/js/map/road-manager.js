@@ -1,7 +1,7 @@
 // Road Manager Module
 // Handles user-drawn road/path management
 
-import { TileSize, HnHMaxZoom, HnHMinZoom } from './leaflet-config.js';
+import { TileSize, BaseTileSize, HnHMaxZoom, HnHMinZoom } from './leaflet-config.js';
 
 // Road storage
 const roads = {};
@@ -99,8 +99,9 @@ export function setMapInstance(instance) {
  * Convert waypoint to Leaflet LatLng
  */
 function waypointToLatLng(wp, mapInstance) {
-    const absX = wp.coordX * TileSize + wp.x;
-    const absY = wp.coordY * TileSize + wp.y;
+    // Use BaseTileSize for 100x100 game grid coordinates
+    const absX = wp.coordX * BaseTileSize + wp.x;
+    const absY = wp.coordY * BaseTileSize + wp.y;
     return mapInstance.unproject([absX, absY], HnHMaxZoom);
 }
 
@@ -637,18 +638,18 @@ function getRoadEndpointsForRoute(roadData) {
 
     if (!waypoints || waypoints.length < 2) return null;
 
-    const TileSize = 100;
     const firstWp = waypoints[0];
     const lastWp = waypoints[waypoints.length - 1];
 
+    // Use BaseTileSize for 100x100 game grid coordinates
     return {
         start: {
-            x: (firstWp.coordX ?? firstWp.CoordX ?? 0) * TileSize + (firstWp.x ?? firstWp.X ?? 0),
-            y: (firstWp.coordY ?? firstWp.CoordY ?? 0) * TileSize + (firstWp.y ?? firstWp.Y ?? 0)
+            x: (firstWp.coordX ?? firstWp.CoordX ?? 0) * BaseTileSize + (firstWp.x ?? firstWp.X ?? 0),
+            y: (firstWp.coordY ?? firstWp.CoordY ?? 0) * BaseTileSize + (firstWp.y ?? firstWp.Y ?? 0)
         },
         end: {
-            x: (lastWp.coordX ?? lastWp.CoordX ?? 0) * TileSize + (lastWp.x ?? lastWp.X ?? 0),
-            y: (lastWp.coordY ?? lastWp.CoordY ?? 0) * TileSize + (lastWp.y ?? lastWp.Y ?? 0)
+            x: (lastWp.coordX ?? lastWp.CoordX ?? 0) * BaseTileSize + (lastWp.x ?? lastWp.X ?? 0),
+            y: (lastWp.coordY ?? lastWp.CoordY ?? 0) * BaseTileSize + (lastWp.y ?? lastWp.Y ?? 0)
         }
     };
 }
@@ -808,13 +809,13 @@ export function finishDrawingRoad(mapInstance) {
     mapInstance.off('dblclick', onDrawingDoubleClick);
     mapInstance.doubleClickZoom.enable();
 
-    // Convert latlngs to waypoint format
+    // Convert latlngs to waypoint format (use BaseTileSize for 100x100 game grid)
     const waypoints = currentDrawingPoints.map(latlng => {
         const point = mapInstance.project(latlng, HnHMaxZoom);
-        const coordX = Math.floor(point.x / TileSize);
-        const coordY = Math.floor(point.y / TileSize);
-        const x = Math.floor(((point.x % TileSize) + TileSize) % TileSize);
-        const y = Math.floor(((point.y % TileSize) + TileSize) % TileSize);
+        const coordX = Math.floor(point.x / BaseTileSize);
+        const coordY = Math.floor(point.y / BaseTileSize);
+        const x = Math.floor(((point.x % BaseTileSize) + BaseTileSize) % BaseTileSize);
+        const y = Math.floor(((point.y % BaseTileSize) + BaseTileSize) % BaseTileSize);
         return { coordX, coordY, x, y };
     });
 

@@ -95,6 +95,9 @@ builder.Services.AddScoped<HnHMapperServer.Web.Services.VersionClient>();
 builder.Services.AddSingleton<HnHMapperServer.Web.Services.PublicTileCacheService>();
 builder.Services.AddHostedService<HnHMapperServer.Web.Services.PublicTileCacheHostedService>();
 
+// Register LargeTileService for WebP tile generation (400x400 tiles)
+builder.Services.AddScoped<HnHMapperServer.Services.Interfaces.ILargeTileService, HnHMapperServer.Services.Services.LargeTileService>();
+
 // Register multi-tenancy services
 builder.Services.AddScoped<HnHMapperServer.Web.Services.TenantContextService>();
 builder.Services.AddScoped<HnHMapperServer.Web.Services.ITenantService, HnHMapperServer.Web.Services.TenantService>();
@@ -582,8 +585,8 @@ app.MapGet("/map/api/v1/grids", async (
     if (!hasMapAuth)
         return Results.Unauthorized();
 
-    // Limit bounds to prevent excessive queries
-    var maxRange = 50;
+    // Limit bounds to prevent excessive queries (150 allows viewing large zoomed-out areas)
+    var maxRange = 150;
     if (maxX - minX > maxRange || maxY - minY > maxRange)
         return Results.BadRequest($"Coordinate range too large. Maximum {maxRange} tiles per dimension.");
 
@@ -804,6 +807,78 @@ app.MapGet("/map/grids/{**path}", async (
       .SetVaryByQuery("v", "cache")      // Vary by revision and cache-bust params
       .SetVaryByRouteValue("path")       // Vary by tile path (mapId/zoom/x_y)
       .Tag("tiles"));                     // Tag for bulk invalidation if needed
+
+// WebP tile serving endpoint - 400x400 tiles generated on-the-fly by LargeTileService
+app.MapGet("/map/tiles/{**path}", async (
+    HttpContext context,
+    string path,
+    HnHMapperServer.Infrastructure.Data.ApplicationDbContext db,
+    HnHMapperServer.Services.Interfaces.ILargeTileService largeTileService) =>
+{
+    if (!context.User.Identity?.IsAuthenticated ?? true)
+        return Results.Unauthorized();
+
+    // Extract tenant ID from claims (CRITICAL for global query filters to work)
+    var tenantId = context.User.FindFirst("TenantId")?.Value;
+    if (string.IsNullOrEmpty(tenantId))
+        return Results.Unauthorized();
+
+    // Store in context for ITenantContextAccessor (used by EF Core global query filters)
+    context.Items["TenantId"] = tenantId;
+
+    // Check for Map permission claim
+    var hasMapAuth = context.User.Claims.Any(c =>
+        c.Type == AuthorizationConstants.ClaimTypes.TenantPermission &&
+        c.Value.Equals(Permission.Map.ToClaimValue(), StringComparison.OrdinalIgnoreCase));
+    if (!hasMapAuth)
+        return Results.Unauthorized();
+
+    // Parse path: {mapId}/{zoom}/{x}_{y}.webp
+    var parts = path.Split('/');
+    if (parts.Length != 3)
+        return Results.NotFound();
+
+    if (!int.TryParse(parts[0], out var mapId))
+        return Results.NotFound();
+
+    if (!int.TryParse(parts[1], out var zoom))
+        return Results.NotFound();
+
+    var coordPart = parts[2].Replace(".webp", "");
+    var coords = coordPart.Split('_');
+    if (coords.Length != 2)
+        return Results.NotFound();
+
+    if (!int.TryParse(coords[0], out var x))
+        return Results.NotFound();
+
+    if (!int.TryParse(coords[1], out var y))
+        return Results.NotFound();
+
+    // Defense-in-depth: Verify map belongs to user's tenant before tile generation
+    // The EF Core global filter also enforces this, but explicit check fails faster
+    var mapExists = await db.Maps.AnyAsync(m => m.Id == mapId);
+    if (!mapExists)
+        return Results.NotFound();
+
+    // Get or generate the large tile (returns bytes from in-memory cache, disk, or generation)
+    var tileBytes = await largeTileService.GetOrGenerateLargeTileAsync(tenantId, mapId, zoom, x, y);
+
+    if (tileBytes == null)
+    {
+        context.Response.Headers.Append("Cache-Control", "public, max-age=300, stale-while-revalidate=60");
+        return Results.NotFound();
+    }
+
+    // Long-lived cache for tile hits (1 year)
+    context.Response.Headers.Append("Cache-Control", "public, max-age=31536000, immutable");
+    return Results.Bytes(tileBytes, "image/webp");
+}).RequireAuthorization()
+  .CacheOutput(policy => policy
+      .Expire(TimeSpan.FromSeconds(60))
+      .SetVaryByQuery("v")
+      .SetVaryByRouteValue("path")
+      .Tag("tiles-webp"));
 
 // Public map tile endpoint - serves tiles from in-memory cache (fastest)
 // Falls back to filesystem for tiles loaded after startup

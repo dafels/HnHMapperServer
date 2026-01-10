@@ -3,7 +3,7 @@
 // Data is bitpacked (1250 bytes = 10000 bits for 100x100 grid) with LSB-first ordering
 // Data is fetched via Blazor interop (server-to-server) not direct browser fetch
 
-import { TileSize, HnHMaxZoom } from './leaflet-config.js';
+import { TileSize, BaseTileSize, HnHMaxZoom } from './leaflet-config.js';
 
 // Overlay type colors (RGBA)
 const OVERLAY_COLORS = {
@@ -68,9 +68,10 @@ function base64ToUint8Array(base64) {
 /**
  * Check if a bit is set in the bitpacked overlay data
  * LSB-first ordering: bit at index i is at byte[i/8] & (1 << (i % 8))
+ * Data is for 100x100 grid cells (BaseTileSize)
  */
 function isBitSet(data, x, y) {
-    const bitIndex = y * TileSize + x;
+    const bitIndex = y * BaseTileSize + x;
     const byteIndex = Math.floor(bitIndex / 8);
     const bitOffset = bitIndex % 8;
     return (data[byteIndex] & (1 << bitOffset)) !== 0;
@@ -357,17 +358,18 @@ function createOverlayLayer() {
         _renderFullToImageData: function(pixels, data, offsetX, offsetY, color, isOutline) {
             const r = color[0], g = color[1], b = color[2], a = color[3];
 
+            // Data is BaseTileSize x BaseTileSize (100x100 grid)
             if (isOutline) {
                 // For outlines, only draw pixels that are on the border
-                for (let y = 0; y < TileSize; y++) {
-                    for (let x = 0; x < TileSize; x++) {
+                for (let y = 0; y < BaseTileSize; y++) {
+                    for (let x = 0; x < BaseTileSize; x++) {
                         if (isBitSet(data, x, y)) {
                             // Check if this is a border pixel (has at least one neighbor that's not set)
                             const isBorder =
                                 (x === 0 || !isBitSet(data, x - 1, y)) ||
-                                (x === TileSize - 1 || !isBitSet(data, x + 1, y)) ||
+                                (x === BaseTileSize - 1 || !isBitSet(data, x + 1, y)) ||
                                 (y === 0 || !isBitSet(data, x, y - 1)) ||
-                                (y === TileSize - 1 || !isBitSet(data, x, y + 1));
+                                (y === BaseTileSize - 1 || !isBitSet(data, x, y + 1));
 
                             if (isBorder) {
                                 this._blendPixel(pixels, offsetX + x, offsetY + y, r, g, b, a);
@@ -377,8 +379,8 @@ function createOverlayLayer() {
                 }
             } else {
                 // For fills, draw all set pixels
-                for (let y = 0; y < TileSize; y++) {
-                    for (let x = 0; x < TileSize; x++) {
+                for (let y = 0; y < BaseTileSize; y++) {
+                    for (let x = 0; x < BaseTileSize; x++) {
                         if (isBitSet(data, x, y)) {
                             this._blendPixel(pixels, offsetX + x, offsetY + y, r, g, b, a);
                         }
@@ -391,17 +393,17 @@ function createOverlayLayer() {
             const r = color[0], g = color[1], b = color[2], a = color[3];
             const sampleStep = Math.max(1, Math.floor(scaleFactor));
 
-            // Sample the overlay data at intervals
-            for (let sy = 0; sy < TileSize; sy += sampleStep) {
-                for (let sx = 0; sx < TileSize; sx += sampleStep) {
+            // Sample the overlay data at intervals (data is BaseTileSize x BaseTileSize)
+            for (let sy = 0; sy < BaseTileSize; sy += sampleStep) {
+                for (let sx = 0; sx < BaseTileSize; sx += sampleStep) {
                     // Check if any pixel in this sample area is set
                     let anySet = false;
                     let isBorder = false;
 
                     for (let dy = 0; dy < sampleStep && !anySet; dy++) {
                         for (let dx = 0; dx < sampleStep && !anySet; dx++) {
-                            const x = Math.min(sx + dx, TileSize - 1);
-                            const y = Math.min(sy + dy, TileSize - 1);
+                            const x = Math.min(sx + dx, BaseTileSize - 1);
+                            const y = Math.min(sy + dy, BaseTileSize - 1);
                             if (isBitSet(data, x, y)) {
                                 anySet = true;
 
@@ -409,9 +411,9 @@ function createOverlayLayer() {
                                 if (isOutline) {
                                     isBorder =
                                         (x === 0 || !isBitSet(data, x - 1, y)) ||
-                                        (x === TileSize - 1 || !isBitSet(data, x + 1, y)) ||
+                                        (x === BaseTileSize - 1 || !isBitSet(data, x + 1, y)) ||
                                         (y === 0 || !isBitSet(data, x, y - 1)) ||
-                                        (y === TileSize - 1 || !isBitSet(data, x, y + 1));
+                                        (y === BaseTileSize - 1 || !isBitSet(data, x, y + 1));
                                 }
                             }
                         }
@@ -419,9 +421,9 @@ function createOverlayLayer() {
 
                     if (anySet && (!isOutline || isBorder)) {
                         // Calculate canvas position for this sample
-                        const canvasX = Math.floor(offsetX + (sx / TileSize) * size);
-                        const canvasY = Math.floor(offsetY + (sy / TileSize) * size);
-                        const rectSize = Math.max(1, Math.floor(size / TileSize * sampleStep));
+                        const canvasX = Math.floor(offsetX + (sx / BaseTileSize) * size);
+                        const canvasY = Math.floor(offsetY + (sy / BaseTileSize) * size);
+                        const rectSize = Math.max(1, Math.floor(size / BaseTileSize * sampleStep));
 
                         // Fill the rect area in ImageData
                         for (let py = 0; py < rectSize; py++) {
