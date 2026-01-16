@@ -5,6 +5,19 @@
 @inject ILogger<PublicMapView> Logger
 @implements IAsyncDisposable
 
+<!-- Thingwall Toggle Button (top-left, below Leaflet zoom controls) -->
+<div style="position: fixed; top: 120px; left: 16px; z-index: 1400;">
+    <MudTooltip Text="Toggle Thingwalls" Placement="Placement.Right">
+        <MudButton OnClick="@ToggleThingwalls"
+                   Variant="Variant.Filled"
+                   Color="@(showThingwalls ? Color.Info : Color.Default)"
+                   Style="min-width: 40px; min-height: 40px; padding: 8px; border-radius: 50%;">
+            <img src="/gfx/terobjs/mm/thingwall.png" alt="Thingwall"
+                 style="width: 24px; height: 24px; @(showThingwalls ? "" : "opacity: 0.5;")" />
+        </MudButton>
+    </MudTooltip>
+</div>
+
 <div @ref="mapElement" class="public-leaflet-map"></div>
 
 <style>
@@ -30,6 +43,16 @@
     private IJSObjectReference? jsModule;
     private bool initialized = false;
     private bool disposed = false;
+    private bool showThingwalls = false;  // Thingwalls hidden by default
+
+    private async Task ToggleThingwalls()
+    {
+        showThingwalls = !showThingwalls;
+        if (jsModule != null)
+        {
+            await jsModule.InvokeVoidAsync("setMarkersVisible", showThingwalls);
+        }
+    }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {

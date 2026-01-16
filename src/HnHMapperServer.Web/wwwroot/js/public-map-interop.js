@@ -42,6 +42,7 @@ const HnHCRS = L.extend({}, L.CRS.Simple, {
 let mapInstance = null;
 let tileLayer = null;
 let markerLayer = null;
+let markersVisible = false;  // Thingwalls hidden by default
 let currentSlug = null;
 let zoomDebounceTimer = null;
 let preloadDebounceTimer = null;
@@ -229,9 +230,10 @@ export async function initializePublicMap(mapElement, slug, centerX, centerY, in
                 tileLayer.slug = slug;
                 tileLayer.addTo(mapInstance);
 
-                // Create marker layer for thingwalls
+                // Create marker layer for thingwalls (not added to map initially - hidden by default)
                 markerLayer = L.layerGroup();
-                markerLayer.addTo(mapInstance);
+                markersVisible = false;
+                // Note: markerLayer is NOT added to map here - use setMarkersVisible() to show
 
                 // Calculate center position in pixels and convert to LatLng
                 // centerX/centerY are in original grid coordinates (100x100 units)
@@ -330,7 +332,32 @@ export function loadMarkersData(markersData) {
         marker.addTo(markerLayer);
     });
 
-    console.log('[PublicMap] Rendered', markersData.length, 'markers');
+    console.log('[PublicMap] Rendered', markersData.length, 'markers (visible:', markersVisible, ')');
+}
+
+/**
+ * Set visibility of thingwall markers
+ * @param {boolean} visible - Whether markers should be visible
+ */
+export function setMarkersVisible(visible) {
+    if (!mapInstance || !markerLayer) {
+        console.warn('[PublicMap] Cannot set marker visibility - map not initialized');
+        return;
+    }
+
+    markersVisible = visible;
+
+    if (visible) {
+        if (!mapInstance.hasLayer(markerLayer)) {
+            mapInstance.addLayer(markerLayer);
+        }
+    } else {
+        if (mapInstance.hasLayer(markerLayer)) {
+            mapInstance.removeLayer(markerLayer);
+        }
+    }
+
+    console.log('[PublicMap] Markers visibility set to:', visible);
 }
 
 export function updateTileUrl(slug) {
@@ -355,9 +382,14 @@ export function dispose() {
     // Clear preloaded tiles tracking
     preloadedTiles.clear();
 
+    // Reset marker visibility state
+    markersVisible = false;
+
     if (markerLayer) {
         markerLayer.clearLayers();
-        markerLayer.remove();
+        if (mapInstance && mapInstance.hasLayer(markerLayer)) {
+            markerLayer.remove();
+        }
         markerLayer = null;
     }
 
