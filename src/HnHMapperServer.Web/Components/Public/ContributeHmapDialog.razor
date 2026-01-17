@@ -1,0 +1,274 @@
+@using System.Net.Http.Headers
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+
+<MudDialog>
+    <DialogContent>
+        <MudStack Spacing="3">
+            <MudText Typo="Typo.body1">
+                Upload your .hmap file to contribute to this public map.
+                Files are reviewed manually before being imported.
+            </MudText>
+
+            <input type="file"
+                   accept=".hmap"
+                   @ref="fileInput"
+                   @onchange="OnFileInputChange"
+                   disabled="@isUploading"
+                   style="display: none;" />
+
+            <MudButton Variant="Variant.Outlined"
+                       Color="Color.Primary"
+                       StartIcon="@Icons.Material.Filled.CloudUpload"
+                       FullWidth="true"
+                       Disabled="@isUploading"
+                       OnClick="TriggerFileInput">
+                @if (isReading)
+                {
+                    <span>Reading file...</span>
+                }
+                else if (fileName == null)
+                {
+                    <span>Select .hmap file</span>
+                }
+                else
+                {
+                    <span>@fileName (@FormatFileSize(fileSize))</span>
+                }
+            </MudButton>
+
+            @if (fileTooLarge)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true">
+                    File too large. Maximum size is 200 MB.
+                </MudAlert>
+            }
+
+            @if (isReading)
+            {
+                <MudProgressLinear Color="Color.Info" Indeterminate="true" />
+                <MudText Typo="Typo.caption" Align="Align.Center">Reading file...</MudText>
+            }
+
+            @if (isUploading)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" />
+                <MudText Typo="Typo.caption" Align="Align.Center">Uploading...</MudText>
+            }
+
+            @if (uploadSuccess)
+            {
+                <MudAlert Severity="Severity.Success" Dense="true">
+                    Thank you for your contribution! Your file has been received and will be reviewed.
+                </MudAlert>
+            }
+
+            @if (!string.IsNullOrEmpty(errorMessage))
+            {
+                <MudAlert Severity="Severity.Error" Dense="true">
+                    @errorMessage
+                </MudAlert>
+            }
+
+            <MudText Typo="Typo.caption" Color="Color.Secondary">
+                Maximum file size: 200 MB. Only .hmap files are accepted.
+            </MudText>
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel" Disabled="@(isUploading || isReading)">Cancel</MudButton>
+        <MudButton Color="Color.Primary"
+                   Variant="Variant.Filled"
+                   OnClick="Upload"
+                   Disabled="@(!CanUpload)">
+            @if (isUploading)
+            {
+                <MudProgressCircular Class="ms-n1" Size="Size.Small" Indeterminate="true" />
+                <MudText Class="ms-2">Uploading...</MudText>
+            }
+            else
+            {
+                <MudText>Upload</MudText>
+            }
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter]
+    private IMudDialogInstance? MudDialog { get; set; }
+
+    [Parameter]
+    public string Slug { get; set; } = string.Empty;
+
+    private const long MaxFileSizeBytes = 200L * 1024 * 1024; // 200 MB
+    private ElementReference fileInput;
+
+    // Store file data read via JS interop
+    private byte[]? fileBytes;
+    private string? fileName;
+    private long fileSize;
+    private bool fileTooLarge;
+
+    private bool isReading = false;
+    private bool isUploading = false;
+    private bool uploadSuccess = false;
+    private string? errorMessage;
+
+    private bool CanUpload => fileBytes != null
+        && fileBytes.Length > 0
+        && !fileTooLarge
+        && !isReading
+        && !isUploading
+        && !uploadSuccess;
+
+    private async Task TriggerFileInput()
+    {
+        await JS.InvokeVoidAsync("eval", "document.querySelector('input[type=file][accept=\".hmap\"]').click()");
+    }
+
+    private async Task OnFileInputChange()
+    {
+        // Reset state
+        fileBytes = null;
+        fileName = null;
+        fileSize = 0;
+        fileTooLarge = false;
+        errorMessage = null;
+        uploadSuccess = false;
+
+        isReading = true;
+        StateHasChanged();
+
+        try
+        {
+            // Use JS interop to read the file as base64 - bypasses Blazor Server stream issues
+            var result = await JS.InvokeAsync<FileReadResult>("readFileAsBase64", fileInput);
+
+            if (result == null || string.IsNullOrEmpty(result.Data))
+            {
+                errorMessage = "No file selected or file could not be read.";
+                return;
+            }
+
+            fileName = result.Name;
+            fileSize = result.Size;
+
+            if (result.Size > MaxFileSizeBytes)
+            {
+                fileTooLarge = true;
+                errorMessage = $"File too large ({FormatFileSize(result.Size)}). Maximum size is 200 MB.";
+                return;
+            }
+
+            // Convert base64 to bytes
+            fileBytes = Convert.FromBase64String(result.Data);
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to read file: {ex.Message}";
+        }
+        finally
+        {
+            isReading = false;
+        }
+    }
+
+    private void Cancel()
+    {
+        MudDialog?.Cancel();
+    }
+
+    private async Task Upload()
+    {
+        if (fileBytes == null || fileBytes.Length == 0 || string.IsNullOrEmpty(fileName))
+            return;
+
+        isUploading = true;
+        errorMessage = null;
+
+        try
+        {
+            var httpClient = HttpClientFactory.CreateClient("API");
+
+            using var content = new MultipartFormDataContent();
+            var fileContent = new ByteArrayContent(fileBytes);
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            content.Add(fileContent, "file", fileName);
+
+            // Add slug parameter
+            content.Add(new StringContent(Slug), "slug");
+
+            var response = await httpClient.PostAsync("/public/contribute", content);
+
+            if (response.IsSuccessStatusCode)
+            {
+                uploadSuccess = true;
+                Snackbar.Add("Thank you for your contribution!", Severity.Success);
+
+                // Auto-close after success
+                await Task.Delay(2000);
+                MudDialog?.Close(DialogResult.Ok(true));
+            }
+            else if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                errorMessage = "Rate limit exceeded. Please try again later (max 2 uploads per hour).";
+                Snackbar.Add(errorMessage, Severity.Warning);
+            }
+            else if (response.StatusCode == System.Net.HttpStatusCode.RequestEntityTooLarge)
+            {
+                errorMessage = "File too large. Maximum size is 200 MB.";
+                Snackbar.Add(errorMessage, Severity.Error);
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                errorMessage = $"Upload failed: {response.StatusCode}";
+
+                // Try to extract error message from JSON response
+                try
+                {
+                    var jsonDoc = System.Text.Json.JsonDocument.Parse(errorContent);
+                    if (jsonDoc.RootElement.TryGetProperty("error", out var errorProp))
+                    {
+                        errorMessage = errorProp.GetString() ?? errorMessage;
+                    }
+                }
+                catch
+                {
+                    // Ignore JSON parsing errors
+                }
+
+                Snackbar.Add(errorMessage, Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Upload failed: {ex.Message}";
+            Snackbar.Add(errorMessage, Severity.Error);
+        }
+        finally
+        {
+            isUploading = false;
+        }
+    }
+
+    private static string FormatFileSize(long bytes)
+    {
+        if (bytes < 1024)
+            return $"{bytes} B";
+        if (bytes < 1024 * 1024)
+            return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024 * 1024 * 1024)
+            return $"{bytes / (1024.0 * 1024.0):F1} MB";
+        return $"{bytes / (1024.0 * 1024.0 * 1024.0):F2} GB";
+    }
+
+    private class FileReadResult
+    {
+        public string Name { get; set; } = string.Empty;
+        public long Size { get; set; }
+        public string Data { get; set; } = string.Empty;
+    }
+}

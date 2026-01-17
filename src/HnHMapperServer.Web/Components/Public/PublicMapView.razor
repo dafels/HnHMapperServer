@@ -3,6 +3,7 @@
 @inject IJSRuntime JS
 @inject IHttpClientFactory HttpClientFactory
 @inject ILogger<PublicMapView> Logger
+@inject IDialogService DialogService
 @implements IAsyncDisposable
 
 <!-- Thingwall Toggle Button (top-left, below Leaflet zoom controls) -->
@@ -14,6 +15,18 @@
                    Style="min-width: 40px; min-height: 40px; padding: 8px; border-radius: 50%;">
             <img src="/gfx/terobjs/mm/thingwall.png" alt="Thingwall"
                  style="width: 24px; height: 24px; @(showThingwalls ? "" : "opacity: 0.5;")" />
+        </MudButton>
+    </MudTooltip>
+</div>
+
+<!-- Contribute Button -->
+<div style="position: fixed; top: 170px; left: 16px; z-index: 1400;">
+    <MudTooltip Text="Contribute .hmap file" Placement="Placement.Right">
+        <MudButton OnClick="@ShowContributeDialog"
+                   Variant="Variant.Filled"
+                   Color="Color.Success"
+                   Style="min-width: 40px; min-height: 40px; padding: 8px; border-radius: 50%;">
+            <MudIcon Icon="@Icons.Material.Filled.CloudUpload" />
         </MudButton>
     </MudTooltip>
 </div>
@@ -52,6 +65,13 @@
         {
             await jsModule.InvokeVoidAsync("setMarkersVisible", showThingwalls);
         }
+    }
+
+    private async Task ShowContributeDialog()
+    {
+        var options = new DialogOptions { MaxWidth = MaxWidth.Small, FullWidth = true };
+        var parameters = new DialogParameters { { "Slug", Slug } };
+        await DialogService.ShowAsync<ContributeHmapDialog>("Contribute Map Data", parameters, options);
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)

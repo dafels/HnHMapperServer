@@ -381,6 +381,26 @@ builder.Services.AddRateLimiter(options =>
             });
     });
 
+    // Anonymous .hmap contributions: 2 per hour per IP
+    options.AddPolicy("HmapContribution", httpContext =>
+    {
+        // Check X-Forwarded-For header first (for reverse proxy scenarios)
+        var forwardedFor = httpContext.Request.Headers["X-Forwarded-For"].FirstOrDefault();
+        var ipAddress = !string.IsNullOrEmpty(forwardedFor)
+            ? forwardedFor.Split(',')[0].Trim()
+            : httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: $"contribute:{ipAddress}",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 2,
+                Window = TimeSpan.FromHours(1),
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            });
+    });
+
     // Global concurrency limit (1000 concurrent requests)
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
     {
@@ -740,6 +760,7 @@ app.MapSuperadminEndpoints(); // Phase 5: Superadmin endpoints (global tenant ma
 app.MapAuditEndpoints(); // Phase 6: Audit log viewer endpoints
 app.MapDatabaseEndpoints();
 app.MapPublicMapEndpoints(); // Public map viewing (no auth required)
+app.MapPublicContributionEndpoints(); // Public .hmap contributions (anonymous, rate limited)
 
 // Public version endpoint - returns build information (no authentication required)
 app.MapGet("/version", (IBuildInfoProvider buildInfo) => 
