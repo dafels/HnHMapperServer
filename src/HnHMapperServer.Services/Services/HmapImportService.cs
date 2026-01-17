@@ -144,6 +144,9 @@ public class HmapImportService : IHmapImportService
     private readonly ILogger<HmapImportService> _logger;
     private const int GRID_SIZE = 100; // 100x100 tiles per grid
 
+    // Security: Maximum HMAP file size (200 MB)
+    private const long MaxHmapFileSizeBytes = 200 * 1024 * 1024;
+
     // Global lock to prevent concurrent imports across all tenants
     // Only one .hmap import can run at a time to prevent server overload
     private static readonly SemaphoreSlim _globalImportLock = new(1, 1);
@@ -204,6 +207,19 @@ public class HmapImportService : IHmapImportService
 
         try
         {
+            // Security: Check file size before processing
+            if (hmapStream.CanSeek && hmapStream.Length > MaxHmapFileSizeBytes)
+            {
+                _logger.LogWarning(
+                    "Security: HMAP import rejected for tenant {TenantId}. Reason: FileTooLarge, Size: {Size} bytes, Limit: {Limit} bytes",
+                    tenantId, hmapStream.Length, MaxHmapFileSizeBytes);
+
+                result.Success = false;
+                result.ErrorMessage = $"HMAP file exceeds maximum size limit of {MaxHmapFileSizeBytes / 1024 / 1024} MB. " +
+                                      $"Uploaded file is {hmapStream.Length / 1024 / 1024} MB.";
+                return result;
+            }
+
             // Phase 1: Parse .hmap file
             cancellationToken.ThrowIfCancellationRequested();
             tracker.StartPhase(1, "Parsing");

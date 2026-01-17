@@ -10,6 +10,8 @@ using HnHMapperServer.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Cryptography;
 using System.Text;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Png;
 
 namespace HnHMapperServer.Api.Endpoints;
 
@@ -20,6 +22,58 @@ namespace HnHMapperServer.Api.Endpoints;
 public static partial class ClientEndpoints
 {
     private const string VERSION = "4";
+
+    // Security: Maximum tile file size (1 MB)
+    private const int MaxTileSizeBytes = 1_048_576;
+
+    // Security: Expected tile dimensions
+    private const int ExpectedTileWidth = 100;
+    private const int ExpectedTileHeight = 100;
+
+    /// <summary>
+    /// Validates that the byte array starts with PNG magic bytes.
+    /// PNG signature: 89 50 4E 47 0D 0A 1A 0A
+    /// </summary>
+    private static bool IsValidPng(byte[] data)
+    {
+        if (data.Length < 8) return false;
+        return data[0] == 0x89 && data[1] == 0x50 &&
+               data[2] == 0x4E && data[3] == 0x47 &&
+               data[4] == 0x0D && data[5] == 0x0A &&
+               data[6] == 0x1A && data[7] == 0x0A;
+    }
+
+    /// <summary>
+    /// Logs a rejected upload to the audit service.
+    /// </summary>
+    private static async Task AuditRejectedUploadAsync(
+        IAuditService auditService,
+        string tenantId,
+        string? userId,
+        string gridId,
+        string reason,
+        string? threatName,
+        string? fileName,
+        long fileSizeBytes,
+        string? scanEngine = null)
+    {
+        await auditService.LogAsync(new AuditEntry
+        {
+            TenantId = tenantId,
+            UserId = userId,
+            Action = "UploadRejected",
+            EntityType = "GridTile",
+            EntityId = gridId,
+            NewValue = JsonSerializer.Serialize(new
+            {
+                Reason = reason,
+                ThreatName = threatName,
+                FileName = fileName,
+                FileSizeBytes = fileSizeBytes,
+                ScanEngine = scanEngine
+            })
+        });
+    }
 
     public static void MapClientEndpoints(this IEndpointRouteBuilder app)
     {
@@ -137,6 +191,7 @@ public static partial class ClientEndpoints
         ITenantActivityService activityService,
         IConfigRepository configRepository,
         ILargeTileService largeTileService,
+        IAuditService auditService,
         ILogger<Program> logger)
     {
         if (!await ClientTokenHelpers.HasUploadAsync(context, db, tokenService, token, logger))
@@ -214,6 +269,95 @@ public static partial class ClientEndpoints
         if (file == null)
             return Results.BadRequest("No file provided");
 
+        // Get userId for audit logging
+        var userId = context.Items["UserId"] as string;
+
+        // --- SECURITY: Per-file size limit (1 MB) ---
+        if (file.Length > MaxTileSizeBytes)
+        {
+            logger.LogWarning(
+                "Security: Upload rejected for tenant {TenantId}, grid {GridId}. Reason: FileTooLarge, Size: {Size} bytes",
+                tenantId, id, file.Length);
+
+            await AuditRejectedUploadAsync(auditService, tenantId, userId, id,
+                "FileTooLarge", null, file.FileName, file.Length);
+
+            return Results.Json(new
+            {
+                error = "File too large",
+                detail = $"Tile exceeds maximum size limit of {MaxTileSizeBytes / 1024} KB. Uploaded: {file.Length / 1024} KB."
+            }, statusCode: 400);
+        }
+
+        // Read file bytes for validation
+        byte[] fileBytes;
+        using (var ms = new MemoryStream())
+        {
+            await file.CopyToAsync(ms);
+            fileBytes = ms.ToArray();
+        }
+
+        // --- SECURITY: PNG magic byte validation ---
+        if (!IsValidPng(fileBytes))
+        {
+            logger.LogWarning(
+                "Security: Upload rejected for tenant {TenantId}, grid {GridId}. Reason: InvalidPng",
+                tenantId, id);
+
+            await AuditRejectedUploadAsync(auditService, tenantId, userId, id,
+                "InvalidPng", null, file.FileName, file.Length);
+
+            return Results.Json(new
+            {
+                error = "Invalid file format",
+                detail = "File must be a valid PNG image."
+            }, statusCode: 400);
+        }
+
+        // --- SECURITY: Image dimension validation & re-encoding ---
+        byte[] sanitizedBytes;
+        try
+        {
+            using var image = Image.Load(fileBytes);
+
+            // Validate dimensions
+            if (image.Width != ExpectedTileWidth || image.Height != ExpectedTileHeight)
+            {
+                logger.LogWarning(
+                    "Security: Upload rejected for tenant {TenantId}, grid {GridId}. Reason: InvalidDimensions, Dimensions: {Width}x{Height}",
+                    tenantId, id, image.Width, image.Height);
+
+                await AuditRejectedUploadAsync(auditService, tenantId, userId, id,
+                    "InvalidDimensions", $"{image.Width}x{image.Height}", file.FileName, file.Length);
+
+                return Results.Json(new
+                {
+                    error = "Invalid tile dimensions",
+                    detail = $"Tile must be {ExpectedTileWidth}x{ExpectedTileHeight} pixels. Uploaded: {image.Width}x{image.Height}."
+                }, statusCode: 400);
+            }
+
+            // Re-encode to strip any embedded payloads (polyglot prevention)
+            using var cleanStream = new MemoryStream();
+            image.SaveAsPng(cleanStream);
+            sanitizedBytes = cleanStream.ToArray();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Security: Upload rejected for tenant {TenantId}, grid {GridId}. Reason: ImageProcessingFailed",
+                tenantId, id);
+
+            await AuditRejectedUploadAsync(auditService, tenantId, userId, id,
+                "ImageProcessingFailed", ex.Message, file.FileName, file.Length);
+
+            return Results.Json(new
+            {
+                error = "Invalid image",
+                detail = "Failed to process the uploaded image. Ensure it is a valid PNG file."
+            }, statusCode: 400);
+        }
+
         var grid = await gridRepository.GetGridAsync(id);
         if (grid == null)
         {
@@ -238,8 +382,8 @@ public static partial class ClientEndpoints
 
         if (updateTile)
         {
-            // Check storage quota before accepting upload
-            var fileSizeMB = file.Length / 1024.0 / 1024.0;
+            // Use sanitized bytes size for quota calculation
+            var fileSizeMB = sanitizedBytes.Length / 1024.0 / 1024.0;
             var canUpload = await quotaService.CheckQuotaAsync(tenantId, fileSizeMB);
 
             if (!canUpload)
@@ -250,6 +394,9 @@ public static partial class ClientEndpoints
                 logger.LogWarning(
                     "GridUpload: Quota exceeded for tenant {TenantId}. Current: {Current}MB, Quota: {Quota}MB, Upload: {Upload}MB",
                     tenantId, currentUsage, quotaLimit, fileSizeMB);
+
+                await AuditRejectedUploadAsync(auditService, tenantId, userId, id,
+                    "QuotaExceeded", null, file.FileName, sanitizedBytes.Length);
 
                 return Results.Json(new
                 {
@@ -272,16 +419,13 @@ public static partial class ClientEndpoints
                 Directory.CreateDirectory(fileDir);
             }
 
-            // Save file and increment quota atomically
+            // Save sanitized file and increment quota atomically
             using (var transaction = await db.Database.BeginTransactionAsync())
             {
                 try
                 {
-                    // Save file to disk
-                    using (var stream = new FileStream(filePath, FileMode.Create))
-                    {
-                        await file.CopyToAsync(stream);
-                    }
+                    // Save sanitized (re-encoded) file to disk
+                    await File.WriteAllBytesAsync(filePath, sanitizedBytes);
 
                     // Increment storage usage
                     await quotaService.IncrementStorageUsageAsync(tenantId, fileSizeMB);
@@ -312,7 +456,7 @@ public static partial class ClientEndpoints
             }
 
             var relativePath = filePathService.GetGridRelativePath(tenantId, grid.Id);
-            var fileSizeBytes = (int)new FileInfo(filePath).Length;
+            var fileSizeBytes = sanitizedBytes.Length;
             await tileService.SaveTileAsync(
                 grid.Map,
                 grid.Coord,
