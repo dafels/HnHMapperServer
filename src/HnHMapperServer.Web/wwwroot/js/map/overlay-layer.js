@@ -250,7 +250,8 @@ function createOverlayLayer() {
             tile.height = TileSize;
 
             // Calculate scale factor for zoom (each zoom level covers 2x2 tiles of next level)
-            const scaleFactor = Math.pow(2, HnHMaxZoom - coords.z);
+            // Multiply by TileSize/BaseTileSize (4) because 400x400 tiles cover 4x4 base 100x100 grid cells
+            const scaleFactor = Math.pow(2, HnHMaxZoom - coords.z) * (TileSize / BaseTileSize);
 
             // Calculate grid coordinates covered by this tile
             const startX = coords.x * scaleFactor;

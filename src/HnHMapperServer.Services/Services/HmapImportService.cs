@@ -764,9 +764,11 @@ public class HmapImportService : IHmapImportService
         if (mode == HmapImportMode.CreateNew)
         {
             // Always create new map and import all grids
+            // Deduplicate by GridIdString to prevent UNIQUE constraint violations if source file has duplicates
             mapId = await CreateNewMapAsync(tenantId);
             isNewMap = true;
-            gridsToImport = grids;
+            gridsToImport = grids.DistinctBy(g => g.GridIdString).ToList();
+            gridsSkipped = grids.Count - gridsToImport.Count;
             _logger.LogInformation("Created new map {MapId} for segment {SegmentId:X}", mapId, segmentId);
         }
         else // Merge mode
@@ -799,7 +801,12 @@ public class HmapImportService : IHmapImportService
                 // In merge mode with pre-calculated decision, filter out existing grids
                 var allGridIds = grids.Select(g => g.GridIdString).ToList();
                 var existingGridIds = await _gridRepository.GetExistingGridIdsAsync(allGridIds);
-                gridsToImport = grids.Where(g => !existingGridIds.Contains(g.GridIdString)).ToList();
+                // Filter out existing grids and deduplicate by GridIdString to prevent UNIQUE constraint violations
+                // when the same grid ID appears multiple times in the source file
+                gridsToImport = grids
+                    .Where(g => !existingGridIds.Contains(g.GridIdString))
+                    .DistinctBy(g => g.GridIdString)
+                    .ToList();
                 gridsSkipped = grids.Count - gridsToImport.Count;
 
                 if (gridsSkipped > 0)
@@ -857,8 +864,11 @@ public class HmapImportService : IHmapImportService
                     _logger.LogInformation("Created new map {MapId} for segment {SegmentId:X} (no existing grids)", mapId, segmentId);
                 }
 
-                // Filter to only new grids
-                gridsToImport = grids.Where(g => !existingGridIds.Contains(g.GridIdString)).ToList();
+                // Filter to only new grids and deduplicate by GridIdString to prevent UNIQUE constraint violations
+                gridsToImport = grids
+                    .Where(g => !existingGridIds.Contains(g.GridIdString))
+                    .DistinctBy(g => g.GridIdString)
+                    .ToList();
                 gridsSkipped = grids.Count - gridsToImport.Count;
 
                 if (gridsSkipped > 0)
@@ -1103,8 +1113,11 @@ public class HmapImportService : IHmapImportService
 
         if (grids.Count > 0)
         {
-            // Import service already filters to only new grids - skip redundant existence check
-            await _gridRepository.SaveGridsBatchAsync(grids, skipExistenceCheck: true);
+            // Re-check for existing grids before insert to handle:
+            // 1. Cross-segment duplicates (same grid ID in multiple segments)
+            // 2. Race conditions from concurrent processing
+            // 3. Grids inserted by previous batches
+            await _gridRepository.SaveGridsBatchAsync(grids, skipExistenceCheck: false);
         }
 
         if (tiles.Count > 0)

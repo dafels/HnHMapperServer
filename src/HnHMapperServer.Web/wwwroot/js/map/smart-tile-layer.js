@@ -4,9 +4,11 @@
 import { TileSize, BaseTileSize, HnHMinZoom, HnHMaxZoom } from './leaflet-config.js';
 
 // Pre-computed scale factors for each zoom level (bit shift is 5x faster than Math.pow)
+// Each zoom level covers 2x2 tiles of the next level, and 400x400 tiles cover 4x4 base 100x100 grid cells
+const TILE_TO_GRID_RATIO = TileSize / BaseTileSize; // 400/100 = 4
 const SCALE_FACTORS = {};
 for (let z = HnHMinZoom; z <= HnHMaxZoom; z++) {
-    SCALE_FACTORS[z] = 1 << (HnHMaxZoom - z);  // Equivalent to Math.pow(2, HnHMaxZoom - z)
+    SCALE_FACTORS[z] = (1 << (HnHMaxZoom - z)) * TILE_TO_GRID_RATIO;  // Accounts for 4x4 grids per tile
 }
 
 // Smart Tile Layer with caching and smooth transitions
@@ -47,9 +49,10 @@ export const SmartTileLayer = L.TileLayer.extend({
         // IMPORTANT: coords.x/y are in Leaflet's zoom space, so we must use Leaflet zoom
         // for offset calculation, not HnH zoom (which is reversed via zoomReverse option)
         const leafletZoom = this._map ? this._map.getZoom() : HnHMaxZoom;
-        // Scale factor: at Leaflet zoom z, one tile covers 2^(HnHMaxZoom - z) grids
+        // Scale factor: at Leaflet zoom z, one tile covers 2^(HnHMaxZoom - z) * 4 grids
+        // (4x because 400x400 tiles cover 4x4 base 100x100 grid cells)
         // Using pre-computed SCALE_FACTORS lookup instead of Math.pow (5x faster)
-        const scaleAtLeafletZoom = SCALE_FACTORS[leafletZoom] || (1 << (HnHMaxZoom - leafletZoom));
+        const scaleAtLeafletZoom = SCALE_FACTORS[leafletZoom] || ((1 << (HnHMaxZoom - leafletZoom)) * TILE_TO_GRID_RATIO);
         // Convert grid offset to tile offset at this Leaflet zoom level
         const tileOffsetX = gridOffsetX / scaleAtLeafletZoom;
         const tileOffsetY = gridOffsetY / scaleAtLeafletZoom;
@@ -380,7 +383,7 @@ export const SmartTileLayer = L.TileLayer.extend({
                     // Apply grid offsets in the same way as getTileUrl() (rounded tile offsets).
                     const gridOffsetX = self.offsetX || 0;
                     const gridOffsetY = self.offsetY || 0;
-                    const scaleAtLeafletZoom = SCALE_FACTORS[leafletZoom] || (1 << (HnHMaxZoom - leafletZoom));
+                    const scaleAtLeafletZoom = SCALE_FACTORS[leafletZoom] || ((1 << (HnHMaxZoom - leafletZoom)) * TILE_TO_GRID_RATIO);
                     const tileOffsetX = gridOffsetX / scaleAtLeafletZoom;
                     const tileOffsetY = gridOffsetY / scaleAtLeafletZoom;
                     const requestedX = coords.x + Math.round(tileOffsetX);

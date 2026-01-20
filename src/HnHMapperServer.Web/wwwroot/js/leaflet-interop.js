@@ -20,7 +20,8 @@ L.GridLayer.GridCoord = L.GridLayer.extend({
         element.style.height = `${TileSize}px`;
         element.className = "map-tile";
 
-        const scaleFactor = Math.pow(2, HnHMaxZoom - coords.z);
+        // Multiply by TileSize/BaseTileSize (4) because 400x400 tiles cover 4x4 base 100x100 grid cells
+        const scaleFactor = Math.pow(2, HnHMaxZoom - coords.z) * (TileSize / BaseTileSize);
         const topLeft = { x: coords.x * scaleFactor, y: coords.y * scaleFactor };
         const bottomRight = { x: topLeft.x + scaleFactor - 1, y: topLeft.y + scaleFactor - 1 };
 
