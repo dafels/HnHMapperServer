@@ -139,7 +139,7 @@
         try
         {
             // Use JS interop to read the file as base64 - bypasses Blazor Server stream issues
-            var result = await JS.InvokeAsync<FileReadResult>("readFileAsBase64", fileInput);
+            var result = await JS.InvokeAsync<FileReadResult>("readFileAsBase64", TimeSpan.FromMinutes(5), fileInput);
 
             if (result == null || string.IsNullOrEmpty(result.Data))
             {
