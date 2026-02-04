@@ -1,0 +1,559 @@
+@using HnHMapperServer.Core.DTOs
+@using MudBlazor
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject ILogger<ManagePublicMapHmapSourcesDialog> Logger
+
+<MudDialog>
+    <DialogContent>
+        <MudText Typo="Typo.h6" Class="mb-2">HMap Sources for "@PublicMap.Name"</MudText>
+        <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
+            Select HMap file sources to include when generating this public map. Higher priority sources take precedence in overlapping areas.
+        </MudText>
+
+        <!-- Current HMap Sources -->
+        <MudText Typo="Typo.subtitle1" Class="mb-2">Selected Sources (@_sources.Count)</MudText>
+
+        @if (_isLoadingSources)
+        {
+            <MudProgressLinear Indeterminate="true" Class="mb-4" />
+        }
+        else if (!_sources.Any())
+        {
+            <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-4">
+                No HMap sources selected. Add sources below to generate tiles from .hmap files.
+            </MudAlert>
+        }
+        else
+        {
+            <MudTable T="PublicMapHmapSourceDto" Items="@_sources" Dense="true" Hover="true" Class="mb-4">
+                <HeaderContent>
+                    <MudTh>Priority</MudTh>
+                    <MudTh>Source</MudTh>
+                    <MudTh>Grids</MudTh>
+                    <MudTh>Contribution</MudTh>
+                    <MudTh>Actions</MudTh>
+                </HeaderContent>
+                <RowTemplate>
+                    <MudTd DataLabel="Priority">
+                        <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center">
+                            <MudIconButton Icon="@Icons.Material.Filled.ArrowUpward"
+                                          Size="Size.Small"
+                                          Disabled="@(context.Priority <= 0 || _isUpdating)"
+                                          OnClick="@(() => ChangePriority(context, context.Priority - 1))" />
+                            <MudText Typo="Typo.body2">@context.Priority</MudText>
+                            <MudIconButton Icon="@Icons.Material.Filled.ArrowDownward"
+                                          Size="Size.Small"
+                                          Disabled="@(context.Priority >= _sources.Max(s => s.Priority) || _isUpdating)"
+                                          OnClick="@(() => ChangePriority(context, context.Priority + 1))" />
+                        </MudStack>
+                    </MudTd>
+                    <MudTd DataLabel="Source">
+                        <MudText Typo="Typo.body2">@context.HmapSourceName</MudText>
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">ID: @context.HmapSourceId</MudText>
+                    </MudTd>
+                    <MudTd DataLabel="Grids">
+                        @if (context.TotalGrids.HasValue)
+                        {
+                            <MudText Typo="Typo.body2">@context.TotalGrids?.ToString("N0")</MudText>
+                            @if (context.MinX.HasValue)
+                            {
+                                <MudText Typo="Typo.caption" Color="Color.Secondary">
+                                    X: @context.MinX to @context.MaxX
+                                </MudText>
+                            }
+                        }
+                        else
+                        {
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">-</MudText>
+                        }
+                    </MudTd>
+                    <MudTd DataLabel="Contribution">
+                        @if (context.NewGrids.HasValue)
+                        {
+                            <MudStack>
+                                <MudChip T="string" Size="Size.Small" Color="Color.Success">
+                                    +@context.NewGrids?.ToString("N0") new
+                                </MudChip>
+                                @if (context.OverlappingGrids > 0)
+                                {
+                                    <MudChip T="string" Size="Size.Small" Color="Color.Warning">
+                                        @context.OverlappingGrids?.ToString("N0") overlap
+                                    </MudChip>
+                                }
+                            </MudStack>
+                        }
+                        else
+                        {
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">Not analyzed</MudText>
+                        }
+                    </MudTd>
+                    <MudTd DataLabel="Actions">
+                        <MudIconButton Icon="@Icons.Material.Filled.Delete"
+                                      Color="Color.Error"
+                                      Size="Size.Small"
+                                      OnClick="@(() => RemoveSource(context))"
+                                      Disabled="@_isUpdating"
+                                      Title="Remove source" />
+                    </MudTd>
+                </RowTemplate>
+            </MudTable>
+
+            @if (_contributionSummary != null)
+            {
+                <MudAlert Severity="Severity.Info" Dense="true" Class="mb-4">
+                    <MudIcon Icon="@Icons.Material.Filled.Calculate" Size="Size.Small" Class="me-1" />
+                    <strong>Total:</strong> @_contributionSummary.TotalUniqueGrids.ToString("N0") unique grids from @_contributionSummary.TotalSources sources
+                    @if (_contributionSummary.TotalOverlappingGrids > 0)
+                    {
+                        <span> (@_contributionSummary.TotalOverlappingGrids.ToString("N0") overlapping)</span>
+                    }
+                </MudAlert>
+            }
+        }
+
+        <MudDivider Class="my-4" />
+
+        <!-- Add New HMap Source -->
+        <MudText Typo="Typo.subtitle1" Class="mb-2">Add HMap Source</MudText>
+
+        @if (_isLoadingAvailable)
+        {
+            <MudProgressLinear Indeterminate="true" />
+        }
+        else if (!_availableSources.Any())
+        {
+            <MudAlert Severity="Severity.Warning" Dense="true">
+                No HMap sources available. Upload .hmap files in the HMap Source Library first.
+            </MudAlert>
+        }
+        else
+        {
+            <MudStack Spacing="3">
+                <MudSelect T="int?" @bind-Value="_selectedSourceId"
+                           Label="HMap Source"
+                           Variant="Variant.Outlined"
+                           HelperText="Select an HMap source to add">
+                    @foreach (var source in _availableSources)
+                    {
+                        <MudSelectItem Value="@((int?)source.Id)">
+                            @source.Name (@(source.TotalGrids?.ToString("N0") ?? "?") grids, @source.FileSizeDisplay)
+                        </MudSelectItem>
+                    }
+                </MudSelect>
+
+                <MudTextField @bind-Value="_selectedPriority"
+                             Label="Priority"
+                             Variant="Variant.Outlined"
+                             InputType="InputType.Number"
+                             HelperText="Lower number = higher priority (processed first)"
+                             Style="max-width: 200px;" />
+
+                <MudButton Variant="Variant.Filled"
+                           Color="Color.Success"
+                           StartIcon="@Icons.Material.Filled.Add"
+                           OnClick="AddSource"
+                           Disabled="@(_selectedSourceId == null || _isUpdating)">
+                    @if (_isUpdating)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                        <span>Adding...</span>
+                    }
+                    else
+                    {
+                        <span>Add Source</span>
+                    }
+                </MudButton>
+            </MudStack>
+        }
+
+        @if (_sources.Any())
+        {
+            <MudDivider Class="my-4" />
+
+            <MudStack Row="true" Spacing="2">
+                <MudButton Variant="Variant.Filled"
+                           Color="Color.Primary"
+                           StartIcon="@Icons.Material.Filled.Analytics"
+                           OnClick="AnalyzeContributions"
+                           Disabled="@_isAnalyzing">
+                    @if (_isAnalyzing)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                        <span>Analyzing...</span>
+                    }
+                    else
+                    {
+                        <span>Analyze Contributions</span>
+                    }
+                </MudButton>
+
+                <MudButton Variant="Variant.Filled"
+                           Color="Color.Warning"
+                           StartIcon="@Icons.Material.Filled.Autorenew"
+                           OnClick="GenerateFromHmapSources"
+                           Disabled="@(_isGenerating || !_sources.Any())">
+                    @if (_isGenerating)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                        <span>Starting...</span>
+                    }
+                    else
+                    {
+                        <span>Generate from HMap Sources</span>
+                    }
+                </MudButton>
+            </MudStack>
+        }
+
+        @if (_errorMessage != null)
+        {
+            <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">
+                @_errorMessage
+            </MudAlert>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Close">Close</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] IMudDialogInstance? MudDialog { get; set; }
+    [Parameter] public PublicMapDto PublicMap { get; set; } = null!;
+
+    private List<PublicMapHmapSourceDto> _sources = new();
+    private List<HmapSourceDto> _availableSources = new();
+    private SourceContributionSummaryDto? _contributionSummary;
+
+    private int? _selectedSourceId;
+    private int _selectedPriority = 0;
+
+    private bool _isLoadingSources = true;
+    private bool _isLoadingAvailable = true;
+    private bool _isUpdating = false;
+    private bool _isAnalyzing = false;
+    private bool _isGenerating = false;
+    private string? _errorMessage = null;
+    private bool _hasChanges = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Task.WhenAll(LoadSources(), LoadAvailableSources());
+    }
+
+    private async Task LoadSources()
+    {
+        _isLoadingSources = true;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.GetAsync($"/api/superadmin/public-maps/{PublicMap.Id}/hmap-sources");
+
+            if (response.IsSuccessStatusCode)
+            {
+                _sources = await response.Content.ReadFromJsonAsync<List<PublicMapHmapSourceDto>>(
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
+
+                // Update next priority
+                if (_sources.Any())
+                {
+                    _selectedPriority = _sources.Max(s => s.Priority) + 1;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error loading HMap sources");
+            Snackbar.Add("Failed to load HMap sources", Severity.Error);
+        }
+        finally
+        {
+            _isLoadingSources = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task LoadAvailableSources()
+    {
+        _isLoadingAvailable = true;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.GetAsync("/api/superadmin/hmap-sources");
+
+            if (response.IsSuccessStatusCode)
+            {
+                var allSources = await response.Content.ReadFromJsonAsync<List<HmapSourceDto>>(
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
+
+                // Filter out already-added sources
+                var existingSourceIds = _sources.Select(s => s.HmapSourceId).ToHashSet();
+                _availableSources = allSources.Where(s => !existingSourceIds.Contains(s.Id)).ToList();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error loading available HMap sources");
+            Snackbar.Add("Failed to load available sources", Severity.Error);
+        }
+        finally
+        {
+            _isLoadingAvailable = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task AddSource()
+    {
+        if (_selectedSourceId == null) return;
+
+        _isUpdating = true;
+        _errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var request = new AddPublicMapHmapSourceDto
+            {
+                HmapSourceId = _selectedSourceId.Value,
+                Priority = _selectedPriority
+            };
+
+            var response = await client.PostAsJsonAsync($"/api/superadmin/public-maps/{PublicMap.Id}/hmap-sources", request);
+
+            if (response.IsSuccessStatusCode)
+            {
+                Snackbar.Add("HMap source added successfully", Severity.Success);
+                _hasChanges = true;
+                _selectedSourceId = null;
+                await Task.WhenAll(LoadSources(), LoadAvailableSources());
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                try
+                {
+                    var errorObj = System.Text.Json.JsonSerializer.Deserialize<ErrorResponse>(errorBody,
+                        new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    _errorMessage = errorObj?.Error ?? "Failed to add HMap source";
+                }
+                catch
+                {
+                    _errorMessage = "Failed to add HMap source";
+                }
+                Snackbar.Add(_errorMessage, Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error adding HMap source");
+            _errorMessage = $"Error: {ex.Message}";
+            Snackbar.Add(_errorMessage, Severity.Error);
+        }
+        finally
+        {
+            _isUpdating = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task RemoveSource(PublicMapHmapSourceDto source)
+    {
+        _isUpdating = true;
+        _errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.DeleteAsync($"/api/superadmin/public-maps/{PublicMap.Id}/hmap-sources/{source.HmapSourceId}");
+
+            if (response.IsSuccessStatusCode)
+            {
+                Snackbar.Add("HMap source removed successfully", Severity.Success);
+                _hasChanges = true;
+                _contributionSummary = null;
+                await Task.WhenAll(LoadSources(), LoadAvailableSources());
+            }
+            else
+            {
+                Snackbar.Add("Failed to remove HMap source", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error removing HMap source");
+            Snackbar.Add($"Error: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isUpdating = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task ChangePriority(PublicMapHmapSourceDto source, int newPriority)
+    {
+        _isUpdating = true;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+
+            // We need to update priority - let's remove and re-add with new priority
+            // First remove
+            var removeResponse = await client.DeleteAsync($"/api/superadmin/public-maps/{PublicMap.Id}/hmap-sources/{source.HmapSourceId}");
+            if (!removeResponse.IsSuccessStatusCode)
+            {
+                Snackbar.Add("Failed to update priority", Severity.Error);
+                return;
+            }
+
+            // Then re-add with new priority
+            var request = new AddPublicMapHmapSourceDto
+            {
+                HmapSourceId = source.HmapSourceId,
+                Priority = newPriority
+            };
+            var addResponse = await client.PostAsJsonAsync($"/api/superadmin/public-maps/{PublicMap.Id}/hmap-sources", request);
+
+            if (addResponse.IsSuccessStatusCode)
+            {
+                _hasChanges = true;
+                await LoadSources();
+            }
+            else
+            {
+                Snackbar.Add("Failed to update priority", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error updating priority");
+            Snackbar.Add($"Error: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isUpdating = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task AnalyzeContributions()
+    {
+        _isAnalyzing = true;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.GetAsync($"/api/superadmin/public-maps/{PublicMap.Id}/hmap-sources/analysis");
+
+            if (response.IsSuccessStatusCode)
+            {
+                _contributionSummary = await response.Content.ReadFromJsonAsync<SourceContributionSummaryDto>(
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                // Update source contribution data
+                if (_contributionSummary != null)
+                {
+                    foreach (var source in _sources)
+                    {
+                        var contribution = _contributionSummary.Sources.FirstOrDefault(c => c.HmapSourceId == source.HmapSourceId);
+                        if (contribution != null)
+                        {
+                            source.NewGrids = contribution.NewGrids;
+                            source.OverlappingGrids = contribution.OverlappingGrids;
+                        }
+                    }
+                }
+
+                Snackbar.Add("Contribution analysis complete", Severity.Success);
+            }
+            else
+            {
+                Snackbar.Add("Failed to analyze contributions", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error analyzing contributions");
+            Snackbar.Add($"Error: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isAnalyzing = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task GenerateFromHmapSources()
+    {
+        _isGenerating = true;
+        StateHasChanged();
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.PostAsync($"/api/superadmin/public-maps/{PublicMap.Id}/generate-from-hmap", null);
+
+            if (response.IsSuccessStatusCode)
+            {
+                Snackbar.Add($"Generation started for '{PublicMap.Name}' from HMap sources", Severity.Success);
+                _hasChanges = true;
+            }
+            else if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+            {
+                Snackbar.Add("Generation already in progress", Severity.Warning);
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                try
+                {
+                    var errorObj = System.Text.Json.JsonSerializer.Deserialize<ErrorResponse>(errorBody,
+                        new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    Snackbar.Add(errorObj?.Error ?? "Failed to start generation", Severity.Error);
+                }
+                catch
+                {
+                    Snackbar.Add("Failed to start generation", Severity.Error);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error starting generation from HMap sources");
+            Snackbar.Add($"Error: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isGenerating = false;
+            StateHasChanged();
+        }
+    }
+
+    private void Close()
+    {
+        if (_hasChanges)
+        {
+            MudDialog?.Close(DialogResult.Ok(true));
+        }
+        else
+        {
+            MudDialog?.Cancel();
+        }
+    }
+
+    private class ErrorResponse
+    {
+        public string Error { get; set; } = string.Empty;
+    }
+}

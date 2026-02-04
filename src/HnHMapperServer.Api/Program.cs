@@ -152,6 +152,7 @@ builder.Services.AddScoped<ILargeTileService, LargeTileService>();
 // Public maps services (global, not tenant-scoped)
 builder.Services.AddScoped<IPublicMapService, PublicMapService>();
 builder.Services.AddSingleton<IPublicMapGenerationService, PublicMapGenerationService>();
+builder.Services.AddScoped<IHmapSourceService, HmapSourceService>();  // HMap source library service
 
 // Register memory cache for preview URL signing service
 builder.Services.AddMemoryCache();

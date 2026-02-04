@@ -31,4 +31,11 @@ public interface IPublicMapGenerationService
     /// Check if there are any queued generations
     /// </summary>
     bool HasQueuedGenerations();
+
+    /// <summary>
+    /// Start tile generation from HMap sources for a public map
+    /// </summary>
+    /// <param name="publicMapId">The public map ID</param>
+    /// <returns>True if generation started, false if already running</returns>
+    Task<bool> StartGenerationFromHmapSourcesAsync(string publicMapId);
 }

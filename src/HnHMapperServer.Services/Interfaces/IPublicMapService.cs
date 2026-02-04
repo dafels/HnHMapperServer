@@ -81,4 +81,33 @@ public interface IPublicMapService
     /// Check if a slug is available
     /// </summary>
     Task<bool> IsSlugAvailableAsync(string slug);
+
+    // ========================================
+    // HMap Source Management for Public Maps
+    // ========================================
+
+    /// <summary>
+    /// Add an HMap source to a public map's generation list
+    /// </summary>
+    Task<PublicMapHmapSourceDto> AddHmapSourceAsync(string publicMapId, AddPublicMapHmapSourceDto dto);
+
+    /// <summary>
+    /// Remove an HMap source from a public map
+    /// </summary>
+    Task RemoveHmapSourceAsync(string publicMapId, int hmapSourceId);
+
+    /// <summary>
+    /// Get all HMap sources selected for a public map
+    /// </summary>
+    Task<List<PublicMapHmapSourceDto>> GetHmapSourcesAsync(string publicMapId);
+
+    /// <summary>
+    /// Analyze source contributions for a public map (what each source adds vs overlap)
+    /// </summary>
+    Task<SourceContributionSummaryDto> AnalyzeSourceContributionsAsync(string publicMapId);
+
+    /// <summary>
+    /// Update priority of an HMap source in a public map
+    /// </summary>
+    Task UpdateHmapSourcePriorityAsync(string publicMapId, int hmapSourceId, int newPriority);
 }

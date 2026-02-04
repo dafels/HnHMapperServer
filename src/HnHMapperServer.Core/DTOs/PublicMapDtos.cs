@@ -153,3 +153,138 @@ public class PublicMapMarkerDto
     public int Y { get; set; }
     public string Image { get; set; } = string.Empty;
 }
+
+// ========================================
+// HMap Source Library DTOs
+// ========================================
+
+/// <summary>
+/// DTO for HMap source information
+/// </summary>
+public class HmapSourceDto
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string FileName { get; set; } = string.Empty;
+    public long FileSizeBytes { get; set; }
+    public DateTime UploadedAt { get; set; }
+    public string? UploadedBy { get; set; }
+
+    // Cached analysis
+    public int? TotalGrids { get; set; }
+    public int? SegmentCount { get; set; }
+    public int? MinX { get; set; }
+    public int? MaxX { get; set; }
+    public int? MinY { get; set; }
+    public int? MaxY { get; set; }
+    public DateTime? AnalyzedAt { get; set; }
+
+    // Computed
+    public string FileSizeDisplay => FormatFileSize(FileSizeBytes);
+    public bool IsAnalyzed => AnalyzedAt.HasValue;
+
+    private static string FormatFileSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024.0):F1} MB";
+        return $"{bytes / (1024.0 * 1024.0 * 1024.0):F2} GB";
+    }
+}
+
+/// <summary>
+/// DTO for uploading a new HMap source
+/// </summary>
+public class UploadHmapSourceDto
+{
+    /// <summary>
+    /// Display name for the HMap source (defaults to filename if not provided)
+    /// </summary>
+    public string? Name { get; set; }
+}
+
+/// <summary>
+/// DTO for HMap source analysis result
+/// </summary>
+public class HmapSourceAnalysisDto
+{
+    public int Id { get; set; }
+    public int TotalGrids { get; set; }
+    public int SegmentCount { get; set; }
+    public int MinX { get; set; }
+    public int MaxX { get; set; }
+    public int MinY { get; set; }
+    public int MaxY { get; set; }
+    public List<HmapSegmentInfo> Segments { get; set; } = new();
+}
+
+/// <summary>
+/// Information about a segment in an HMap file
+/// </summary>
+public class HmapSegmentInfo
+{
+    public long SegmentId { get; set; }
+    public int GridCount { get; set; }
+    public int MinX { get; set; }
+    public int MaxX { get; set; }
+    public int MinY { get; set; }
+    public int MaxY { get; set; }
+}
+
+/// <summary>
+/// DTO for linking an HMap source to a public map
+/// </summary>
+public class PublicMapHmapSourceDto
+{
+    public int Id { get; set; }
+    public string PublicMapId { get; set; } = string.Empty;
+    public int HmapSourceId { get; set; }
+    public string HmapSourceName { get; set; } = string.Empty;
+    public int Priority { get; set; }
+    public DateTime AddedAt { get; set; }
+
+    // Source info
+    public int? TotalGrids { get; set; }
+    public int? MinX { get; set; }
+    public int? MaxX { get; set; }
+    public int? MinY { get; set; }
+    public int? MaxY { get; set; }
+
+    // Per-source contribution analysis
+    public int? NewGrids { get; set; }
+    public int? OverlappingGrids { get; set; }
+}
+
+/// <summary>
+/// DTO for adding an HMap source to a public map
+/// </summary>
+public class AddPublicMapHmapSourceDto
+{
+    public int HmapSourceId { get; set; }
+    public int Priority { get; set; }
+}
+
+/// <summary>
+/// Summary of source contributions for a public map
+/// </summary>
+public class SourceContributionSummaryDto
+{
+    public string PublicMapId { get; set; } = string.Empty;
+    public int TotalSources { get; set; }
+    public int TotalUniqueGrids { get; set; }
+    public int TotalOverlappingGrids { get; set; }
+    public List<SourceContributionDto> Sources { get; set; } = new();
+}
+
+/// <summary>
+/// Contribution details for a single source
+/// </summary>
+public class SourceContributionDto
+{
+    public int HmapSourceId { get; set; }
+    public string HmapSourceName { get; set; } = string.Empty;
+    public int Priority { get; set; }
+    public int TotalGrids { get; set; }
+    public int NewGrids { get; set; }
+    public int OverlappingGrids { get; set; }
+}

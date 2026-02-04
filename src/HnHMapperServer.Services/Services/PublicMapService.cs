@@ -421,4 +421,233 @@ public partial class PublicMapService : IPublicMapService
 
     [GeneratedRegex(@"-+")]
     private static partial Regex SlugMultipleHyphens();
+
+    // ========================================
+    // HMap Source Management for Public Maps
+    // ========================================
+
+    public async Task<PublicMapHmapSourceDto> AddHmapSourceAsync(string publicMapId, AddPublicMapHmapSourceDto dto)
+    {
+        // Verify public map exists
+        if (!await PublicMapExistsAsync(publicMapId))
+        {
+            throw new ArgumentException($"Public map {publicMapId} not found");
+        }
+
+        // Verify HMap source exists
+        var hmapSource = await _dbContext.HmapSources.FindAsync(dto.HmapSourceId);
+        if (hmapSource == null)
+        {
+            throw new ArgumentException($"HMap source {dto.HmapSourceId} not found");
+        }
+
+        // Check for duplicate
+        var existing = await _dbContext.PublicMapHmapSources
+            .FirstOrDefaultAsync(pms => pms.PublicMapId == publicMapId && pms.HmapSourceId == dto.HmapSourceId);
+
+        if (existing != null)
+        {
+            throw new ArgumentException("This HMap source is already added to this public map");
+        }
+
+        var entity = new PublicMapHmapSourceEntity
+        {
+            PublicMapId = publicMapId,
+            HmapSourceId = dto.HmapSourceId,
+            Priority = dto.Priority,
+            AddedAt = DateTime.UtcNow
+        };
+
+        _dbContext.PublicMapHmapSources.Add(entity);
+        await _dbContext.SaveChangesAsync();
+
+        _logger.LogInformation("Added HMap source {HmapSourceId} to public map {PublicMapId}",
+            dto.HmapSourceId, publicMapId);
+
+        return new PublicMapHmapSourceDto
+        {
+            Id = entity.Id,
+            PublicMapId = entity.PublicMapId,
+            HmapSourceId = entity.HmapSourceId,
+            HmapSourceName = hmapSource.Name,
+            Priority = entity.Priority,
+            AddedAt = entity.AddedAt,
+            TotalGrids = hmapSource.TotalGrids,
+            MinX = hmapSource.MinX,
+            MaxX = hmapSource.MaxX,
+            MinY = hmapSource.MinY,
+            MaxY = hmapSource.MaxY
+        };
+    }
+
+    public async Task RemoveHmapSourceAsync(string publicMapId, int hmapSourceId)
+    {
+        var entity = await _dbContext.PublicMapHmapSources
+            .FirstOrDefaultAsync(pms => pms.PublicMapId == publicMapId && pms.HmapSourceId == hmapSourceId);
+
+        if (entity == null)
+        {
+            throw new ArgumentException($"HMap source {hmapSourceId} not found for public map {publicMapId}");
+        }
+
+        _dbContext.PublicMapHmapSources.Remove(entity);
+        await _dbContext.SaveChangesAsync();
+
+        _logger.LogInformation("Removed HMap source {HmapSourceId} from public map {PublicMapId}",
+            hmapSourceId, publicMapId);
+    }
+
+    public async Task<List<PublicMapHmapSourceDto>> GetHmapSourcesAsync(string publicMapId)
+    {
+        var sources = await _dbContext.PublicMapHmapSources
+            .Where(pms => pms.PublicMapId == publicMapId)
+            .OrderByDescending(pms => pms.Priority)
+            .ThenBy(pms => pms.AddedAt)
+            .ToListAsync();
+
+        var result = new List<PublicMapHmapSourceDto>();
+
+        foreach (var source in sources)
+        {
+            var hmapSource = await _dbContext.HmapSources.FindAsync(source.HmapSourceId);
+
+            result.Add(new PublicMapHmapSourceDto
+            {
+                Id = source.Id,
+                PublicMapId = source.PublicMapId,
+                HmapSourceId = source.HmapSourceId,
+                HmapSourceName = hmapSource?.Name ?? $"Source {source.HmapSourceId}",
+                Priority = source.Priority,
+                AddedAt = source.AddedAt,
+                TotalGrids = hmapSource?.TotalGrids,
+                MinX = hmapSource?.MinX,
+                MaxX = hmapSource?.MaxX,
+                MinY = hmapSource?.MinY,
+                MaxY = hmapSource?.MaxY,
+                NewGrids = source.NewGrids,
+                OverlappingGrids = source.OverlappingGrids
+            });
+        }
+
+        return result;
+    }
+
+    public async Task<SourceContributionSummaryDto> AnalyzeSourceContributionsAsync(string publicMapId)
+    {
+        var sources = await _dbContext.PublicMapHmapSources
+            .Where(pms => pms.PublicMapId == publicMapId)
+            .OrderByDescending(pms => pms.Priority)
+            .ThenBy(pms => pms.AddedAt)
+            .ToListAsync();
+
+        if (sources.Count == 0)
+        {
+            return new SourceContributionSummaryDto
+            {
+                PublicMapId = publicMapId,
+                TotalSources = 0,
+                TotalUniqueGrids = 0,
+                TotalOverlappingGrids = 0,
+                Sources = new List<SourceContributionDto>()
+            };
+        }
+
+        // Load and parse all HMap files to get grid coordinates
+        var hmapReader = new HmapReader();
+        var sourceGrids = new Dictionary<int, HashSet<(int x, int y)>>();
+        var sourceData = new Dictionary<int, HmapSourceEntity>();
+
+        foreach (var source in sources)
+        {
+            var hmapSource = await _dbContext.HmapSources.FindAsync(source.HmapSourceId);
+            if (hmapSource == null) continue;
+
+            sourceData[source.HmapSourceId] = hmapSource;
+
+            var filePath = Path.Combine(_gridStorage, hmapSource.FilePath);
+            if (!File.Exists(filePath)) continue;
+
+            try
+            {
+                await using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+                var hmapData = hmapReader.Read(fileStream);
+
+                var gridCoords = new HashSet<(int x, int y)>(
+                    hmapData.Grids.Select(g => (g.TileX, g.TileY))
+                );
+
+                sourceGrids[source.HmapSourceId] = gridCoords;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to parse HMap source {SourceId} for contribution analysis", source.HmapSourceId);
+            }
+        }
+
+        // Calculate contributions (higher priority sources "win" overlapping tiles)
+        var usedCoordinates = new HashSet<(int x, int y)>();
+        var contributions = new List<SourceContributionDto>();
+
+        foreach (var source in sources)
+        {
+            if (!sourceGrids.TryGetValue(source.HmapSourceId, out var grids))
+            {
+                continue;
+            }
+
+            var hmapSource = sourceData.GetValueOrDefault(source.HmapSourceId);
+
+            var newGrids = grids.Where(g => !usedCoordinates.Contains(g)).ToList();
+            var overlappingGrids = grids.Where(g => usedCoordinates.Contains(g)).ToList();
+
+            // Update the entity with analysis results
+            source.NewGrids = newGrids.Count;
+            source.OverlappingGrids = overlappingGrids.Count;
+
+            contributions.Add(new SourceContributionDto
+            {
+                HmapSourceId = source.HmapSourceId,
+                HmapSourceName = hmapSource?.Name ?? $"Source {source.HmapSourceId}",
+                Priority = source.Priority,
+                TotalGrids = grids.Count,
+                NewGrids = newGrids.Count,
+                OverlappingGrids = overlappingGrids.Count
+            });
+
+            // Mark these coordinates as used
+            foreach (var coord in newGrids)
+            {
+                usedCoordinates.Add(coord);
+            }
+        }
+
+        // Save the updated contribution data
+        await _dbContext.SaveChangesAsync();
+
+        return new SourceContributionSummaryDto
+        {
+            PublicMapId = publicMapId,
+            TotalSources = contributions.Count,
+            TotalUniqueGrids = usedCoordinates.Count,
+            TotalOverlappingGrids = contributions.Sum(c => c.OverlappingGrids),
+            Sources = contributions
+        };
+    }
+
+    public async Task UpdateHmapSourcePriorityAsync(string publicMapId, int hmapSourceId, int newPriority)
+    {
+        var entity = await _dbContext.PublicMapHmapSources
+            .FirstOrDefaultAsync(pms => pms.PublicMapId == publicMapId && pms.HmapSourceId == hmapSourceId);
+
+        if (entity == null)
+        {
+            throw new ArgumentException($"HMap source {hmapSourceId} not found for public map {publicMapId}");
+        }
+
+        entity.Priority = newPriority;
+        await _dbContext.SaveChangesAsync();
+
+        _logger.LogInformation("Updated priority for HMap source {HmapSourceId} in public map {PublicMapId} to {Priority}",
+            hmapSourceId, publicMapId, newPriority);
+    }
 }

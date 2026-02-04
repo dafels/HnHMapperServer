@@ -154,6 +154,40 @@ public static class SuperadminEndpoints
 
         // GET /api/superadmin/available-tenant-maps - Get available tenant maps for source selection
         group.MapGet("/available-tenant-maps", GetAvailableTenantMaps);
+
+        // === HMap Source Library Management ===
+
+        // GET /api/superadmin/hmap-sources - List all HMap sources
+        group.MapGet("/hmap-sources", GetAllHmapSources);
+
+        // POST /api/superadmin/hmap-sources - Upload new HMap source
+        group.MapPost("/hmap-sources", UploadHmapSource).DisableAntiforgery();
+
+        // GET /api/superadmin/hmap-sources/{id} - Get HMap source details
+        group.MapGet("/hmap-sources/{id:int}", GetHmapSource);
+
+        // DELETE /api/superadmin/hmap-sources/{id} - Delete HMap source
+        group.MapDelete("/hmap-sources/{id:int}", DeleteHmapSource);
+
+        // POST /api/superadmin/hmap-sources/{id}/analyze - Re-analyze HMap source
+        group.MapPost("/hmap-sources/{id:int}/analyze", AnalyzeHmapSource);
+
+        // === Public Map HMap Source Selection ===
+
+        // GET /api/superadmin/public-maps/{id}/hmap-sources - List selected HMap sources
+        group.MapGet("/public-maps/{id}/hmap-sources", GetPublicMapHmapSources);
+
+        // POST /api/superadmin/public-maps/{id}/hmap-sources - Add HMap source to public map
+        group.MapPost("/public-maps/{id}/hmap-sources", AddPublicMapHmapSource);
+
+        // DELETE /api/superadmin/public-maps/{id}/hmap-sources/{sourceId} - Remove HMap source
+        group.MapDelete("/public-maps/{id}/hmap-sources/{sourceId:int}", RemovePublicMapHmapSource);
+
+        // GET /api/superadmin/public-maps/{id}/hmap-sources/analysis - Contribution analysis
+        group.MapGet("/public-maps/{id}/hmap-sources/analysis", AnalyzePublicMapHmapSourceContributions);
+
+        // POST /api/superadmin/public-maps/{id}/generate-from-hmap - Generate from HMap sources
+        group.MapPost("/public-maps/{id}/generate-from-hmap", GenerateFromHmapSources);
     }
 
     /// <summary>
@@ -2261,6 +2295,355 @@ public static class SuperadminEndpoints
         {
             logger.LogError(ex, "Error loading available tenant maps");
             return Results.Problem("Failed to load available tenant maps");
+        }
+    }
+
+    // ========================================
+    // HMap Source Library Endpoints
+    // ========================================
+
+    /// <summary>
+    /// GET /api/superadmin/hmap-sources
+    /// Lists all HMap sources in the library
+    /// </summary>
+    private static async Task<IResult> GetAllHmapSources(
+        IHmapSourceService hmapSourceService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var sources = await hmapSourceService.GetAllAsync();
+            return Results.Ok(sources);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error loading HMap sources");
+            return Results.Problem("Failed to load HMap sources");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/hmap-sources
+    /// Uploads a new HMap source file
+    /// </summary>
+    private static async Task<IResult> UploadHmapSource(
+        HttpRequest request,
+        IHmapSourceService hmapSourceService,
+        ClaimsPrincipal user,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            if (!request.HasFormContentType)
+            {
+                return Results.BadRequest(new { error = "Content-Type must be multipart/form-data" });
+            }
+
+            var form = await request.ReadFormAsync();
+            var file = form.Files.GetFile("file");
+            var name = form["name"].ToString();
+
+            if (file == null || file.Length == 0)
+            {
+                return Results.BadRequest(new { error = "No file uploaded" });
+            }
+
+            var username = user.FindFirstValue(ClaimTypes.Name) ?? "unknown";
+
+            await using var stream = file.OpenReadStream();
+            var source = await hmapSourceService.UploadAsync(
+                stream,
+                file.FileName,
+                string.IsNullOrWhiteSpace(name) ? null : name,
+                username
+            );
+
+            logger.LogInformation("SuperAdmin {Username} uploaded HMap source {SourceId} ({FileName})",
+                username, source.Id, file.FileName);
+
+            return Results.Created($"/api/superadmin/hmap-sources/{source.Id}", source);
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error uploading HMap source");
+            return Results.Problem("Failed to upload HMap source");
+        }
+    }
+
+    /// <summary>
+    /// GET /api/superadmin/hmap-sources/{id}
+    /// Gets details of a specific HMap source
+    /// </summary>
+    private static async Task<IResult> GetHmapSource(
+        int id,
+        IHmapSourceService hmapSourceService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var source = await hmapSourceService.GetAsync(id);
+            if (source == null)
+            {
+                return Results.NotFound(new { error = "HMap source not found" });
+            }
+            return Results.Ok(source);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error getting HMap source {SourceId}", id);
+            return Results.Problem("Failed to get HMap source");
+        }
+    }
+
+    /// <summary>
+    /// DELETE /api/superadmin/hmap-sources/{id}
+    /// Deletes an HMap source from the library
+    /// </summary>
+    private static async Task<IResult> DeleteHmapSource(
+        int id,
+        IHmapSourceService hmapSourceService,
+        ClaimsPrincipal user,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var username = user.FindFirstValue(ClaimTypes.Name) ?? "unknown";
+
+            // Check if source is in use
+            var publicMapsUsing = await hmapSourceService.GetPublicMapsUsingSourceAsync(id);
+            if (publicMapsUsing.Count > 0)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "Cannot delete HMap source that is in use",
+                    publicMapsUsing
+                });
+            }
+
+            await hmapSourceService.DeleteAsync(id);
+
+            logger.LogInformation("SuperAdmin {Username} deleted HMap source {SourceId}", username, id);
+            return Results.NoContent();
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error deleting HMap source {SourceId}", id);
+            return Results.Problem("Failed to delete HMap source");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/hmap-sources/{id}/analyze
+    /// Re-analyzes an HMap source file
+    /// </summary>
+    private static async Task<IResult> AnalyzeHmapSource(
+        int id,
+        IHmapSourceService hmapSourceService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var analysis = await hmapSourceService.AnalyzeAsync(id);
+            return Results.Ok(analysis);
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error analyzing HMap source {SourceId}", id);
+            return Results.Problem("Failed to analyze HMap source");
+        }
+    }
+
+    // ========================================
+    // Public Map HMap Source Selection Endpoints
+    // ========================================
+
+    /// <summary>
+    /// GET /api/superadmin/public-maps/{id}/hmap-sources
+    /// Lists HMap sources selected for a public map
+    /// </summary>
+    private static async Task<IResult> GetPublicMapHmapSources(
+        string id,
+        IPublicMapService publicMapService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var exists = await publicMapService.PublicMapExistsAsync(id);
+            if (!exists)
+            {
+                return Results.NotFound(new { error = "Public map not found" });
+            }
+
+            var sources = await publicMapService.GetHmapSourcesAsync(id);
+            return Results.Ok(sources);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error getting HMap sources for public map {PublicMapId}", id);
+            return Results.Problem("Failed to get HMap sources");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/public-maps/{id}/hmap-sources
+    /// Adds an HMap source to a public map
+    /// </summary>
+    private static async Task<IResult> AddPublicMapHmapSource(
+        string id,
+        AddPublicMapHmapSourceDto dto,
+        IPublicMapService publicMapService,
+        ClaimsPrincipal user,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var username = user.FindFirstValue(ClaimTypes.Name) ?? "unknown";
+            var source = await publicMapService.AddHmapSourceAsync(id, dto);
+
+            logger.LogInformation("SuperAdmin {Username} added HMap source {SourceId} to public map {PublicMapId}",
+                username, dto.HmapSourceId, id);
+
+            return Results.Created($"/api/superadmin/public-maps/{id}/hmap-sources/{source.Id}", source);
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error adding HMap source to public map {PublicMapId}", id);
+            return Results.Problem("Failed to add HMap source");
+        }
+    }
+
+    /// <summary>
+    /// DELETE /api/superadmin/public-maps/{id}/hmap-sources/{sourceId}
+    /// Removes an HMap source from a public map
+    /// </summary>
+    private static async Task<IResult> RemovePublicMapHmapSource(
+        string id,
+        int sourceId,
+        IPublicMapService publicMapService,
+        ClaimsPrincipal user,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var username = user.FindFirstValue(ClaimTypes.Name) ?? "unknown";
+            await publicMapService.RemoveHmapSourceAsync(id, sourceId);
+
+            logger.LogInformation("SuperAdmin {Username} removed HMap source {SourceId} from public map {PublicMapId}",
+                username, sourceId, id);
+
+            return Results.NoContent();
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error removing HMap source from public map {PublicMapId}", id);
+            return Results.Problem("Failed to remove HMap source");
+        }
+    }
+
+    /// <summary>
+    /// GET /api/superadmin/public-maps/{id}/hmap-sources/analysis
+    /// Analyzes source contributions for a public map
+    /// </summary>
+    private static async Task<IResult> AnalyzePublicMapHmapSourceContributions(
+        string id,
+        IPublicMapService publicMapService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var exists = await publicMapService.PublicMapExistsAsync(id);
+            if (!exists)
+            {
+                return Results.NotFound(new { error = "Public map not found" });
+            }
+
+            var analysis = await publicMapService.AnalyzeSourceContributionsAsync(id);
+            return Results.Ok(analysis);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error analyzing HMap source contributions for public map {PublicMapId}", id);
+            return Results.Problem("Failed to analyze source contributions");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/public-maps/{id}/generate-from-hmap
+    /// Generates a public map from its HMap sources
+    /// </summary>
+    private static async Task<IResult> GenerateFromHmapSources(
+        string id,
+        IPublicMapService publicMapService,
+        IPublicMapGenerationService generationService,
+        ClaimsPrincipal user,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var exists = await publicMapService.PublicMapExistsAsync(id);
+            if (!exists)
+            {
+                return Results.NotFound(new { error = "Public map not found" });
+            }
+
+            var isRunning = await generationService.IsGenerationRunningAsync(id);
+            if (isRunning)
+            {
+                return Results.Conflict(new { error = "Generation is already in progress for this map" });
+            }
+
+            var username = user.FindFirstValue(ClaimTypes.Name) ?? "unknown";
+            logger.LogInformation("SuperAdmin {Username} triggered HMap source generation for public map {PublicMapId}",
+                username, id);
+
+            // Start generation in background
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await generationService.StartGenerationFromHmapSourcesAsync(id);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Background HMap generation failed for public map {PublicMapId}", id);
+                }
+            });
+
+            return Results.Json(new
+            {
+                message = "Generation from HMap sources started",
+                publicMapId = id,
+                statusUrl = $"/api/superadmin/public-maps/{id}/status"
+            }, statusCode: StatusCodes.Status202Accepted);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error starting HMap generation for public map {PublicMapId}", id);
+            return Results.Problem("Failed to start generation");
         }
     }
 }

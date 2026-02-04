@@ -77,6 +77,10 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
     public DbSet<PublicMapEntity> PublicMaps => Set<PublicMapEntity>();
     public DbSet<PublicMapSourceEntity> PublicMapSources => Set<PublicMapSourceEntity>();
 
+    // HMap source library tables (global, not tenant-scoped)
+    public DbSet<HmapSourceEntity> HmapSources => Set<HmapSourceEntity>();
+    public DbSet<PublicMapHmapSourceEntity> PublicMapHmapSources => Set<PublicMapHmapSourceEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -779,6 +783,61 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
             entity.HasOne<TenantEntity>()
                 .WithMany()
                 .HasForeignKey(e => e.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // HMap source library entity configurations (global tables - no tenant filters)
+        modelBuilder.Entity<HmapSourceEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.FileName).IsRequired().HasMaxLength(500);
+            entity.Property(e => e.FilePath).IsRequired().HasMaxLength(1000);
+            entity.Property(e => e.FileSizeBytes).IsRequired();
+            entity.Property(e => e.UploadedAt).IsRequired();
+            entity.Property(e => e.UploadedBy).IsRequired(false);
+
+            // Cached analysis
+            entity.Property(e => e.TotalGrids).IsRequired(false);
+            entity.Property(e => e.SegmentCount).IsRequired(false);
+            entity.Property(e => e.MinX).IsRequired(false);
+            entity.Property(e => e.MaxX).IsRequired(false);
+            entity.Property(e => e.MinY).IsRequired(false);
+            entity.Property(e => e.MaxY).IsRequired(false);
+            entity.Property(e => e.AnalyzedAt).IsRequired(false);
+
+            // Indexes
+            entity.HasIndex(e => e.UploadedAt);
+            entity.HasIndex(e => e.Name);
+        });
+
+        modelBuilder.Entity<PublicMapHmapSourceEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.PublicMapId).IsRequired();
+            entity.Property(e => e.HmapSourceId).IsRequired();
+            entity.Property(e => e.Priority).IsRequired().HasDefaultValue(0);
+            entity.Property(e => e.AddedAt).IsRequired();
+
+            // Per-source analysis
+            entity.Property(e => e.NewGrids).IsRequired(false);
+            entity.Property(e => e.OverlappingGrids).IsRequired(false);
+
+            // Unique constraint: prevent duplicate sources per public map
+            entity.HasIndex(e => new { e.PublicMapId, e.HmapSourceId }).IsUnique();
+            entity.HasIndex(e => e.PublicMapId);
+            entity.HasIndex(e => e.HmapSourceId);
+
+            // Foreign key to PublicMapEntity
+            entity.HasOne<PublicMapEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.PublicMapId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Foreign key to HmapSourceEntity
+            entity.HasOne<HmapSourceEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.HmapSourceId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
@@ -1648,4 +1707,128 @@ public sealed class PublicMapSourceEntity
     /// User ID of the SuperAdmin who added this source
     /// </summary>
     public string AddedBy { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Represents an uploaded HMap file in the shared source library.
+/// HMap files can be selected as sources for public map generation.
+/// This is a global table - not tenant-scoped.
+/// </summary>
+public sealed class HmapSourceEntity
+{
+    /// <summary>
+    /// Primary key
+    /// </summary>
+    public int Id { get; set; }
+
+    /// <summary>
+    /// Display name for the HMap source
+    /// </summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Original filename when uploaded
+    /// </summary>
+    public string FileName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Path to the stored .hmap file (relative to GridStorage)
+    /// </summary>
+    public string FilePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// File size in bytes
+    /// </summary>
+    public long FileSizeBytes { get; set; }
+
+    /// <summary>
+    /// UTC timestamp when the file was uploaded
+    /// </summary>
+    public DateTime UploadedAt { get; set; }
+
+    /// <summary>
+    /// User ID of the SuperAdmin who uploaded this file
+    /// </summary>
+    public string? UploadedBy { get; set; }
+
+    // Cached analysis (from parsing)
+
+    /// <summary>
+    /// Total number of grids in the HMap file
+    /// </summary>
+    public int? TotalGrids { get; set; }
+
+    /// <summary>
+    /// Number of distinct segments in the HMap file
+    /// </summary>
+    public int? SegmentCount { get; set; }
+
+    /// <summary>
+    /// Minimum X coordinate across all grids
+    /// </summary>
+    public int? MinX { get; set; }
+
+    /// <summary>
+    /// Maximum X coordinate across all grids
+    /// </summary>
+    public int? MaxX { get; set; }
+
+    /// <summary>
+    /// Minimum Y coordinate across all grids
+    /// </summary>
+    public int? MinY { get; set; }
+
+    /// <summary>
+    /// Maximum Y coordinate across all grids
+    /// </summary>
+    public int? MaxY { get; set; }
+
+    /// <summary>
+    /// UTC timestamp when the file was last analyzed
+    /// </summary>
+    public DateTime? AnalyzedAt { get; set; }
+}
+
+/// <summary>
+/// Links public maps to their selected HMap sources for generation.
+/// This is a global table - not tenant-scoped.
+/// </summary>
+public sealed class PublicMapHmapSourceEntity
+{
+    /// <summary>
+    /// Primary key
+    /// </summary>
+    public int Id { get; set; }
+
+    /// <summary>
+    /// Foreign key to PublicMapEntity
+    /// </summary>
+    public string PublicMapId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Foreign key to HmapSourceEntity
+    /// </summary>
+    public int HmapSourceId { get; set; }
+
+    /// <summary>
+    /// Priority for merge ordering (higher priority sources overwrite lower)
+    /// </summary>
+    public int Priority { get; set; }
+
+    /// <summary>
+    /// UTC timestamp when this source was added to the public map
+    /// </summary>
+    public DateTime AddedAt { get; set; }
+
+    // Per-source analysis (vs this public map's other sources)
+
+    /// <summary>
+    /// Number of grids this source would add (not overlapping with other sources)
+    /// </summary>
+    public int? NewGrids { get; set; }
+
+    /// <summary>
+    /// Number of grids that overlap with other selected sources
+    /// </summary>
+    public int? OverlappingGrids { get; set; }
 }

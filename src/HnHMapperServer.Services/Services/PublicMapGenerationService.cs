@@ -647,4 +647,505 @@ public class PublicMapGenerationService : IPublicMapGenerationService
 
         return uniqueMarkers.Count;
     }
+
+    /// <summary>
+    /// Start tile generation from HMap sources for a public map.
+    /// Renders tiles directly from HMap files instead of copying from tenant maps.
+    /// </summary>
+    public async Task<bool> StartGenerationFromHmapSourcesAsync(string publicMapId)
+    {
+        // Check if already running
+        if (_runningGenerations.ContainsKey(publicMapId))
+        {
+            _logger.LogWarning("Generation already in progress for public map {PublicMapId}", publicMapId);
+            return false;
+        }
+
+        // Mark as running
+        if (!_runningGenerations.TryAdd(publicMapId, true))
+        {
+            return false;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+
+        try
+        {
+            // Create a scope for database operations
+            using var scope = _serviceProvider.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+            // Update status to running
+            var publicMap = await dbContext.PublicMaps.FirstOrDefaultAsync(p => p.Id == publicMapId);
+            if (publicMap == null)
+            {
+                _logger.LogError("Public map {PublicMapId} not found", publicMapId);
+                return false;
+            }
+
+            publicMap.GenerationStatus = "running";
+            publicMap.GenerationProgress = 0;
+            publicMap.GenerationError = null;
+            await dbContext.SaveChangesAsync();
+
+            _logger.LogInformation("Starting HMap source generation for public map {PublicMapId}", publicMapId);
+
+            // Get all HMap sources
+            var hmapSources = await dbContext.PublicMapHmapSources
+                .Where(pms => pms.PublicMapId == publicMapId)
+                .OrderByDescending(pms => pms.Priority)
+                .ThenBy(pms => pms.AddedAt)
+                .ToListAsync();
+
+            if (!hmapSources.Any())
+            {
+                publicMap.GenerationStatus = "completed";
+                publicMap.GenerationProgress = 100;
+                publicMap.TileCount = 0;
+                publicMap.LastGeneratedAt = DateTime.UtcNow;
+                publicMap.LastGenerationDurationSeconds = 0;
+                await dbContext.SaveChangesAsync();
+
+                _logger.LogInformation("Public map {PublicMapId} has no HMap sources, nothing to generate", publicMapId);
+                return true;
+            }
+
+            // Completely wipe existing tiles before regeneration
+            var outputPath = Path.Combine(_gridStorage, "public", publicMapId);
+            if (Directory.Exists(outputPath))
+            {
+                Directory.Delete(outputPath, recursive: true);
+                _logger.LogInformation("Wiped existing tiles for public map {PublicMapId}", publicMapId);
+            }
+            Directory.CreateDirectory(outputPath);
+
+            // Parse all HMap files and collect grid data with priority
+            var hmapReader = new HmapReader();
+            var allGrids = new Dictionary<(int x, int y), (HmapGridData grid, int priority, long hmapSourceId)>();
+            var tileCacheDir = Path.Combine(_gridStorage, "hmap-tile-cache");
+
+            // Collect all tile resource names needed
+            var allResourceNames = new HashSet<string>();
+
+            foreach (var source in hmapSources)
+            {
+                var hmapSource = await dbContext.HmapSources.FindAsync(source.HmapSourceId);
+                if (hmapSource == null) continue;
+
+                var hmapFilePath = Path.Combine(_gridStorage, hmapSource.FilePath);
+                if (!File.Exists(hmapFilePath))
+                {
+                    _logger.LogWarning("HMap file not found: {FilePath}", hmapFilePath);
+                    continue;
+                }
+
+                try
+                {
+                    await using var fileStream = new FileStream(hmapFilePath, FileMode.Open, FileAccess.Read);
+                    var hmapData = hmapReader.Read(fileStream);
+
+                    foreach (var grid in hmapData.Grids)
+                    {
+                        var key = (grid.TileX, grid.TileY);
+                        // Higher priority sources overwrite lower priority
+                        if (!allGrids.TryGetValue(key, out var existing) || source.Priority > existing.priority)
+                        {
+                            allGrids[key] = (grid, source.Priority, source.HmapSourceId);
+                        }
+
+                        // Collect resource names for prefetching
+                        foreach (var tileset in grid.Tilesets)
+                        {
+                            allResourceNames.Add(tileset.ResourceName);
+                        }
+                    }
+
+                    _logger.LogInformation("Parsed HMap source {SourceId} ({Name}): {GridCount} grids",
+                        source.HmapSourceId, hmapSource.Name, hmapData.Grids.Count);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to parse HMap source {SourceId}", source.HmapSourceId);
+                }
+            }
+
+            if (allGrids.Count == 0)
+            {
+                publicMap.GenerationStatus = "completed";
+                publicMap.GenerationProgress = 100;
+                publicMap.TileCount = 0;
+                publicMap.LastGeneratedAt = DateTime.UtcNow;
+                publicMap.LastGenerationDurationSeconds = (int)stopwatch.Elapsed.TotalSeconds;
+                await dbContext.SaveChangesAsync();
+
+                _logger.LogWarning("No grids found in HMap sources for public map {PublicMapId}", publicMapId);
+                return true;
+            }
+
+            // Track bounds
+            var minX = allGrids.Keys.Min(k => k.x);
+            var maxX = allGrids.Keys.Max(k => k.x);
+            var minY = allGrids.Keys.Min(k => k.y);
+            var maxY = allGrids.Keys.Max(k => k.y);
+
+            // Prefetch tile resources from Haven server
+            publicMap.GenerationProgress = 5;
+            await dbContext.SaveChangesAsync();
+
+            using var tileResourceService = new TileResourceService(tileCacheDir);
+            await tileResourceService.PrefetchTilesAsync(allResourceNames);
+
+            publicMap.GenerationProgress = 15;
+            await dbContext.SaveChangesAsync();
+
+            _logger.LogInformation("Prefetched {ResourceCount} tile resources, rendering {GridCount} grids",
+                allResourceNames.Count, allGrids.Count);
+
+            // Calculate output tile bounds (4x4 base grids per output tile)
+            var outMinX = (int)Math.Floor(minX / 4.0);
+            var outMaxX = (int)Math.Floor(maxX / 4.0);
+            var outMinY = (int)Math.Floor(minY / 4.0);
+            var outMaxY = (int)Math.Floor(maxY / 4.0);
+
+            var totalOutputTiles = (outMaxX - outMinX + 1) * (outMaxY - outMinY + 1);
+            var processedTiles = 0;
+            var lastProgressUpdate = 15;
+
+            var zoomDir = Path.Combine(outputPath, "0");
+            Directory.CreateDirectory(zoomDir);
+
+            var copiedZoom0Coords = new HashSet<(int x, int y)>();
+
+            var webpEncoder = new WebpEncoder
+            {
+                Quality = 85,
+                Method = WebpEncodingMethod.Default
+            };
+
+            // Generate each 400x400 output tile
+            for (var tx = outMinX; tx <= outMaxX; tx++)
+            {
+                for (var ty = outMinY; ty <= outMaxY; ty++)
+                {
+                    // Create 400x400 transparent canvas
+                    using var img = new Image<Rgba32>(400, 400);
+                    img.Mutate(ctx => ctx.BackgroundColor(Color.Transparent));
+
+                    var hasAnyTile = false;
+
+                    // Render each of the 4x4 base grids
+                    for (int dx = 0; dx < 4; dx++)
+                    {
+                        for (int dy = 0; dy < 4; dy++)
+                        {
+                            var baseX = tx * 4 + dx;
+                            var baseY = ty * 4 + dy;
+                            var key = (baseX, baseY);
+
+                            if (allGrids.TryGetValue(key, out var gridInfo))
+                            {
+                                try
+                                {
+                                    using var gridTile = await RenderHmapGridAsync(gridInfo.grid, tileResourceService);
+                                    img.Mutate(ctx => ctx.DrawImage(gridTile, new Point(dx * 100, dy * 100), 1f));
+                                    hasAnyTile = true;
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex, "Failed to render grid at ({X}, {Y})", baseX, baseY);
+                                }
+                            }
+                        }
+                    }
+
+                    // Only save if we had at least one grid
+                    if (hasAnyTile)
+                    {
+                        var outputFile = Path.Combine(zoomDir, $"{tx}_{ty}.webp");
+                        await img.SaveAsWebpAsync(outputFile, webpEncoder);
+                        copiedZoom0Coords.Add((tx, ty));
+                    }
+
+                    processedTiles++;
+
+                    // Update progress (15-50% for tile rendering)
+                    var currentProgress = 15 + (totalOutputTiles > 0 ? (processedTiles * 35) / totalOutputTiles : 35);
+                    if (currentProgress >= lastProgressUpdate + 5 || processedTiles == totalOutputTiles)
+                    {
+                        lastProgressUpdate = currentProgress;
+                        publicMap.GenerationProgress = currentProgress;
+                        await dbContext.SaveChangesAsync();
+                    }
+                }
+            }
+
+            _logger.LogInformation("Rendered {TileCount} zoom-0 tiles for public map {PublicMapId}",
+                copiedZoom0Coords.Count, publicMapId);
+
+            // Extract markers from HMap sources
+            var markerCount = await ExtractAndSaveMarkersFromHmapSourcesAsync(
+                dbContext, hmapSources, outputPath, publicMapId);
+
+            // Generate zoom tiles 1-6
+            var zoomTileCount = await GenerateZoomTilesAsync(outputPath, copiedZoom0Coords, publicMap, dbContext);
+
+            stopwatch.Stop();
+
+            var totalGeneratedTiles = copiedZoom0Coords.Count + zoomTileCount;
+
+            // Update final status
+            publicMap.GenerationStatus = "completed";
+            publicMap.GenerationProgress = 100;
+            publicMap.TileCount = totalGeneratedTiles;
+            publicMap.LastGeneratedAt = DateTime.UtcNow;
+            publicMap.LastGenerationDurationSeconds = (int)stopwatch.Elapsed.TotalSeconds;
+            publicMap.MinX = minX;
+            publicMap.MaxX = maxX;
+            publicMap.MinY = minY;
+            publicMap.MaxY = maxY;
+            await dbContext.SaveChangesAsync();
+
+            _logger.LogInformation(
+                "Completed HMap source generation for public map {PublicMapId}: {TileCount} tiles in {Duration}s",
+                publicMapId, totalGeneratedTiles, stopwatch.Elapsed.TotalSeconds);
+
+            // Invalidate Web service cache
+            try
+            {
+                var webClient = _httpClientFactory.CreateClient("Web");
+                await webClient.PostAsync($"/internal/public-cache/invalidate/{publicMapId}", null);
+                _logger.LogInformation("Invalidated Web cache for regenerated public map {PublicMapId}", publicMapId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to invalidate Web cache for {PublicMapId}", publicMapId);
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "HMap source generation failed for public map {PublicMapId}", publicMapId);
+
+            // Update error status
+            try
+            {
+                using var scope = _serviceProvider.CreateScope();
+                var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+                var publicMap = await dbContext.PublicMaps.FirstOrDefaultAsync(p => p.Id == publicMapId);
+                if (publicMap != null)
+                {
+                    publicMap.GenerationStatus = "failed";
+                    publicMap.GenerationError = ex.Message;
+                    publicMap.LastGenerationDurationSeconds = (int)stopwatch.Elapsed.TotalSeconds;
+                    await dbContext.SaveChangesAsync();
+                }
+            }
+            catch (Exception updateEx)
+            {
+                _logger.LogError(updateEx, "Failed to update error status for public map {PublicMapId}", publicMapId);
+            }
+
+            return false;
+        }
+        finally
+        {
+            _runningGenerations.TryRemove(publicMapId, out _);
+        }
+    }
+
+    /// <summary>
+    /// Renders a single 100x100 grid tile from HMap data.
+    /// </summary>
+    private async Task<Image<Rgba32>> RenderHmapGridAsync(HmapGridData grid, TileResourceService tileResourceService)
+    {
+        const int GRID_SIZE = 100;
+        var result = new Image<Rgba32>(GRID_SIZE, GRID_SIZE);
+
+        // Load tile textures for this grid
+        var tileTex = new Image<Rgba32>?[grid.Tilesets.Count];
+        for (int i = 0; i < grid.Tilesets.Count; i++)
+        {
+            tileTex[i] = await tileResourceService.GetTileImageAsync(grid.Tilesets[i].ResourceName);
+        }
+
+        // Pass 1: Base texture sampling
+        for (int y = 0; y < GRID_SIZE; y++)
+        {
+            for (int x = 0; x < GRID_SIZE; x++)
+            {
+                var tileIndex = y * GRID_SIZE + x;
+                if (grid.TileIndices == null || tileIndex >= grid.TileIndices.Length)
+                {
+                    result[x, y] = new Rgba32(128, 128, 128);
+                    continue;
+                }
+
+                var tsetIdx = grid.TileIndices[tileIndex];
+                if (tsetIdx >= tileTex.Length || tileTex[tsetIdx] == null)
+                {
+                    result[x, y] = new Rgba32(128, 128, 128);
+                    continue;
+                }
+
+                var tex = tileTex[tsetIdx]!;
+                var tx = ((x % tex.Width) + tex.Width) % tex.Width;
+                var ty = ((y % tex.Height) + tex.Height) % tex.Height;
+                result[x, y] = tex[tx, ty];
+            }
+        }
+
+        // Pass 2: Ridge/cliff shading
+        if (grid.ZMap != null && grid.TileIndices != null)
+        {
+            const float CLIFF_THRESHOLD = 11.0f;
+            const float CLIFF_BLEND = 0.6f;
+
+            for (int y = 1; y < GRID_SIZE - 1; y++)
+            {
+                for (int x = 1; x < GRID_SIZE - 1; x++)
+                {
+                    var idx = y * GRID_SIZE + x;
+                    float z = grid.ZMap[idx];
+                    bool broken = false;
+
+                    if (Math.Abs(z - grid.ZMap[(y - 1) * GRID_SIZE + x]) > CLIFF_THRESHOLD)
+                        broken = true;
+                    else if (Math.Abs(z - grid.ZMap[(y + 1) * GRID_SIZE + x]) > CLIFF_THRESHOLD)
+                        broken = true;
+                    else if (Math.Abs(z - grid.ZMap[y * GRID_SIZE + (x - 1)]) > CLIFF_THRESHOLD)
+                        broken = true;
+                    else if (Math.Abs(z - grid.ZMap[y * GRID_SIZE + (x + 1)]) > CLIFF_THRESHOLD)
+                        broken = true;
+
+                    if (broken)
+                    {
+                        var color = result[x, y];
+                        var f1 = (int)(CLIFF_BLEND * 255);
+                        var f2 = 255 - f1;
+                        result[x, y] = new Rgba32(
+                            (byte)((color.R * f2) / 255),
+                            (byte)((color.G * f2) / 255),
+                            (byte)((color.B * f2) / 255),
+                            color.A
+                        );
+                    }
+                }
+            }
+        }
+
+        // Pass 3: Tile priority borders
+        if (grid.TileIndices != null)
+        {
+            for (int y = 0; y < GRID_SIZE; y++)
+            {
+                for (int x = 0; x < GRID_SIZE; x++)
+                {
+                    var idx = y * GRID_SIZE + x;
+                    var tileId = grid.TileIndices[idx];
+
+                    bool hasHigherNeighbor = false;
+
+                    if (x > 0 && grid.TileIndices[idx - 1] > tileId) hasHigherNeighbor = true;
+                    if (!hasHigherNeighbor && x < GRID_SIZE - 1 && grid.TileIndices[idx + 1] > tileId) hasHigherNeighbor = true;
+                    if (!hasHigherNeighbor && y > 0 && grid.TileIndices[idx - GRID_SIZE] > tileId) hasHigherNeighbor = true;
+                    if (!hasHigherNeighbor && y < GRID_SIZE - 1 && grid.TileIndices[idx + GRID_SIZE] > tileId) hasHigherNeighbor = true;
+
+                    if (hasHigherNeighbor)
+                        result[x, y] = new Rgba32(0, 0, 0, 255);
+                }
+            }
+        }
+
+        // Dispose tile textures
+        foreach (var img in tileTex)
+        {
+            img?.Dispose();
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Extracts thingwall markers from HMap sources and saves them to markers.json.
+    /// </summary>
+    private async Task<int> ExtractAndSaveMarkersFromHmapSourcesAsync(
+        ApplicationDbContext dbContext,
+        List<PublicMapHmapSourceEntity> hmapSources,
+        string outputPath,
+        string publicMapId)
+    {
+        var allMarkers = new List<PublicMapMarkerDto>();
+        var hmapReader = new HmapReader();
+
+        foreach (var source in hmapSources)
+        {
+            var hmapSource = await dbContext.HmapSources.FindAsync(source.HmapSourceId);
+            if (hmapSource == null) continue;
+
+            var hmapFilePath = Path.Combine(_gridStorage, hmapSource.FilePath);
+            if (!File.Exists(hmapFilePath)) continue;
+
+            try
+            {
+                await using var fileStream = new FileStream(hmapFilePath, FileMode.Open, FileAccess.Read);
+                var hmapData = hmapReader.Read(fileStream);
+
+                // Build grid lookup for marker position calculation
+                var gridLookup = hmapData.Grids.ToDictionary(
+                    g => g.SegmentId + "_" + g.TileX + "_" + g.TileY,
+                    g => g
+                );
+
+                foreach (var marker in hmapData.Markers)
+                {
+                    if (marker is not HmapSMarker sMarker) continue;
+                    if (!sMarker.ResourceName.Contains("thingwall")) continue;
+
+                    // Calculate absolute position
+                    var gridX = marker.TileX / 100;
+                    var gridY = marker.TileY / 100;
+                    var posX = marker.TileX % 100;
+                    var posY = marker.TileY % 100;
+
+                    var absX = gridX * 100 + posX;
+                    var absY = gridY * 100 + posY;
+
+                    allMarkers.Add(new PublicMapMarkerDto
+                    {
+                        Id = (int)(sMarker.ObjectId % int.MaxValue),
+                        Name = marker.Name,
+                        X = absX,
+                        Y = absY,
+                        Image = sMarker.ResourceName
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to extract markers from HMap source {SourceId}", source.HmapSourceId);
+            }
+        }
+
+        // Deduplicate markers by position
+        var uniqueMarkers = allMarkers
+            .GroupBy(m => (m.X, m.Y))
+            .Select(g => g.First())
+            .ToList();
+
+        // Save markers to JSON file
+        var markersPath = Path.Combine(outputPath, "markers.json");
+        var markersJson = JsonSerializer.Serialize(uniqueMarkers, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = false
+        });
+        await File.WriteAllTextAsync(markersPath, markersJson);
+
+        _logger.LogInformation("Saved {MarkerCount} thingwall markers for public map {PublicMapId} from HMap sources",
+            uniqueMarkers.Count, publicMapId);
+
+        return uniqueMarkers.Count;
+    }
 }
