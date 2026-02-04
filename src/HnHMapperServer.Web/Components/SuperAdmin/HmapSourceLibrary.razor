@@ -30,17 +30,11 @@
         <!-- Upload Section -->
         <MudPaper Elevation="0" Class="pa-3 mud-background-gray">
             <MudStack Spacing="2">
-                <MudText Typo="Typo.subtitle1">Upload New HMap Source</MudText>
-                <MudStack Row="true" Spacing="2" AlignItems="AlignItems.End">
-                    <MudTextField @bind-Value="_uploadName"
-                                 Label="Name (optional)"
-                                 Variant="Variant.Outlined"
-                                 HelperText="Display name for this source"
-                                 Style="max-width: 300px;" />
-                    <MudFileUpload T="IBrowserFile"
-                                  FilesChanged="OnFileSelected"
+                <MudText Typo="Typo.subtitle1">Upload HMap Sources</MudText>
+                <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
+                    <MudFileUpload T="IReadOnlyList<IBrowserFile>"
+                                  FilesChanged="OnFilesSelected"
                                   Accept=".hmap"
-                                  MaximumFileCount="1"
                                   Disabled="@_isUploading">
                         <ActivatorContent>
                             <MudButton Variant="Variant.Filled"
@@ -54,35 +48,55 @@
                                 }
                                 else
                                 {
-                                    <span>Select .hmap File</span>
+                                    <span>Select .hmap Files</span>
                                 }
                             </MudButton>
                         </ActivatorContent>
                     </MudFileUpload>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">
+                        Hold Ctrl or Shift to select multiple files
+                    </MudText>
                 </MudStack>
-                @if (_selectedFile != null && !_isUploading)
+                @if (_selectedFiles.Any() && !_isUploading)
                 {
-                    <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
-                        <MudChip T="string" Icon="@Icons.Material.Filled.InsertDriveFile" Color="Color.Default">
-                            @_selectedFile.Name (@FormatFileSize(_selectedFile.Size))
-                        </MudChip>
-                        <MudButton Variant="Variant.Filled"
-                                  Color="Color.Primary"
-                                  Size="Size.Small"
-                                  OnClick="UploadFile">
-                            Upload
-                        </MudButton>
-                        <MudButton Variant="Variant.Outlined"
-                                  Color="Color.Default"
-                                  Size="Size.Small"
-                                  OnClick="ClearSelectedFile">
-                            Cancel
-                        </MudButton>
+                    <MudStack Spacing="1">
+                        <MudText Typo="Typo.body2">@_selectedFiles.Count file(s) selected:</MudText>
+                        <MudStack Row="true" Spacing="1" Class="flex-wrap">
+                            @foreach (var file in _selectedFiles)
+                            {
+                                <MudChip T="string"
+                                        Icon="@Icons.Material.Filled.InsertDriveFile"
+                                        Color="Color.Default"
+                                        Size="Size.Small"
+                                        OnClose="@(() => RemoveSelectedFile(file))">
+                                    @file.Name (@FormatFileSize(file.Size))
+                                </MudChip>
+                            }
+                        </MudStack>
+                        <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
+                            <MudButton Variant="Variant.Filled"
+                                      Color="Color.Primary"
+                                      Size="Size.Small"
+                                      OnClick="UploadFiles">
+                                Upload All (@_selectedFiles.Count)
+                            </MudButton>
+                            <MudButton Variant="Variant.Outlined"
+                                      Color="Color.Default"
+                                      Size="Size.Small"
+                                      OnClick="ClearSelectedFiles">
+                                Clear All
+                            </MudButton>
+                        </MudStack>
                     </MudStack>
                 }
-                @if (_uploadProgress > 0 && _isUploading)
+                @if (_isUploading)
                 {
-                    <MudProgressLinear Value="@_uploadProgress" Color="Color.Primary" />
+                    <MudStack Spacing="1">
+                        <MudText Typo="Typo.body2">
+                            Uploading @(_currentUploadIndex + 1) of @_totalFilesToUpload: @_currentUploadFileName
+                        </MudText>
+                        <MudProgressLinear Value="@_uploadProgress" Color="Color.Primary" />
+                    </MudStack>
                 }
             </MudStack>
         </MudPaper>
@@ -202,8 +216,11 @@
     private bool _isAnalyzing = false;
     private int _uploadProgress = 0;
 
-    private string? _uploadName;
-    private IBrowserFile? _selectedFile;
+    // Multi-file upload state
+    private List<IBrowserFile> _selectedFiles = new();
+    private int _currentUploadIndex = 0;
+    private int _totalFilesToUpload = 0;
+    private string _currentUploadFileName = "";
 
     protected override async Task OnInitializedAsync()
     {
@@ -283,91 +300,144 @@
         return _sourceUsageCounts.TryGetValue(sourceId, out var count) ? count : 0;
     }
 
-    private void OnFileSelected(IBrowserFile? file)
+    private void OnFilesSelected(IReadOnlyList<IBrowserFile>? files)
     {
-        _selectedFile = file;
+        if (files != null && files.Any())
+        {
+            // Add new files to the list (avoiding duplicates by name)
+            foreach (var file in files)
+            {
+                if (!_selectedFiles.Any(f => f.Name == file.Name))
+                {
+                    _selectedFiles.Add(file);
+                }
+            }
+        }
         StateHasChanged();
     }
 
-    private void ClearSelectedFile()
+    private void RemoveSelectedFile(IBrowserFile file)
     {
-        _selectedFile = null;
-        _uploadName = null;
+        _selectedFiles.Remove(file);
         StateHasChanged();
     }
 
-    private async Task UploadFile()
+    private void ClearSelectedFiles()
     {
-        if (_selectedFile == null) return;
+        _selectedFiles.Clear();
+        StateHasChanged();
+    }
+
+    private async Task UploadFiles()
+    {
+        if (!_selectedFiles.Any()) return;
 
         _isUploading = true;
         _uploadProgress = 0;
+        _totalFilesToUpload = _selectedFiles.Count;
+        _currentUploadIndex = 0;
+
+        var filesToUpload = _selectedFiles.ToList(); // Copy to avoid modification during iteration
+        var successCount = 0;
+        var failedFiles = new List<string>();
+
         StateHasChanged();
 
         try
         {
             var client = HttpClientFactory.CreateClient("API");
-
-            using var content = new MultipartFormDataContent();
-
-            // Read file with progress tracking
             var maxFileSize = 500 * 1024 * 1024L; // 500MB max
-            using var stream = _selectedFile.OpenReadStream(maxFileSize);
-            using var memoryStream = new MemoryStream();
 
-            var buffer = new byte[81920];
-            var totalRead = 0L;
-            int read;
-            while ((read = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            foreach (var file in filesToUpload)
             {
-                await memoryStream.WriteAsync(buffer, 0, read);
-                totalRead += read;
-                _uploadProgress = (int)(totalRead * 100 / _selectedFile.Size);
+                _currentUploadFileName = file.Name;
+                _uploadProgress = 0;
                 StateHasChanged();
+
+                try
+                {
+                    using var content = new MultipartFormDataContent();
+
+                    // Read file with progress tracking
+                    using var stream = file.OpenReadStream(maxFileSize);
+                    using var memoryStream = new MemoryStream();
+
+                    var buffer = new byte[81920];
+                    var totalRead = 0L;
+                    int read;
+                    while ((read = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                    {
+                        await memoryStream.WriteAsync(buffer, 0, read);
+                        totalRead += read;
+                        _uploadProgress = (int)(totalRead * 100 / file.Size);
+                        StateHasChanged();
+                    }
+
+                    memoryStream.Position = 0;
+                    var fileContent = new StreamContent(memoryStream);
+                    fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+                    content.Add(fileContent, "file", file.Name);
+
+                    var response = await client.PostAsync("/api/superadmin/hmap-sources", content);
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        successCount++;
+                    }
+                    else
+                    {
+                        failedFiles.Add(file.Name);
+                        var errorBody = await response.Content.ReadAsStringAsync();
+                        try
+                        {
+                            var errorObj = System.Text.Json.JsonSerializer.Deserialize<ErrorResponse>(errorBody,
+                                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                            Logger.LogWarning("Failed to upload {FileName}: {Error}", file.Name, errorObj?.Error);
+                        }
+                        catch
+                        {
+                            Logger.LogWarning("Failed to upload {FileName}", file.Name);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failedFiles.Add(file.Name);
+                    Logger.LogError(ex, "Error uploading HMap file {FileName}", file.Name);
+                }
+
+                _currentUploadIndex++;
             }
 
-            memoryStream.Position = 0;
-            var fileContent = new StreamContent(memoryStream);
-            fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
-            content.Add(fileContent, "file", _selectedFile.Name);
-
-            if (!string.IsNullOrWhiteSpace(_uploadName))
+            // Show summary
+            if (successCount > 0 && failedFiles.Count == 0)
             {
-                content.Add(new StringContent(_uploadName), "name");
+                Snackbar.Add($"Successfully uploaded {successCount} file(s)", Severity.Success);
             }
-
-            var response = await client.PostAsync("/api/superadmin/hmap-sources", content);
-
-            if (response.IsSuccessStatusCode)
+            else if (successCount > 0 && failedFiles.Count > 0)
             {
-                Snackbar.Add($"Uploaded '{_selectedFile.Name}' successfully", Severity.Success);
-                ClearSelectedFile();
-                await LoadSources();
+                Snackbar.Add($"Uploaded {successCount} file(s), {failedFiles.Count} failed", Severity.Warning);
             }
             else
             {
-                var errorBody = await response.Content.ReadAsStringAsync();
-                try
-                {
-                    var errorObj = System.Text.Json.JsonSerializer.Deserialize<ErrorResponse>(errorBody,
-                        new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    Snackbar.Add(errorObj?.Error ?? "Failed to upload file", Severity.Error);
-                }
-                catch
-                {
-                    Snackbar.Add("Failed to upload file", Severity.Error);
-                }
+                Snackbar.Add($"Failed to upload all {failedFiles.Count} file(s)", Severity.Error);
             }
+
+            ClearSelectedFiles();
+            await LoadSources();
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error uploading HMap file");
+            Logger.LogError(ex, "Error during batch upload");
             Snackbar.Add($"Error: {ex.Message}", Severity.Error);
         }
         finally
         {
             _isUploading = false;
             _uploadProgress = 0;
+            _currentUploadIndex = 0;
+            _totalFilesToUpload = 0;
+            _currentUploadFileName = "";
             StateHasChanged();
         }
     }
