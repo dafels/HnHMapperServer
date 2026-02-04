@@ -19,9 +19,12 @@ var api = builder.AddProject<Projects.HnHMapperServer_Api>("api")
     .WithEnvironment("COMPLUS_ForceENC", "1");
 
 // Add the Web frontend with SAME database configuration
-builder.AddProject<Projects.HnHMapperServer_Web>("web")
+var web = builder.AddProject<Projects.HnHMapperServer_Web>("web")
     .WithEnvironment("GridStorage", gridStorage)
     .WithEnvironment("COMPLUS_ForceENC", "1")
     .WithReference(api);
+
+// Add Web reference to API for cache invalidation calls
+api.WithReference(web);
 
 builder.Build().Run();

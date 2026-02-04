@@ -2022,6 +2022,7 @@ public static class SuperadminEndpoints
     private static async Task<IResult> DeletePublicMap(
         string id,
         IPublicMapService publicMapService,
+        IHttpClientFactory httpClientFactory,
         IAuditService auditService,
         HttpContext context,
         ILogger<Program> logger)
@@ -2029,6 +2030,18 @@ public static class SuperadminEndpoints
         try
         {
             await publicMapService.DeletePublicMapAsync(id);
+
+            // Invalidate Web service cache (in-memory + OutputCache)
+            try
+            {
+                var webClient = httpClientFactory.CreateClient("Web");
+                await webClient.PostAsync($"/internal/public-cache/invalidate/{id}", null);
+                logger.LogInformation("Invalidated Web cache for deleted public map {PublicMapId}", id);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to invalidate Web cache for {PublicMapId}", id);
+            }
 
             var username = context.User.Identity?.Name ?? "Unknown";
             await auditService.LogAsync(new AuditEntry

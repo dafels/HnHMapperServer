@@ -133,6 +133,12 @@ public class PublicMapBoundsDto
     public int? MinY { get; set; }
     public int? MaxY { get; set; }
     public bool HasBounds => MinX.HasValue && MaxX.HasValue && MinY.HasValue && MaxY.HasValue;
+
+    /// <summary>
+    /// Unix timestamp of LastGeneratedAt for browser cache busting.
+    /// Appended as ?v= query param to tile URLs.
+    /// </summary>
+    public long? TileVersion { get; set; }
 }
 
 /// <summary>

@@ -333,7 +333,10 @@ public partial class PublicMapService : IPublicMapService
             MinX = entity.MinX,
             MaxX = entity.MaxX,
             MinY = entity.MinY,
-            MaxY = entity.MaxY
+            MaxY = entity.MaxY,
+            TileVersion = entity.LastGeneratedAt.HasValue
+                ? new DateTimeOffset(entity.LastGeneratedAt.Value, TimeSpan.Zero).ToUnixTimeSeconds()
+                : null
         };
     }
 

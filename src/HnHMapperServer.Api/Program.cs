@@ -159,6 +159,19 @@ builder.Services.AddMemoryCache();
 // Register HttpClient factory for Discord webhook service
 builder.Services.AddHttpClient();
 
+// Add HttpClient for Web service cache invalidation
+var webBaseUrl = builder.Configuration["WebBaseUrl"];
+if (string.IsNullOrWhiteSpace(webBaseUrl))
+{
+    // Default to Aspire service discovery in development, Docker Compose in production
+    webBaseUrl = builder.Environment.IsDevelopment() ? "https://web" : "http://web:8080";
+}
+builder.Services.AddHttpClient("Web", client =>
+{
+    client.BaseAddress = new Uri(webBaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(10); // Quick timeout for internal calls
+});
+
 // Register Discord webhook service
 builder.Services.AddScoped<IDiscordWebhookService, DiscordWebhookService>();
 

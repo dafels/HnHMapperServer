@@ -23,6 +23,7 @@ namespace HnHMapperServer.Services.Services;
 public class PublicMapGenerationService : IPublicMapGenerationService
 {
     private readonly IServiceProvider _serviceProvider;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<PublicMapGenerationService> _logger;
     private readonly string _gridStorage;
     private readonly ConcurrentQueue<string> _generationQueue = new();
@@ -30,10 +31,12 @@ public class PublicMapGenerationService : IPublicMapGenerationService
 
     public PublicMapGenerationService(
         IServiceProvider serviceProvider,
+        IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
         ILogger<PublicMapGenerationService> logger)
     {
         _serviceProvider = serviceProvider;
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
         _gridStorage = configuration["GridStorage"] ?? "map";
     }
@@ -276,6 +279,18 @@ public class PublicMapGenerationService : IPublicMapGenerationService
             _logger.LogInformation(
                 "Completed generation for public map {PublicMapId}: {TileCount} tiles in {Duration}s",
                 publicMapId, totalGeneratedTiles, stopwatch.Elapsed.TotalSeconds);
+
+            // Invalidate Web service cache to reload fresh tiles
+            try
+            {
+                var webClient = _httpClientFactory.CreateClient("Web");
+                await webClient.PostAsync($"/internal/public-cache/invalidate/{publicMapId}", null);
+                _logger.LogInformation("Invalidated Web cache for regenerated public map {PublicMapId}", publicMapId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to invalidate Web cache for {PublicMapId}", publicMapId);
+            }
 
             return true;
         }

@@ -48,6 +48,7 @@
     [Parameter] public int MaxX { get; set; }
     [Parameter] public int MinY { get; set; }
     [Parameter] public int MaxY { get; set; }
+    [Parameter] public long? TileVersion { get; set; }
     [Parameter] public int? UrlX { get; set; }
     [Parameter] public int? UrlY { get; set; }
     [Parameter] public int? UrlZ { get; set; }
@@ -125,7 +126,8 @@
             int initialZoom = UrlZ ?? calculatedZoom;
 
             // Initialize map with center and zoom (URL updates handled by JS directly)
-            await jsModule.InvokeVoidAsync("initializePublicMap", mapElement, Slug, centerX, centerY, initialZoom, MinX, MaxX, MinY, MaxY);
+            // Pass TileVersion for browser cache busting
+            await jsModule.InvokeVoidAsync("initializePublicMap", mapElement, Slug, centerX, centerY, initialZoom, MinX, MaxX, MinY, MaxY, TileVersion);
 
             // Fetch thingwall markers from API and pass to JavaScript
             await LoadMarkersAsync();

@@ -36,6 +36,7 @@
                        MaxX="@(mapInfo?.MaxX ?? 0)"
                        MinY="@(mapInfo?.MinY ?? 0)"
                        MaxY="@(mapInfo?.MaxY ?? 0)"
+                       TileVersion="@(mapInfo?.TileVersion)"
                        UrlX="@urlX"
                        UrlY="@urlY"
                        UrlZ="@urlZ" />
@@ -147,5 +148,6 @@
         public int? MaxX { get; set; }
         public int? MinY { get; set; }
         public int? MaxY { get; set; }
+        public long? TileVersion { get; set; }
     }
 }

@@ -44,6 +44,7 @@ let tileLayer = null;
 let markerLayer = null;
 let markersVisible = false;  // Thingwalls hidden by default
 let currentSlug = null;
+let tileVersion = null;  // Unix timestamp for cache busting
 let zoomDebounceTimer = null;
 let preloadDebounceTimer = null;
 
@@ -94,7 +95,8 @@ function calculateTilesToPreload(bounds, zoom) {
 
     for (let x = minTileX; x <= maxTileX; x++) {
         for (let y = minTileY; y <= maxTileY; y++) {
-            const url = `/public/${currentSlug}/tiles/${zoom}/${x}_${y}.webp`;
+            const baseUrl = `/public/${currentSlug}/tiles/${zoom}/${x}_${y}.webp`;
+            const url = tileVersion ? `${baseUrl}?v=${tileVersion}` : baseUrl;
             if (!preloadedTiles.has(url)) {
                 tiles.push(url);
             }
@@ -188,16 +190,20 @@ const PublicTileLayer = L.TileLayer.extend({
         const y = coords.y;
 
         // Build URL for public tiles (WebP for better compression)
-        return `/public/${this.slug}/tiles/${hnhZoom}/${x}_${y}.webp`;
+        // Include version param for cache busting when tiles are regenerated
+        const url = `/public/${this.slug}/tiles/${hnhZoom}/${x}_${y}.webp`;
+        return tileVersion ? `${url}?v=${tileVersion}` : url;
     }
 });
 
-export async function initializePublicMap(mapElement, slug, centerX, centerY, initialZoom, minX, maxX, minY, maxY) {
+export async function initializePublicMap(mapElement, slug, centerX, centerY, initialZoom, minX, maxX, minY, maxY, version) {
     console.log('[PublicMap] Initializing for slug:', slug,
         'center:', { centerX, centerY },
         'initialZoom:', initialZoom,
-        'bounds:', { minX, maxX, minY, maxY });
+        'bounds:', { minX, maxX, minY, maxY },
+        'version:', version);
     currentSlug = slug;
+    tileVersion = version;  // Store version for cache busting
 
     // Ensure DOM element is ready
     await new Promise(resolve => {
@@ -384,6 +390,9 @@ export function dispose() {
 
     // Reset marker visibility state
     markersVisible = false;
+
+    // Reset tile version
+    tileVersion = null;
 
     if (markerLayer) {
         markerLayer.clearLayers();

@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Identity;
 using System.Security.Claims;
@@ -924,6 +925,24 @@ app.MapGet("/public/{slug}/tiles/{**path}", (
       .SetVaryByRouteValue("slug", "path")
       .SetVaryByQuery("v")
       .Tag("public-tiles"));
+
+// Internal endpoint for API to invalidate public map cache
+// Called after delete/regenerate operations to clear in-memory and output cache
+app.MapPost("/internal/public-cache/invalidate/{slug}", async (
+    string slug,
+    PublicTileCacheService tileCache,
+    IOutputCacheStore outputCacheStore,
+    ILogger<Program> logger) =>
+{
+    // Invalidate in-memory tile cache
+    tileCache.InvalidateSlug(slug);
+
+    // Evict ASP.NET OutputCache by tag
+    await outputCacheStore.EvictByTagAsync("public-tiles", default);
+
+    logger.LogInformation("Invalidated cache for public map: {Slug}", slug);
+    return Results.Ok(new { invalidated = slug });
+});
 
 // Public map info proxy - forwards map info requests to API service
 app.MapGet("/public/{slug}/info", async (
