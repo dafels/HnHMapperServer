@@ -191,6 +191,7 @@ public static partial class ClientEndpoints
         ITenantActivityService activityService,
         IConfigRepository configRepository,
         ILargeTileService largeTileService,
+        ZoomTileQueueService zoomTileQueueService,
         IAuditService auditService,
         ILogger<Program> logger)
     {
@@ -466,16 +467,14 @@ public static partial class ClientEndpoints
                 tenantId,
                 fileSizeBytes);
 
-            // Mark the corresponding large tile as dirty for regeneration
+            // Mark the corresponding large tile as dirty (clears LargeTileService cache)
             await largeTileService.MarkDirtyAsync(tenantId, grid.Map, grid.Coord.X, grid.Coord.Y);
 
-            // Update zoom levels
-            var c = grid.Coord;
-            for (int z = 1; z <= 6; z++)
-            {
-                c = c.Parent();
-                await tileService.UpdateZoomLevelAsync(grid.Map, c, z, tenantId, gridStorage);
-            }
+            // Enqueue background zoom pre-generation (non-blocking, ~0ms)
+            // The ZoomTileProcessorService will generate WebP tiles at all zoom levels
+            // and then send a mapRevision SSE event so browsers refresh
+            zoomTileQueueService.EnqueueZoomRegeneration(
+                new ZoomTileRequest(tenantId, grid.Map, grid.Coord.X, grid.Coord.Y));
 
             await tileCacheService.InvalidateCacheAsync(tenantId);
         }

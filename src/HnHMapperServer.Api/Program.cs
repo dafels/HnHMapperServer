@@ -185,6 +185,9 @@ builder.Services.AddScoped<IPreviewUrlSigningService, PreviewUrlSigningService>(
 // Register TileCacheService (singleton to cache tiles in memory and prevent blocking SSE connections)
 builder.Services.AddSingleton<TileCacheService>();
 
+// Zoom tile queue: background pre-generation of WebP tiles after upload
+builder.Services.AddSingleton<ZoomTileQueueService>();
+
 // Register IconCatalogService with container-friendly path resolution
 // Priority:
 // 1) IconCatalog:WwwrootPath (explicit override via env/config)
@@ -211,7 +214,8 @@ builder.Services.AddHostedService<MarkerReadinessService>();
 builder.Services.AddHostedService<InvitationExpirationService>();
 builder.Services.AddHostedService<TenantStorageVerificationService>(); // Phase 4: Storage quota verification
 builder.Services.AddHostedService<PingCleanupService>(); // Ping cleanup service
-builder.Services.AddHostedService<ZoomTileRebuildService>(); // Zoom tile rebuild service
+builder.Services.AddHostedService<ZoomTileRebuildService>(); // Zoom tile rebuild service (safety net for missed tiles)
+builder.Services.AddHostedService<ZoomTileProcessorService>(); // Fast zoom tile pre-generation from upload queue
 builder.Services.AddHostedService<TimerCheckService>(); // Timer monitoring and notification service
 builder.Services.AddHostedService<PreviewCleanupService>(); // Map preview cleanup service (7 day retention)
 builder.Services.AddHostedService<HmapTempCleanupService>(); // HMAP temp file cleanup service (7 day retention)
