@@ -645,7 +645,9 @@ public class LargeTileService : ILargeTileService
         // Query base tiles from database with AsNoTracking for performance
         var baseTiles = await _dbContext.Tiles
             .AsNoTracking()
-            .Where(t => t.MapId == mapId
+            .IgnoreQueryFilters()
+            .Where(t => t.TenantId == tenantId
+                && t.MapId == mapId
                 && t.Zoom == 0
                 && t.CoordX >= baseMinX && t.CoordX < baseMinX + TilesPerLargeTile
                 && t.CoordY >= baseMinY && t.CoordY < baseMinY + TilesPerLargeTile)
