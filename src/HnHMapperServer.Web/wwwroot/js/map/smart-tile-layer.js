@@ -254,8 +254,15 @@ export const SmartTileLayer = L.TileLayer.extend({
             this.revisionDebounce[mapId] = setTimeout(() => {
                 delete self.revisionDebounce[mapId];
 
-                // Clear negative cache so previously-404 tiles can load with the new revision
-                self.clearVisibleNegativeCache();
+                // Clear ALL negative cache entries for this map.
+                // A revision change means the server has new tiles — all previous 404s are stale.
+                // clearVisibleNegativeCache() only clears the current zoom/viewport which misses entries.
+                const mapPrefix = mapId + ':';
+                for (const key in self.negativeCache) {
+                    if (key.startsWith(mapPrefix)) {
+                        delete self.negativeCache[key];
+                    }
+                }
 
                 // Gather all visible tiles that need refreshing
                 const keys = Object.keys(self._tiles || {});
@@ -282,12 +289,15 @@ export const SmartTileLayer = L.TileLayer.extend({
                 // With 50ms minimum delay between batches for better visual smoothness
                 const batchSize = 4;
                 let currentIndex = 0;
+                let needsRedraw = false;
 
                 function refreshBatch() {
                     const endIndex = Math.min(currentIndex + batchSize, tilesToRefresh.length);
                     for (let i = currentIndex; i < endIndex; i++) {
                         const tile = tilesToRefresh[i];
-                        self.refresh(tile.x, tile.y, tile.z);
+                        if (!self.refresh(tile.x, tile.y, tile.z)) {
+                            needsRedraw = true;
+                        }
                     }
                     currentIndex = endIndex;
 
@@ -296,6 +306,9 @@ export const SmartTileLayer = L.TileLayer.extend({
                         setTimeout(() => {
                             requestAnimationFrame(refreshBatch);
                         }, 50);
+                    } else if (needsRedraw) {
+                        // Some tiles weren't in _tiles — force Leaflet to recreate them
+                        self.redraw();
                     }
                 }
 
