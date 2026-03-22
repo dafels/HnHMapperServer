@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http.Json;
 using HnHMapperServer.Api.Services;
 using HnHMapperServer.Services.Interfaces;
 using HnHMapperServer.Services.Services;
@@ -18,6 +19,7 @@ public class ZoomTileProcessorService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly MapRevisionCache _revisionCache;
     private readonly IUpdateNotificationService _updateNotificationService;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<ZoomTileProcessorService> _logger;
 
     public ZoomTileProcessorService(
@@ -25,12 +27,14 @@ public class ZoomTileProcessorService : BackgroundService
         IServiceScopeFactory scopeFactory,
         MapRevisionCache revisionCache,
         IUpdateNotificationService updateNotificationService,
+        IHttpClientFactory httpClientFactory,
         ILogger<ZoomTileProcessorService> logger)
     {
         _queue = queue;
         _scopeFactory = scopeFactory;
         _revisionCache = revisionCache;
         _updateNotificationService = updateNotificationService;
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
@@ -173,6 +177,25 @@ public class ZoomTileProcessorService : BackgroundService
         foreach (var tenantId in affectedTenants)
         {
             await tileCacheService.InvalidateCacheAsync(tenantId);
+        }
+
+        // Invalidate Web process tile caches (cross-process)
+        // Send the specific tile coordinates so Web only clears affected entries
+        try
+        {
+            var webClient = _httpClientFactory.CreateClient("Web");
+            var payload = requests.Select(r => new
+            {
+                tenantId = r.TenantId,
+                mapId = r.MapId,
+                baseX = r.BaseX,
+                baseY = r.BaseY
+            });
+            await webClient.PostAsJsonAsync("/internal/tile-cache/invalidate", payload, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "{Prefix} Failed to invalidate Web tile cache", LogPrefix);
         }
 
         sw.Stop();

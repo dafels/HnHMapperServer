@@ -944,6 +944,28 @@ app.MapPost("/internal/public-cache/invalidate/{slug}", async (
     return Results.Ok(new { invalidated = slug });
 });
 
+// Internal endpoint for API to invalidate specific tenant tile cache entries
+// Called after ZoomTileProcessorService generates new tiles so Web serves fresh data
+app.MapPost("/internal/tile-cache/invalidate", async (
+    HttpContext context,
+    HnHMapperServer.Services.Interfaces.ILargeTileService largeTileService,
+    IOutputCacheStore outputCacheStore,
+    ILogger<Program> logger) =>
+{
+    var tiles = await context.Request.ReadFromJsonAsync<TileCacheInvalidationRequest[]>();
+    if (tiles == null || tiles.Length == 0)
+        return Results.BadRequest();
+
+    foreach (var tile in tiles)
+    {
+        largeTileService.InvalidateCachedTile(tile.TenantId, tile.MapId, tile.BaseX, tile.BaseY);
+    }
+
+    await outputCacheStore.EvictByTagAsync("tiles-webp", default);
+    logger.LogDebug("Invalidated {Count} tile cache entries", tiles.Length);
+    return Results.Ok();
+}).DisableAntiforgery();
+
 // Public map info proxy - forwards map info requests to API service
 app.MapGet("/public/{slug}/info", async (
     HttpContext context,
@@ -1096,5 +1118,8 @@ file sealed class LoginPayload
     public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
 }
+
+// DTO for cross-process tile cache invalidation
+file sealed record TileCacheInvalidationRequest(string TenantId, int MapId, int BaseX, int BaseY);
 
  

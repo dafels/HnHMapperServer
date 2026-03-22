@@ -41,4 +41,17 @@ public interface ILargeTileService
     /// Gets the filesystem path for a large tile (may not exist yet).
     /// </summary>
     string GetLargeTilePath(string tenantId, int mapId, int zoom, int x, int y);
+
+    /// <summary>
+    /// Invalidates all in-memory cached tiles for a tenant.
+    /// Used for cross-process cache invalidation (API notifying Web).
+    /// </summary>
+    void InvalidateTenantCache(string tenantId);
+
+    /// <summary>
+    /// Invalidates in-memory cache entries for a specific tile and its parent zoom chain.
+    /// Same zoom chain as MarkDirtyAsync but without file deletion.
+    /// Used for cross-process cache invalidation (API notifying Web after generating new tiles on disk).
+    /// </summary>
+    void InvalidateCachedTile(string tenantId, int mapId, int baseX, int baseY);
 }

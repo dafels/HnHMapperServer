@@ -319,6 +319,29 @@ public class LargeTileService : ILargeTileService
         _nonExistentTileCache.TryRemove(cacheKey, out _);
     }
 
+    public void InvalidateTenantCache(string tenantId)
+    {
+        // No-op placeholder kept for interface compatibility
+    }
+
+    /// <summary>
+    /// Invalidates in-memory cache entries for a specific tile and its parent zoom chain.
+    /// Same zoom chain logic as MarkDirtyAsync but without file deletion.
+    /// Used for cross-process cache invalidation (API notifying Web after generating new tiles on disk).
+    /// </summary>
+    public void InvalidateCachedTile(string tenantId, int mapId, int baseX, int baseY)
+    {
+        var largeTileX = (int)Math.Floor(baseX / (double)TilesPerLargeTile);
+        var largeTileY = (int)Math.Floor(baseY / (double)TilesPerLargeTile);
+
+        for (int zoom = 0; zoom <= 6; zoom++)
+        {
+            InvalidateCacheEntry(tenantId, mapId, zoom, largeTileX, largeTileY);
+            largeTileX = (int)Math.Floor(largeTileX / 2.0);
+            largeTileY = (int)Math.Floor(largeTileY / 2.0);
+        }
+    }
+
     public async Task MarkDirtyAsync(string tenantId, int mapId, int baseX, int baseY)
     {
         var stats = GetStats(tenantId);
