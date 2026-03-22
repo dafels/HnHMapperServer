@@ -404,7 +404,12 @@ public class LargeTileService : ILargeTileService
         return generatedBytes;
     }
 
-    public async Task<int> GenerateMissingTilesAsync(string tenantId, CancellationToken ct = default)
+    public Task<int> GenerateMissingTilesAsync(string tenantId, CancellationToken ct = default)
+    {
+        return GenerateMissingTilesForMapsAsync(tenantId, mapIds: null, ct);
+    }
+
+    public async Task<int> GenerateMissingTilesForMapsAsync(string tenantId, HashSet<int>? mapIds, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
         var generatedCount = 0;
@@ -412,11 +417,18 @@ public class LargeTileService : ILargeTileService
         var failedCount = 0;
         var zoomStats = new ConcurrentDictionary<int, (int generated, int skipped)>();
 
-        // Get all maps for this tenant
-        var maps = await _dbContext.Maps
+        // Get maps for this tenant (filtered by mapIds if provided)
+        var query = _dbContext.Maps
             .AsNoTracking()
             .IgnoreQueryFilters()
-            .Where(m => m.TenantId == tenantId)
+            .Where(m => m.TenantId == tenantId);
+
+        if (mapIds != null)
+        {
+            query = query.Where(m => mapIds.Contains(m.Id));
+        }
+
+        var maps = await query
             .Select(m => new { m.Id, m.Name })
             .ToListAsync(ct);
 
@@ -426,8 +438,9 @@ public class LargeTileService : ILargeTileService
         }
 
         _logger.LogInformation(
-            "{Prefix} BATCH-START [{Tenant}] scanning {MapCount} maps for missing tiles (parallelism={Parallelism})",
-            LogPrefix, tenantId, maps.Count, MaxParallelism);
+            "{Prefix} BATCH-START [{Tenant}] scanning {MapCount} maps for missing tiles (parallelism={Parallelism}){Filter}",
+            LogPrefix, tenantId, maps.Count, MaxParallelism,
+            mapIds != null ? $" [filtered to {mapIds.Count} dirty maps]" : "");
 
         foreach (var map in maps)
         {

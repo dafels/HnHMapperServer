@@ -33,12 +33,15 @@ public interface ILargeTileService
 
     /// <summary>
     /// Generates all missing large tiles for a tenant's maps.
-    /// Used by background job for pre-generation and migration.
+    /// Used by startup scan for pre-generation and migration.
     /// </summary>
-    /// <param name="tenantId">Tenant ID</param>
-    /// <param name="ct">Cancellation token</param>
-    /// <returns>Number of tiles generated</returns>
     Task<int> GenerateMissingTilesAsync(string tenantId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Generates missing large tiles for specific maps only.
+    /// Used by dirty-driven background scan to avoid scanning all maps.
+    /// </summary>
+    Task<int> GenerateMissingTilesForMapsAsync(string tenantId, HashSet<int> mapIds, CancellationToken ct = default);
 
     /// <summary>
     /// Gets the filesystem path for a large tile (may not exist yet).

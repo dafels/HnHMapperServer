@@ -419,6 +419,21 @@ public class TileService : ITileService
     }
 
     /// <summary>
+    /// Gets the distinct map IDs that have dirty zoom tiles for a tenant.
+    /// Used by LargeTileGenerationService to only scan maps with recent uploads.
+    /// </summary>
+    public async Task<HashSet<int>> GetDirtyMapIdsAsync(string tenantId)
+    {
+        var mapIds = await _dbContext.DirtyZoomTiles
+            .IgnoreQueryFilters()
+            .Where(d => d.TenantId == tenantId)
+            .Select(d => d.MapId)
+            .Distinct()
+            .ToListAsync();
+        return mapIds.ToHashSet();
+    }
+
+    /// <summary>
     /// Loads only the 4 specific sub-tiles needed for a parent coordinate.
     /// Much more efficient than loading all tiles for a tenant.
     /// </summary>

@@ -42,4 +42,10 @@ public interface ITileService
     /// Used for monitoring and logging.
     /// </summary>
     Task<int> GetDirtyZoomTileCountAsync(string tenantId);
+
+    /// <summary>
+    /// Gets the distinct map IDs that have dirty zoom tiles for a tenant.
+    /// Used by LargeTileGenerationService to only scan maps with recent uploads.
+    /// </summary>
+    Task<HashSet<int>> GetDirtyMapIdsAsync(string tenantId);
 }
