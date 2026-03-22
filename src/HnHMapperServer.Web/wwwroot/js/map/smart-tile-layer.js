@@ -203,6 +203,10 @@ export const SmartTileLayer = L.TileLayer.extend({
             const swapTile = () => {
                 if (tile.el && self._tiles[key]) {
                     tile.el.src = newUrl;
+                    // Restore visibility for tiles that were hidden by error handler
+                    if (tile.el.style.visibility === 'hidden') {
+                        tile.el.style.visibility = '';
+                    }
                     self.tileStates[cacheKey] = 'loaded';
                 }
                 cleanupPreloader();
@@ -249,6 +253,9 @@ export const SmartTileLayer = L.TileLayer.extend({
             // Debounce tile refresh by 500ms to batch multiple revision updates
             this.revisionDebounce[mapId] = setTimeout(() => {
                 delete self.revisionDebounce[mapId];
+
+                // Clear negative cache so previously-404 tiles can load with the new revision
+                self.clearVisibleNegativeCache();
 
                 // Gather all visible tiles that need refreshing
                 const keys = Object.keys(self._tiles || {});
