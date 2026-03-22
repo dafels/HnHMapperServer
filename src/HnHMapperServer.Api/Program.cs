@@ -222,8 +222,7 @@ builder.Services.AddHostedService<HmapTempCleanupService>(); // HMAP temp file c
 builder.Services.AddHostedService<OrphanedMarkerCleanupService>(); // Orphaned marker cleanup service
 builder.Services.AddHostedService<TenantActivityFlushService>(); // Tenant activity flush service (2-min interval)
 builder.Services.AddHostedService<PublicMapGenerationBackgroundService>(); // Public map tile generation
-// Disabled: On-demand generation with caching is now efficient enough
-// builder.Services.AddHostedService<LargeTileGenerationService>(); // Private map 400x400 WebP tile generation
+builder.Services.AddHostedService<LargeTileGenerationService>(); // Private map 400x400 WebP tile generation (pre-generates missing tiles every 30s)
 
 // Configure shared data protection for cookie sharing with Web
 var dataProtectionPath = Path.Combine(
