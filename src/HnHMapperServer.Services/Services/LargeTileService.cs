@@ -326,7 +326,6 @@ public class LargeTileService : ILargeTileService
 
     /// <summary>
     /// Invalidates in-memory cache entries for a specific tile and its parent zoom chain.
-    /// Same zoom chain logic as MarkDirtyAsync but without file deletion.
     /// Used for cross-process cache invalidation (API notifying Web after generating new tiles on disk).
     /// </summary>
     public void InvalidateCachedTile(string tenantId, int mapId, int baseX, int baseY)
@@ -351,29 +350,18 @@ public class LargeTileService : ILargeTileService
         var largeTileX = (int)Math.Floor(baseX / (double)TilesPerLargeTile);
         var largeTileY = (int)Math.Floor(baseY / (double)TilesPerLargeTile);
 
-        var deletedCount = 0;
-        var deletedZooms = new List<int>();
+        var invalidatedCount = 0;
 
-        // Delete the large tile at zoom 0 and all parent zoom levels
+        // Invalidate in-memory caches only — do NOT delete files from disk.
+        // Old WebP files remain on disk and continue serving requests until
+        // ZoomTileProcessorService overwrites them with fresh tiles.
+        // This avoids the gap where no file exists and on-the-fly generation kicks in.
         for (int zoom = 0; zoom <= 6; zoom++)
         {
-            // Invalidate in-memory cache
-            InvalidateCacheEntry(tenantId, mapId, zoom, largeTileX, largeTileY);
-
-            var path = GetLargeTilePath(tenantId, mapId, zoom, largeTileX, largeTileY);
-            if (File.Exists(path))
+            var cacheKey = $"{tenantId}/{mapId}/{zoom}/{largeTileX}_{largeTileY}";
+            if (_tileCache.TryRemove(cacheKey, out _) || _nonExistentTileCache.TryRemove(cacheKey, out _))
             {
-                try
-                {
-                    File.Delete(path);
-                    deletedCount++;
-                    deletedZooms.Add(zoom);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "{Prefix} DIRTY-DELETE-FAILED [{Tenant}] map={MapId} z={Zoom} ({X},{Y})",
-                        LogPrefix, tenantId, mapId, zoom, largeTileX, largeTileY);
-                }
+                invalidatedCount++;
             }
 
             // Calculate parent coordinate for next zoom level
@@ -381,20 +369,39 @@ public class LargeTileService : ILargeTileService
             largeTileY = (int)Math.Floor(largeTileY / 2.0);
         }
 
-        Interlocked.Add(ref stats.DirtyMarked, deletedCount);
+        Interlocked.Add(ref stats.DirtyMarked, invalidatedCount);
 
-        if (deletedCount > 0)
+        _logger.LogDebug(
+            "{Prefix} DIRTY [{Tenant}] map={MapId} base=({BaseX},{BaseY}) -> invalidated {Count} in-memory cache entries",
+            LogPrefix, tenantId, mapId, baseX, baseY, invalidatedCount);
+    }
+
+    public async Task<byte[]?> ForceRegenerateLargeTileAsync(string tenantId, int mapId, int zoom, int x, int y)
+    {
+        var cacheKey = $"{tenantId}/{mapId}/{zoom}/{x}_{y}";
+        var stats = GetStats(tenantId);
+        stats.LastActivity = DateTime.UtcNow;
+
+        var sw = Stopwatch.StartNew();
+        var generatedBytes = await GenerateLargeTileAsync(tenantId, mapId, zoom, x, y);
+        sw.Stop();
+
+        if (generatedBytes != null)
         {
-            _logger.LogInformation(
-                "{Prefix} DIRTY [{Tenant}] map={MapId} base=({BaseX},{BaseY}) -> invalidated {Count} tiles at zooms [{Zooms}]",
-                LogPrefix, tenantId, mapId, baseX, baseY, deletedCount, string.Join(",", deletedZooms));
+            AddToCache(cacheKey, generatedBytes);
+
+            _logger.LogDebug(
+                "{Prefix} REGEN [{Tenant}] map={MapId} z={Zoom} ({X},{Y}) in {Ms}ms ({Size:F1}KB)",
+                LogPrefix, tenantId, mapId, zoom, x, y, sw.ElapsedMilliseconds, generatedBytes.Length / 1024.0);
         }
         else
         {
-            _logger.LogDebug(
-                "{Prefix} DIRTY [{Tenant}] map={MapId} base=({BaseX},{BaseY}) -> no cached tiles to invalidate",
-                LogPrefix, tenantId, mapId, baseX, baseY);
+            // Clear from caches — source tiles may have been removed
+            _tileCache.TryRemove(cacheKey, out _);
+            AddToNegativeCache(cacheKey);
         }
+
+        return generatedBytes;
     }
 
     public async Task<int> GenerateMissingTilesAsync(string tenantId, CancellationToken ct = default)

@@ -19,14 +19,17 @@ public interface ILargeTileService
     Task<byte[]?> GetOrGenerateLargeTileAsync(string tenantId, int mapId, int zoom, int x, int y);
 
     /// <summary>
-    /// Marks a tile as dirty (needing regeneration) by deleting its cached large tile.
+    /// Marks a tile as dirty by invalidating in-memory caches.
+    /// Old WebP files remain on disk until overwritten by the background processor.
     /// Called when a base tile is uploaded or updated.
     /// </summary>
-    /// <param name="tenantId">Tenant ID</param>
-    /// <param name="mapId">Map ID</param>
-    /// <param name="baseX">X coordinate in base 100x100 tile system</param>
-    /// <param name="baseY">Y coordinate in base 100x100 tile system</param>
     Task MarkDirtyAsync(string tenantId, int mapId, int baseX, int baseY);
+
+    /// <summary>
+    /// Force-regenerates a tile from source data, bypassing all caches.
+    /// Used by ZoomTileProcessorService to regenerate tiles after uploads.
+    /// </summary>
+    Task<byte[]?> ForceRegenerateLargeTileAsync(string tenantId, int mapId, int zoom, int x, int y);
 
     /// <summary>
     /// Generates all missing large tiles for a tenant's maps.
@@ -50,7 +53,6 @@ public interface ILargeTileService
 
     /// <summary>
     /// Invalidates in-memory cache entries for a specific tile and its parent zoom chain.
-    /// Same zoom chain as MarkDirtyAsync but without file deletion.
     /// Used for cross-process cache invalidation (API notifying Web after generating new tiles on disk).
     /// </summary>
     void InvalidateCachedTile(string tenantId, int mapId, int baseX, int baseY);

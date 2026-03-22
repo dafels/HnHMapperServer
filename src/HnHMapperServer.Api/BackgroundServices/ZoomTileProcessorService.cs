@@ -126,20 +126,20 @@ public class ZoomTileProcessorService : BackgroundService
                 var largeTileX = (int)Math.Floor(request.BaseX / 4.0);
                 var largeTileY = (int)Math.Floor(request.BaseY / 4.0);
 
-                // Generate zoom 0 (the base large tile from 4x4 100px tiles)
-                var result = await largeTileService.GetOrGenerateLargeTileAsync(
+                // Force-regenerate zoom 0 (bypasses caches, overwrites old file on disk)
+                var result = await largeTileService.ForceRegenerateLargeTileAsync(
                     request.TenantId, request.MapId, 0, largeTileX, largeTileY);
 
                 if (result != null)
                 {
-                    // Generate zoom levels 1-6 (parent tiles)
+                    // Force-regenerate zoom levels 1-6 (parent tiles)
                     var parentX = largeTileX;
                     var parentY = largeTileY;
                     for (int zoom = 1; zoom <= 6; zoom++)
                     {
                         parentX = (int)Math.Floor(parentX / 2.0);
                         parentY = (int)Math.Floor(parentY / 2.0);
-                        await largeTileService.GetOrGenerateLargeTileAsync(
+                        await largeTileService.ForceRegenerateLargeTileAsync(
                             request.TenantId, request.MapId, zoom, parentX, parentY);
                     }
 
@@ -165,22 +165,8 @@ public class ZoomTileProcessorService : BackgroundService
             }
         }
 
-        // Bump mapRevision and send SSE notifications for all affected maps
-        foreach (var mapId in affectedMaps)
-        {
-            var newRevision = _revisionCache.Increment(mapId);
-            _updateNotificationService.NotifyMapRevision(mapId, newRevision);
-        }
-
-        // Invalidate tile caches for affected tenants
-        var tileCacheService = scope.ServiceProvider.GetRequiredService<TileCacheService>();
-        foreach (var tenantId in affectedTenants)
-        {
-            await tileCacheService.InvalidateCacheAsync(tenantId);
-        }
-
-        // Invalidate Web process tile caches (cross-process)
-        // Send the specific tile coordinates so Web only clears affected entries
+        // Invalidate Web process tile caches FIRST (cross-process)
+        // This ensures the Web process reads fresh files before browsers are notified
         try
         {
             var webClient = _httpClientFactory.CreateClient("Web");
@@ -196,6 +182,21 @@ public class ZoomTileProcessorService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "{Prefix} Failed to invalidate Web tile cache", LogPrefix);
+        }
+
+        // Invalidate tile caches for affected tenants
+        var tileCacheService = scope.ServiceProvider.GetRequiredService<TileCacheService>();
+        foreach (var tenantId in affectedTenants)
+        {
+            await tileCacheService.InvalidateCacheAsync(tenantId);
+        }
+
+        // LAST: Bump mapRevision and send SSE notifications
+        // Both API and Web processes now have fresh tiles, so browsers get correct data on refresh
+        foreach (var mapId in affectedMaps)
+        {
+            var newRevision = _revisionCache.Increment(mapId);
+            _updateNotificationService.NotifyMapRevision(mapId, newRevision);
         }
 
         sw.Stop();
