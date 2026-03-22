@@ -6,25 +6,31 @@ namespace HnHMapperServer.Api.Services;
 /// In-memory cache for per-map revision numbers.
 /// Used to append ?v=revision to tile URLs for efficient browser caching.
 /// Revision increments on any tile-affecting operation (upload, merge, admin wipe).
-/// Resets on API restart (acceptable as clients will refetch on next change).
+/// Seeded from epoch time so revisions are always higher after a restart,
+/// preventing stale browser cache hits when tiles are served with immutable headers.
 /// </summary>
 public class MapRevisionCache
 {
     /// <summary>
+    /// Base revision derived from server startup time.
+    /// Ensures post-restart revisions are always higher than pre-restart values.
+    /// </summary>
+    private readonly int _baseRevision = (int)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() % 1_000_000_000);
+
+    /// <summary>
     /// Thread-safe map from mapId → revision number.
-    /// Revision starts at 1 and increments on each change.
     /// </summary>
     private readonly ConcurrentDictionary<int, int> _mapIdToRevision = new();
 
     /// <summary>
     /// Gets the current revision for a map.
-    /// Returns 1 if map has not been seen yet (initial revision).
+    /// Returns an epoch-based value if map has not been seen yet.
     /// </summary>
     /// <param name="mapId">The map ID</param>
-    /// <returns>Current revision number (≥1)</returns>
+    /// <returns>Current revision number</returns>
     public int Get(int mapId)
     {
-        return _mapIdToRevision.GetOrAdd(mapId, _ => 1);
+        return _mapIdToRevision.GetOrAdd(mapId, _ => _baseRevision);
     }
 
     /// <summary>
@@ -35,8 +41,8 @@ public class MapRevisionCache
     /// <returns>The new revision number after increment</returns>
     public int Increment(int mapId)
     {
-        return _mapIdToRevision.AddOrUpdate(mapId, 
-            addValue: 2, // If first time seen, start at 2 (previous implicit 1 → 2)
+        return _mapIdToRevision.AddOrUpdate(mapId,
+            addValue: _baseRevision + 1,
             updateValueFactory: (_, currentValue) => currentValue + 1);
     }
 
