@@ -675,6 +675,8 @@ public static class MapEndpoints
                 {
                     if (tileData.TenantId == tenantId)
                     {
+                        // Track newly created maps so mapRevision events aren't filtered out
+                        tenantMapIds.Add(tileData.MapId);
                         tileBatch.Add(new TileCacheDto
                         {
                             M = tileData.MapId,
@@ -693,6 +695,8 @@ public static class MapEndpoints
                 {
                     if (merge.TenantId == tenantId)
                     {
+                        // Track merge target map so mapRevision events aren't filtered out
+                        tenantMapIds.Add(merge.To);
                         var mergeJson = JsonSerializer.Serialize(merge, jsonOptions);
                         await context.Response.WriteAsync($"event: merge\ndata: {mergeJson}\n\n");
                         await context.Response.Body.FlushAsync();
