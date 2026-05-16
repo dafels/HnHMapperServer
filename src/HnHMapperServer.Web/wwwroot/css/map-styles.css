@@ -1,5 +1,11 @@
 /* HnH Map Viewer Styles */
 
+/* Native Blazor map (BlazorMapView) — zoom transition fade-out for the old tile layer. */
+@keyframes bmv-zoom-fade {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
 /* Map container */
 .leaflet-map {
     width: 100%;

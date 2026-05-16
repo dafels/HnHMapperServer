@@ -270,20 +270,45 @@
 
                 <!-- Fullscreen Map View -->
                 <div class="map-view-container-fullscreen @(isSidebarOpen ? "sidebar-open" : "")" @onclick="@HandleMapClick">
-                    <MapView @ref="mapView"
-                             State="@state"
-                             OnMapDragged="@HandleMapDragged"
-                             OnMapZoomed="@HandleMapZoomed"
-                             OnContextMenu="@HandleContextMenu"
-                             OnMarkerClicked="@HandleMarkerClicked"
-                             OnMarkerContextMenu="@HandleMarkerContextMenu"
-                             OnCustomMarkerContextMenu="@HandleCustomMarkerContextMenu"
-                             OnMapRightClick="@HandleMapRightClick"
-                             OnMapInitialized="@HandleMapInitialized"
-                             OnMapChanged="@HandleMapChanged"
-                             OnRequestOverlays="@HandleRequestOverlays"
-                             OnRoadDrawingComplete="@HandleRoadDrawingComplete"
-                             OnRoadContextMenu="@HandleRoadContextMenu" />
+                    @if (useNativeMap)
+                    {
+                        <BlazorMapView @ref="mapView"
+                                       State="@state"
+                                       Roads="@allRoads"
+                                       ShowRoads="@showRoads"
+                                       ShowMarkerFilterMode="@showMarkerFilterMode"
+                                       ShowThingwallHighlight="@showThingwallHighlight"
+                                       ShowQuestGiverHighlight="@showQuestGiverHighlight"
+                                       OnMapDragged="@HandleMapDragged"
+                                       OnMapZoomed="@HandleMapZoomed"
+                                       OnContextMenu="@HandleContextMenu"
+                                       OnMarkerClicked="@HandleMarkerClicked"
+                                       OnMarkerContextMenu="@HandleMarkerContextMenu"
+                                       OnCustomMarkerContextMenu="@HandleCustomMarkerContextMenu"
+                                       OnMapRightClick="@HandleMapRightClick"
+                                       OnMapInitialized="@HandleMapInitialized"
+                                       OnMapChanged="@HandleMapChanged"
+                                       OnRequestOverlays="@HandleRequestOverlays"
+                                       OnRoadDrawingComplete="@HandleRoadDrawingComplete"
+                                       OnRoadContextMenu="@HandleRoadContextMenu" />
+                    }
+                    else
+                    {
+                        <MapView @ref="mapView"
+                                 State="@state"
+                                 OnMapDragged="@HandleMapDragged"
+                                 OnMapZoomed="@HandleMapZoomed"
+                                 OnContextMenu="@HandleContextMenu"
+                                 OnMarkerClicked="@HandleMarkerClicked"
+                                 OnMarkerContextMenu="@HandleMarkerContextMenu"
+                                 OnCustomMarkerContextMenu="@HandleCustomMarkerContextMenu"
+                                 OnMapRightClick="@HandleMapRightClick"
+                                 OnMapInitialized="@HandleMapInitialized"
+                                 OnMapChanged="@HandleMapChanged"
+                                 OnRequestOverlays="@HandleRequestOverlays"
+                                 OnRoadDrawingComplete="@HandleRoadDrawingComplete"
+                                 OnRoadContextMenu="@HandleRoadContextMenu" />
+                    }
                 </div>
             </MudMainContent>
         </MudDrawerContainer>

@@ -69,6 +69,14 @@ public class LayerVisibilityService
         _logger = logger;
     }
 
+    /// <summary>
+    /// Fired when any visibility flag changes. Subscribers should re-render.
+    /// Fires after every property setter and Toggle*/ShowAll/HideAll/Reset call.
+    /// </summary>
+    public event Action? OnChange;
+
+    private void Notify() => OnChange?.Invoke();
+
     #region Public Properties
 
     /// <summary>
@@ -77,7 +85,7 @@ public class LayerVisibilityService
     public bool ShowPlayers
     {
         get => _showPlayers;
-        set => _showPlayers = value;
+        set { if (_showPlayers != value) { _showPlayers = value; Notify(); } }
     }
 
     /// <summary>
@@ -86,7 +94,7 @@ public class LayerVisibilityService
     public bool ShowPlayerTooltips
     {
         get => _showPlayerTooltips;
-        set => _showPlayerTooltips = value;
+        set { if (_showPlayerTooltips != value) { _showPlayerTooltips = value; Notify(); } }
     }
 
     /// <summary>
@@ -95,7 +103,7 @@ public class LayerVisibilityService
     public bool ShowMarkers
     {
         get => _showMarkers;
-        set => _showMarkers = value;
+        set { if (_showMarkers != value) { _showMarkers = value; Notify(); } }
     }
 
     /// <summary>
@@ -104,7 +112,7 @@ public class LayerVisibilityService
     public bool ShowThingwalls
     {
         get => _showThingwalls;
-        set => _showThingwalls = value;
+        set { if (_showThingwalls != value) { _showThingwalls = value; Notify(); } }
     }
 
     /// <summary>
@@ -113,7 +121,7 @@ public class LayerVisibilityService
     public bool ShowThingwallTooltips
     {
         get => _showThingwallTooltips;
-        set => _showThingwallTooltips = value;
+        set { if (_showThingwallTooltips != value) { _showThingwallTooltips = value; Notify(); } }
     }
 
     /// <summary>
@@ -122,7 +130,7 @@ public class LayerVisibilityService
     public bool ShowQuests
     {
         get => _showQuests;
-        set => _showQuests = value;
+        set { if (_showQuests != value) { _showQuests = value; Notify(); } }
     }
 
     /// <summary>
@@ -131,7 +139,7 @@ public class LayerVisibilityService
     public bool ShowQuestTooltips
     {
         get => _showQuestTooltips;
-        set => _showQuestTooltips = value;
+        set { if (_showQuestTooltips != value) { _showQuestTooltips = value; Notify(); } }
     }
 
     /// <summary>
@@ -140,7 +148,7 @@ public class LayerVisibilityService
     public bool ShowCustomMarkers
     {
         get => _showCustomMarkers;
-        set => _showCustomMarkers = value;
+        set { if (_showCustomMarkers != value) { _showCustomMarkers = value; Notify(); } }
     }
 
     /// <summary>
@@ -149,7 +157,7 @@ public class LayerVisibilityService
     public bool ShowGridCoordinates
     {
         get => _showGridCoordinates;
-        set => _showGridCoordinates = value;
+        set { if (_showGridCoordinates != value) { _showGridCoordinates = value; Notify(); } }
     }
 
     /// <summary>
@@ -158,7 +166,7 @@ public class LayerVisibilityService
     public bool ShowClustering
     {
         get => _showClustering;
-        set => _showClustering = value;
+        set { if (_showClustering != value) { _showClustering = value; Notify(); } }
     }
 
     #endregion
@@ -239,92 +247,39 @@ public class LayerVisibilityService
         _showCustomMarkers = config.ShowCustomMarkers;
         _showGridCoordinates = config.ShowGridCoordinates;
         _showClustering = config.ShowClustering;
+        Notify();
     }
 
     #endregion
 
     #region Toggle Methods
 
-    /// <summary>
-    /// Toggle player visibility
-    /// </summary>
-    public void TogglePlayers()
-    {
-        _showPlayers = !_showPlayers;
-        _logger.LogDebug("Players visibility toggled: {Visible}", _showPlayers);
-    }
+    /// <summary>Toggle player visibility</summary>
+    public void TogglePlayers() { ShowPlayers = !_showPlayers; _logger.LogDebug("Players visibility toggled: {Visible}", _showPlayers); }
 
-    /// <summary>
-    /// Toggle player tooltips
-    /// </summary>
-    public void TogglePlayerTooltips()
-    {
-        _showPlayerTooltips = !_showPlayerTooltips;
-        _logger.LogDebug("Player tooltips toggled: {Visible}", _showPlayerTooltips);
-    }
+    /// <summary>Toggle player tooltips</summary>
+    public void TogglePlayerTooltips() { ShowPlayerTooltips = !_showPlayerTooltips; _logger.LogDebug("Player tooltips toggled: {Visible}", _showPlayerTooltips); }
 
-    /// <summary>
-    /// Toggle marker visibility
-    /// </summary>
-    public void ToggleMarkers()
-    {
-        _showMarkers = !_showMarkers;
-        _logger.LogDebug("Markers visibility toggled: {Visible}", _showMarkers);
-    }
+    /// <summary>Toggle marker visibility</summary>
+    public void ToggleMarkers() { ShowMarkers = !_showMarkers; _logger.LogDebug("Markers visibility toggled: {Visible}", _showMarkers); }
 
-    /// <summary>
-    /// Toggle thingwall visibility
-    /// </summary>
-    public void ToggleThingwalls()
-    {
-        _showThingwalls = !_showThingwalls;
-        _logger.LogDebug("Thingwalls visibility toggled: {Visible}", _showThingwalls);
-    }
+    /// <summary>Toggle thingwall visibility</summary>
+    public void ToggleThingwalls() { ShowThingwalls = !_showThingwalls; _logger.LogDebug("Thingwalls visibility toggled: {Visible}", _showThingwalls); }
 
-    /// <summary>
-    /// Toggle thingwall tooltips
-    /// </summary>
-    public void ToggleThingwallTooltips()
-    {
-        _showThingwallTooltips = !_showThingwallTooltips;
-        _logger.LogDebug("Thingwall tooltips toggled: {Visible}", _showThingwallTooltips);
-    }
+    /// <summary>Toggle thingwall tooltips</summary>
+    public void ToggleThingwallTooltips() { ShowThingwallTooltips = !_showThingwallTooltips; _logger.LogDebug("Thingwall tooltips toggled: {Visible}", _showThingwallTooltips); }
 
-    /// <summary>
-    /// Toggle quest visibility
-    /// </summary>
-    public void ToggleQuests()
-    {
-        _showQuests = !_showQuests;
-        _logger.LogDebug("Quests visibility toggled: {Visible}", _showQuests);
-    }
+    /// <summary>Toggle quest visibility</summary>
+    public void ToggleQuests() { ShowQuests = !_showQuests; _logger.LogDebug("Quests visibility toggled: {Visible}", _showQuests); }
 
-    /// <summary>
-    /// Toggle quest tooltips
-    /// </summary>
-    public void ToggleQuestTooltips()
-    {
-        _showQuestTooltips = !_showQuestTooltips;
-        _logger.LogDebug("Quest tooltips toggled: {Visible}", _showQuestTooltips);
-    }
+    /// <summary>Toggle quest tooltips</summary>
+    public void ToggleQuestTooltips() { ShowQuestTooltips = !_showQuestTooltips; _logger.LogDebug("Quest tooltips toggled: {Visible}", _showQuestTooltips); }
 
-    /// <summary>
-    /// Toggle custom marker visibility
-    /// </summary>
-    public void ToggleCustomMarkers()
-    {
-        _showCustomMarkers = !_showCustomMarkers;
-        _logger.LogDebug("Custom markers visibility toggled: {Visible}", _showCustomMarkers);
-    }
+    /// <summary>Toggle custom marker visibility</summary>
+    public void ToggleCustomMarkers() { ShowCustomMarkers = !_showCustomMarkers; _logger.LogDebug("Custom markers visibility toggled: {Visible}", _showCustomMarkers); }
 
-    /// <summary>
-    /// Toggle grid coordinates
-    /// </summary>
-    public void ToggleGridCoordinates()
-    {
-        _showGridCoordinates = !_showGridCoordinates;
-        _logger.LogDebug("Grid coordinates toggled: {Visible}", _showGridCoordinates);
-    }
+    /// <summary>Toggle grid coordinates</summary>
+    public void ToggleGridCoordinates() { ShowGridCoordinates = !_showGridCoordinates; _logger.LogDebug("Grid coordinates toggled: {Visible}", _showGridCoordinates); }
 
     #endregion
 
@@ -344,6 +299,7 @@ public class LayerVisibilityService
         _showQuestTooltips = true;
         _showCustomMarkers = true;
         _logger.LogInformation("All layers shown");
+        Notify();
     }
 
     /// <summary>
@@ -360,6 +316,7 @@ public class LayerVisibilityService
         _showQuestTooltips = false;
         _showCustomMarkers = false;
         _logger.LogInformation("All layers hidden");
+        Notify();
     }
 
     /// <summary>
@@ -377,6 +334,7 @@ public class LayerVisibilityService
         _showCustomMarkers = true;
         _showGridCoordinates = false;
         _logger.LogInformation("Layer visibility reset to defaults");
+        Notify();
     }
 
     #endregion

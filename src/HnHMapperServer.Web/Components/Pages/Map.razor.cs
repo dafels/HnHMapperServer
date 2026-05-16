@@ -55,6 +55,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     [Inject] private IBrowserViewportService BrowserViewportService { get; set; } = default!;
 
     // New specialized services
+    [Inject] private IConfiguration Configuration { get; set; } = default!;
     [Inject] private CharacterTrackingService CharacterTracking { get; set; } = default!;
     [Inject] private MarkerStateService MarkerState { get; set; } = default!;
     [Inject] private CustomMarkerStateService CustomMarkerState { get; set; } = default!;
@@ -72,7 +73,8 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
     #region Component References
 
-    private MapView? mapView;
+    private IMapView? mapView;
+    private bool useNativeMap;
 
     #endregion
 
@@ -263,6 +265,21 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             if (int.TryParse(query["y"], out var y)) GridY = y;
             if (int.TryParse(query["z"], out var z)) Zoom = z;
             if (int.TryParse(query["character"], out var characterId)) CharacterId = characterId;
+
+            // Feature flag: native Blazor map renderer. Querystring override beats config.
+            var configFlag = Configuration.GetValue<bool>("Map:EnableNativeMap");
+            useNativeMap = query["nativeMap"] == "1" ? true
+                : query["nativeMap"] == "0" ? false
+                : configFlag;
+
+            // In native mode, plug in a no-op IJSObjectReference so the page's existing
+            // Leaflet interop call sites (52 of them) silently no-op instead of NREing.
+            // The lazy-load `??=` idiom only loads when leafletModule is null, so this
+            // prevents the real Leaflet module from ever being imported.
+            if (useNativeMap)
+            {
+                leafletModule = new HnHMapperServer.Web.Components.Map.NoOpJSObjectReference();
+            }
 
             Logger.LogInformation("URL Parameters parsed - MapId: {MapId}, GridX: {GridX}, GridY: {GridY}, Zoom: {Zoom}, CharacterId: {CharacterId}",
                 MapId, GridX, GridY, Zoom, CharacterId);
@@ -556,9 +573,9 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         sseDotnetRef?.Dispose();
         sseDotnetRef = null;
 
-        if (mapView != null)
+        if (mapView is IAsyncDisposable mvDisposable)
         {
-            await mapView.DisposeAsync();
+            await mvDisposable.DisposeAsync();
         }
     }
 
@@ -880,7 +897,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         {
             try
             {
-                leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+                if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
                 drawingPointsCount = await leafletModule.InvokeAsync<int>("getDrawingPointsCount");
             }
             catch (Exception ex)
@@ -924,7 +941,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         if (mapView != null)
         {
-            leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+            if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
             var success = await leafletModule.InvokeAsync<bool>("jumpToLatestPing");
 
             if (!success)
@@ -1280,7 +1297,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         state.ShowClustering = LayerVisibility.ShowClustering;
 
         // Sync markers visibility to JS (triggers rebuildAllMarkers for efficient batch update)
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeAsync<bool>("setShowMarkersEnabled", LayerVisibility.ShowMarkers);
 
         await SyncLayerVisibility();
@@ -1505,7 +1522,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         try
         {
-            leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+            if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
 
             // IMPORTANT:
             // We explicitly set TRUE *and* FALSE values here to avoid stale JS module state across navigations.
@@ -1558,7 +1575,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         try
         {
-            leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+            if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
             myCharacterName = await leafletModule.InvokeAsync<string?>("getMyCharacter");
             Logger.LogDebug("Loaded my character from localStorage: {Name}", myCharacterName ?? "(none)");
 
@@ -1578,7 +1595,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         try
         {
-            leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+            if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
             await leafletModule.InvokeVoidAsync("setMyCharacter", characterName);
             myCharacterName = characterName;
 
@@ -2758,7 +2775,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
         if (mapView != null)
         {
-            leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+            if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
             await leafletModule.InvokeVoidAsync("toggleCustomMarkers", show);
         }
 
@@ -2769,7 +2786,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     private async Task TogglePClaim()
     {
         showPClaim = !showPClaim;
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "ClaimFloor", showPClaim);
         await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "ClaimOutline", showPClaim);
         await SaveToggleStatesAsync();
@@ -2779,7 +2796,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     private async Task ToggleVClaim()
     {
         showVClaim = !showVClaim;
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "VillageFloor", showVClaim);
         await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "VillageOutline", showVClaim);
         await SaveToggleStatesAsync();
@@ -2789,7 +2806,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     private async Task ToggleProvince()
     {
         showProvince = !showProvince;
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "Province0", showProvince);
         await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "Province1", showProvince);
         await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "Province2", showProvince);
@@ -2801,7 +2818,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
     private async Task ToggleThingwallHighlight()
     {
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         var newState = !showThingwallHighlight;
         var success = await leafletModule.InvokeAsync<bool>("setThingwallHighlightEnabled", newState);
         if (success)
@@ -2814,7 +2831,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
     private async Task ToggleQuestGiverHighlight()
     {
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         var newState = !showQuestGiverHighlight;
         var success = await leafletModule.InvokeAsync<bool>("setQuestGiverHighlightEnabled", newState);
         if (success)
@@ -2827,7 +2844,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
     private async Task ToggleMarkerFilterMode()
     {
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         var newState = !showMarkerFilterMode;
         var success = await leafletModule.InvokeAsync<bool>("setMarkerFilterModeEnabled", newState);
         if (success)
@@ -2850,7 +2867,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     private async Task ToggleRoads()
     {
         showRoads = !showRoads;
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeVoidAsync("toggleRoads", showRoads);
         await SaveToggleStatesAsync();
         await InvokeAsync(StateHasChanged);
@@ -2880,7 +2897,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         if (road != null)
         {
             allRoads.Remove(road);
-            leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+            if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
             await leafletModule.InvokeVoidAsync("removeRoad", deleteEvent.Id);
             await InvokeAsync(StateHasChanged);
         }
@@ -2894,7 +2911,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     public async Task OnOverlayUpdated(OverlayEventDto overlayEvent)
     {
         // Invalidate the overlay cache at the specific coordinate and trigger refetch
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeVoidAsync("invalidateOverlayAtCoord",
             overlayEvent.MapId,
             overlayEvent.CoordX,
@@ -2910,7 +2927,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         if (road == null) return;
         HideAllContextMenus();
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeVoidAsync("selectRoad", road.Id);
     }
 
@@ -2970,7 +2987,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     private async Task HandleJumpToRoad(int roadId)
     {
         HideAllContextMenus();
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeVoidAsync("jumpToRoad", roadId);
     }
 
@@ -2997,7 +3014,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         HideAllContextMenus();
         isDrawingRoad = true;
         drawingPointsCount = 0;
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeVoidAsync("startDrawingRoad");
         Snackbar.Add("Click to add waypoints. Right-click to finish or cancel.", Severity.Info);
         await InvokeAsync(StateHasChanged);
@@ -3006,7 +3023,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     private async Task HandleFinishRoadFromMenu()
     {
         HideAllContextMenus();
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeVoidAsync("finishDrawingRoadFromMenu");
         // Note: JsOnRoadDrawingComplete will be called by JS after finishing
     }
@@ -3016,7 +3033,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         HideAllContextMenus();
         isDrawingRoad = false;
         drawingPointsCount = 0;
-        leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+        if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
         await leafletModule.InvokeVoidAsync("cancelDrawingRoad");
         Snackbar.Add("Road drawing cancelled", Severity.Info);
         await InvokeAsync(StateHasChanged);
@@ -3092,7 +3109,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
                 allRoads = roadDtos?.Select(RoadViewModel.FromDto).ToList() ?? new();
 
                 // Update map display
-                leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+                if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
                 await leafletModule.InvokeVoidAsync("clearAllRoads");
                 foreach (var road in allRoads.Where(r => !r.Hidden))
                 {
@@ -3156,7 +3173,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
         try
         {
-            leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+            if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
 
             // Call JavaScript to find route
             var routeResult = await leafletModule.InvokeAsync<RouteResult>("findRoute",
@@ -3205,7 +3222,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
         try
         {
-            leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+            if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
             await leafletModule.InvokeVoidAsync("clearRouteHighlight");
         }
         catch (Exception ex)
@@ -3220,7 +3237,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         try
         {
-            leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+            if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
             await leafletModule.InvokeVoidAsync("jumpToRoad", roadId);
         }
         catch (Exception ex)
@@ -3451,7 +3468,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             if (mapView != null)
             {
                 Console.WriteLine("[Map.razor.cs] mapView is not null, getting leaflet module");
-                leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+                if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
                 Console.WriteLine("[Map.razor.cs] Calling onPingCreated in JS");
                 await leafletModule.InvokeVoidAsync("onPingCreated", pingData);
                 Console.WriteLine("[Map.razor.cs] onPingCreated completed");
@@ -3485,7 +3502,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             // Forward to JavaScript ping manager
             if (mapView != null)
             {
-                leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+                if (!useNativeMap) leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
                 await leafletModule.InvokeVoidAsync("onPingDeleted", deleteData.Id);
 
                 // Check if there are still active pings

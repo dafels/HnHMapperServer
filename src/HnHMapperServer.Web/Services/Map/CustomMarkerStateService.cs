@@ -24,6 +24,14 @@ public class CustomMarkerStateService
         _logger = logger;
     }
 
+    /// <summary>
+    /// Fired whenever the underlying marker collection changes (set/add/update/remove/clear).
+    /// Subscribers should re-render.
+    /// </summary>
+    public event Action? OnChange;
+
+    private void Notify() => OnChange?.Invoke();
+
     #region Public Properties
 
     /// <summary>
@@ -48,6 +56,7 @@ public class CustomMarkerStateService
         _allCustomMarkers = markers;
         _customMarkersRendered = false; // Need to re-render
         _logger.LogDebug("Custom markers loaded: {Count} markers", markers.Count);
+        Notify();
     }
 
     /// <summary>
@@ -91,6 +100,7 @@ public class CustomMarkerStateService
             .ToList();
 
         _logger.LogDebug("Custom marker added/updated: Id={Id}, Title={Title}", marker.Id, marker.Title);
+        Notify();
     }
 
     /// <summary>
@@ -102,6 +112,7 @@ public class CustomMarkerStateService
         if (removed > 0)
         {
             _logger.LogDebug("Custom marker removed: Id={Id}", markerId);
+            Notify();
             return true;
         }
         return false;
@@ -115,6 +126,7 @@ public class CustomMarkerStateService
         _allCustomMarkers.Clear();
         _customMarkersRendered = false;
         _logger.LogDebug("All custom markers cleared");
+        Notify();
     }
 
     #endregion
