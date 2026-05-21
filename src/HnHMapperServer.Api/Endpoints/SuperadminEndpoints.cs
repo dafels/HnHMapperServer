@@ -3,6 +3,7 @@ using HnHMapperServer.Core.Enums;
 using HnHMapperServer.Core.Extensions;
 using HnHMapperServer.Core.Interfaces;
 using HnHMapperServer.Infrastructure.Data;
+using HnHMapperServer.Infrastructure.Identity;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
@@ -88,6 +89,9 @@ public static class SuperadminEndpoints
 
         // POST /api/superadmin/users/{userId}/assign-tenant - Assign user to tenant
         group.MapPost("/users/{userId}/assign-tenant", AssignUserToTenant);
+
+        // DELETE /api/superadmin/users/{userId}/unassigned - Hard-delete an unassigned user
+        group.MapDelete("/users/{userId}/unassigned", DeleteUnassignedUser);
 
         // === Map & Marker Monitoring ===
 
@@ -280,7 +284,7 @@ public static class SuperadminEndpoints
     private static async Task<IResult> GetTenantDetails(
         string tenantId,
         ApplicationDbContext db,
-        UserManager<IdentityUser> userManager)
+        UserManager<ApplicationUser> userManager)
     {
         var tenant = await db.Tenants
             .IgnoreQueryFilters()
@@ -774,7 +778,7 @@ public static class SuperadminEndpoints
         string tenantId,
         string userId,
         ResetPasswordDto dto,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         IAuditService auditService,
         HttpContext context,
         ILogger<Program> logger)
@@ -838,7 +842,7 @@ public static class SuperadminEndpoints
         string tenantId,
         string userId,
         ApplicationDbContext db,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         IAuditService auditService,
         HttpContext context,
         ILogger<Program> logger)
@@ -910,7 +914,7 @@ public static class SuperadminEndpoints
     /// </summary>
     private static async Task<IResult> GetUnassignedUsers(
         ApplicationDbContext db,
-        UserManager<IdentityUser> userManager)
+        UserManager<ApplicationUser> userManager)
     {
         try
         {
@@ -931,7 +935,8 @@ public static class SuperadminEndpoints
                 {
                     userId = u.Id,
                     username = u.UserName,
-                    registeredAt = u.LockoutEnd // Using as proxy for registration date if available
+                    discordName = u.DiscordName,
+                    registeredAt = u.CreatedAt
                 })
                 .ToList();
 
@@ -940,6 +945,76 @@ public static class SuperadminEndpoints
         catch (Exception ex)
         {
             return Results.Problem($"Failed to get unassigned users: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// DELETE /api/superadmin/users/{userId}/unassigned
+    /// Hard-deletes a user that is not assigned to any tenant. Returns 409 if the user
+    /// has any tenant assignments (those must be removed via RemoveUserFromTenant first).
+    /// </summary>
+    private static async Task<IResult> DeleteUnassignedUser(
+        string userId,
+        ApplicationDbContext db,
+        UserManager<ApplicationUser> userManager,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var user = await userManager.FindByIdAsync(userId);
+            if (user == null)
+                return Results.NotFound(new { error = "User not found" });
+
+            var hasAssignments = await db.TenantUsers
+                .IgnoreQueryFilters()
+                .AnyAsync(tu => tu.UserId == userId);
+
+            if (hasAssignments)
+                return Results.Conflict(new { error = "User has tenant assignments. Remove from all tenants first." });
+
+            // Defensive cleanup: drop any orphan tokens (shouldn't exist for unassigned users, but be safe)
+            var orphanTokens = await db.Tokens
+                .IgnoreQueryFilters()
+                .Where(t => t.UserId == userId)
+                .ToListAsync();
+            if (orphanTokens.Count > 0)
+                db.Tokens.RemoveRange(orphanTokens);
+
+            await db.SaveChangesAsync();
+
+            var username = user.UserName ?? userId;
+            var discordName = user.DiscordName ?? string.Empty;
+
+            var delete = await userManager.DeleteAsync(user);
+            if (!delete.Succeeded)
+            {
+                var errors = string.Join(", ", delete.Errors.Select(e => e.Description));
+                logger.LogError("Failed to delete unassigned user {UserId}: {Errors}", userId, errors);
+                return Results.Problem($"Failed to delete user: {errors}");
+            }
+
+            var adminUsername = context.User.Identity?.Name ?? "Unknown";
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = null,
+                UserId = adminUsername,
+                Action = "SuperAdminDeletedUnassignedUser",
+                EntityType = "User",
+                EntityId = userId,
+                OldValue = $"Username={username}, Discord={discordName}",
+                NewValue = "User deleted"
+            });
+
+            logger.LogInformation("SuperAdmin {Admin} deleted unassigned user {UserId} ({Username})",
+                adminUsername, userId, username);
+            return Results.Ok(new { message = "User deleted" });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error deleting unassigned user {UserId}", userId);
+            return Results.Problem("Failed to delete user");
         }
     }
 
@@ -952,7 +1027,7 @@ public static class SuperadminEndpoints
     /// Lists all users with the SuperAdmin role
     /// </summary>
     private static async Task<IResult> GetAllSuperAdmins(
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         ILogger<Program> logger)
     {
         try
@@ -981,7 +1056,7 @@ public static class SuperadminEndpoints
     /// </summary>
     private static async Task<IResult> GrantSuperAdmin(
         string userId,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         IAuditService auditService,
         HttpContext context,
         ILogger<Program> logger)
@@ -1042,7 +1117,7 @@ public static class SuperadminEndpoints
     /// </summary>
     private static async Task<IResult> RevokeSuperAdmin(
         string userId,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         IAuditService auditService,
         HttpContext context,
         ILogger<Program> logger)
@@ -1115,7 +1190,7 @@ public static class SuperadminEndpoints
     /// Lists all users in the system (for SuperAdmin role management)
     /// </summary>
     private static async Task<IResult> GetAllUsers(
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         ILogger<Program> logger)
     {
         try
@@ -1645,7 +1720,7 @@ public static class SuperadminEndpoints
         string userId,
         AssignUserToTenantDto dto,
         ApplicationDbContext db,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         ILogger<Program> logger,
         ClaimsPrincipal adminUser)
     {

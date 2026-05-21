@@ -8,6 +8,7 @@ using HnHMapperServer.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using HnHMapperServer.Services.Interfaces;
 using HnHMapperServer.Core.Models;
+using HnHMapperServer.Infrastructure.Identity;
 using HnHMapperServer.Core.Enums;
 using HnHMapperServer.Core.Extensions;
 using HnHMapperServer.Core.Constants;
@@ -44,8 +45,8 @@ public static class IdentityEndpoints
 
 	private static async Task<IResult> Login(
 		[FromBody] LoginRequest request,
-		SignInManager<IdentityUser> signInManager,
-		UserManager<IdentityUser> userManager,
+		SignInManager<ApplicationUser> signInManager,
+		UserManager<ApplicationUser> userManager,
 		ApplicationDbContext db)
 	{
 		if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
@@ -106,7 +107,7 @@ public static class IdentityEndpoints
 		});
 	}
 
-	private static async Task<IResult> Logout(SignInManager<IdentityUser> signInManager)
+	private static async Task<IResult> Logout(SignInManager<ApplicationUser> signInManager)
 	{
 		await signInManager.SignOutAsync();
 		return Results.Ok();
@@ -114,7 +115,7 @@ public static class IdentityEndpoints
 
 	private static async Task<IResult> Register(
 		[FromBody] RegisterRequest request,
-		UserManager<IdentityUser> userManager,
+		UserManager<ApplicationUser> userManager,
 		IConfiguration configuration,
 		IInvitationService invitationService,
 		ApplicationDbContext db)
@@ -130,6 +131,10 @@ public static class IdentityEndpoints
 		// Password validation (6+ chars minimum)
 		if (request.Password.Length < 6)
 			return Results.BadRequest(new { error = "Password must be at least 6 characters long" });
+
+		var discordName = request.DiscordName?.Trim() ?? string.Empty;
+		if (discordName.Length < 2 || discordName.Length > 32)
+			return Results.BadRequest(new { error = "Discord name is required (2-32 characters)" });
 
 		// Validate invitation code (if provided)
 		bool hasInvitation = !string.IsNullOrWhiteSpace(request.InviteCode);
@@ -155,10 +160,12 @@ public static class IdentityEndpoints
 			return Results.Conflict(new { error = "Username already exists" });
 
 		// Create new user with Identity
-		var user = new IdentityUser
+		var user = new ApplicationUser
 		{
 			UserName = request.Username,
-			Email = string.Empty
+			Email = string.Empty,
+			DiscordName = discordName,
+			CreatedAt = DateTime.UtcNow
 		};
 		var result = await userManager.CreateAsync(user, request.Password);
 
@@ -226,7 +233,7 @@ public static class IdentityEndpoints
 	/// </summary>
 	private static async Task<IResult> GetUserTenants(
 		ClaimsPrincipal user,
-		UserManager<IdentityUser> userManager,
+		UserManager<ApplicationUser> userManager,
 		ApplicationDbContext db)
 	{
 		var userName = user.Identity?.Name;
@@ -267,8 +274,8 @@ public static class IdentityEndpoints
 	private static async Task<IResult> SelectTenant(
 		[FromBody] SelectTenantRequest request,
 		ClaimsPrincipal user,
-		UserManager<IdentityUser> userManager,
-		SignInManager<IdentityUser> signInManager,
+		UserManager<ApplicationUser> userManager,
+		SignInManager<ApplicationUser> signInManager,
 		ApplicationDbContext db)
 	{
 		if (string.IsNullOrWhiteSpace(request.TenantId))
@@ -338,7 +345,7 @@ public static class IdentityEndpoints
 	private static async Task<IResult> GetOwnTokens(
 		ClaimsPrincipal user,
 		ApplicationDbContext db,
-		UserManager<IdentityUser> userManager,
+		UserManager<ApplicationUser> userManager,
 		IConfigRepository configRepository,
 		HttpContext httpContext)
 	{
@@ -386,7 +393,7 @@ public static class IdentityEndpoints
 	private static async Task<IResult> CreateOwnToken(
 		ClaimsPrincipal user,
 		ApplicationDbContext db,
-		UserManager<IdentityUser> userManager,
+		UserManager<ApplicationUser> userManager,
 		IConfigRepository configRepository,
 		ITokenService tokenService)
 	{
@@ -420,7 +427,7 @@ public static class IdentityEndpoints
 	private static async Task<IResult> ChangePassword(
 		[FromBody] ChangePasswordRequest request,
 		ClaimsPrincipal user,
-		UserManager<IdentityUser> userManager,
+		UserManager<ApplicationUser> userManager,
 		ILogger<object> logger)
 	{
 		// Validate inputs
@@ -472,6 +479,7 @@ public static class IdentityEndpoints
 		public string Username { get; set; } = string.Empty;
 		public string Password { get; set; } = string.Empty;
 		public string InviteCode { get; set; } = string.Empty;
+		public string DiscordName { get; set; } = string.Empty;
 	}
 
 	public sealed class SelectTenantRequest

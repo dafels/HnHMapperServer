@@ -1,4 +1,5 @@
 using HnHMapperServer.Core.Models;
+using HnHMapperServer.Infrastructure.Identity;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
@@ -6,7 +7,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace HnHMapperServer.Infrastructure.Data;
 
-public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, IdentityRole, string>
+public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, IdentityRole, string>
 {
     private readonly IHttpContextAccessor? _httpContextAccessor;
 
@@ -240,7 +241,7 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
                 .HasForeignKey(e => e.TenantId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            entity.HasOne<IdentityUser>()
+            entity.HasOne<ApplicationUser>()
                 .WithMany()
                 .HasForeignKey(e => e.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
@@ -430,7 +431,7 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
                 .HasForeignKey(e => e.TenantId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            entity.HasOne<IdentityUser>()
+            entity.HasOne<ApplicationUser>()
                 .WithMany()
                 .HasForeignKey(e => e.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
@@ -519,7 +520,7 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
                 .OnDelete(DeleteBehavior.Cascade);
 
             // Foreign key to AspNetUsers (nullable)
-            entity.HasOne<IdentityUser>()
+            entity.HasOne<ApplicationUser>()
                 .WithMany()
                 .HasForeignKey(e => e.UserId)
                 .OnDelete(DeleteBehavior.Cascade)
@@ -556,7 +557,7 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
                 .OnDelete(DeleteBehavior.Cascade);
 
             // Foreign key to AspNetUsers
-            entity.HasOne<IdentityUser>()
+            entity.HasOne<ApplicationUser>()
                 .WithMany()
                 .HasForeignKey(e => e.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
@@ -610,7 +611,7 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
             entity.HasIndex(e => new { e.UserId, e.NotificationType }).IsUnique();
 
             // Foreign key to AspNetUsers
-            entity.HasOne<IdentityUser>()
+            entity.HasOne<ApplicationUser>()
                 .WithMany()
                 .HasForeignKey(e => e.UserId)
                 .OnDelete(DeleteBehavior.Cascade);

@@ -4,6 +4,7 @@ using HnHMapperServer.Core.Extensions;
 using HnHMapperServer.Core.Constants;
 using HnHMapperServer.Core.Interfaces;
 using HnHMapperServer.Infrastructure.Data;
+using HnHMapperServer.Infrastructure.Identity;
 using HnHMapperServer.Services.Interfaces;
 using HnHMapperServer.Services.Services;
 using Microsoft.AspNetCore.Identity;
@@ -94,7 +95,7 @@ public static class TenantAdminEndpoints
     private static async Task<IResult> GetTenantUsers(
         string tenantId,
         ApplicationDbContext db,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         HttpContext context)
     {
         // Verify user has access to this tenant (unless SuperAdmin)
@@ -143,7 +144,7 @@ public static class TenantAdminEndpoints
     private static async Task<IResult> GetPendingUsers(
         string tenantId,
         ApplicationDbContext db,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         HttpContext context,
         ILogger<Program> logger)
     {
@@ -292,7 +293,7 @@ public static class TenantAdminEndpoints
         string userId,
         ResetUserPasswordDto dto,
         ApplicationDbContext db,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         HttpContext context,
         IAuditService auditService,
         ILogger<Program> logger)
@@ -646,7 +647,7 @@ public static class TenantAdminEndpoints
     private static async Task<IResult> GetTenantAuditLogs(
         string tenantId,
         IAuditService auditService,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         HttpContext context,
         ILogger<Program> logger,
         string? userId = null,
@@ -721,7 +722,7 @@ public static class TenantAdminEndpoints
     private static async Task<IResult> GetTenantTokens(
         string tenantId,
         ApplicationDbContext db,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         HttpContext context,
         IConfigRepository configRepository,
         ILogger<Program> logger)

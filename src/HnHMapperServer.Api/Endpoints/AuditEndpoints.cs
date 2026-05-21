@@ -1,6 +1,7 @@
 using HnHMapperServer.Core.Constants;
 using HnHMapperServer.Core.DTOs;
 using HnHMapperServer.Infrastructure.Data;
+using HnHMapperServer.Infrastructure.Identity;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
@@ -35,7 +36,7 @@ public static class AuditEndpoints
     private static async Task<IResult> GetAllAuditLogs(
         IAuditService auditService,
         ApplicationDbContext db,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         string? tenantId = null,
         string? userId = null,
         string? action = null,
@@ -107,7 +108,7 @@ public static class AuditEndpoints
         string tenantId,
         IAuditService auditService,
         ApplicationDbContext db,
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         HttpContext context,
         string? userId = null,
         string? action = null,

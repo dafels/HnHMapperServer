@@ -3,6 +3,7 @@ using HnHMapperServer.Web.Services;
 using HnHMapperServer.Core.Enums;
 using HnHMapperServer.Core.Extensions;
 using HnHMapperServer.Core.Constants;
+using HnHMapperServer.Infrastructure.Identity;
 using MudBlazor.Services;
 using MudBlazor;
 using Microsoft.AspNetCore.Components.Authorization;
@@ -239,8 +240,8 @@ builder.Services.AddAuthentication(IdentityConstants.ApplicationScheme)
             OnValidatePrincipal = async context =>
             {
                 var services = context.HttpContext.RequestServices;
-                var userManager = services.GetRequiredService<UserManager<IdentityUser>>();
-                var signInManager = services.GetRequiredService<SignInManager<IdentityUser>>();
+                var userManager = services.GetRequiredService<UserManager<ApplicationUser>>();
+                var signInManager = services.GetRequiredService<SignInManager<ApplicationUser>>();
                 var identityOptions = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<IdentityOptions>>().Value;
 
                 var principal = context.Principal;
@@ -279,7 +280,7 @@ builder.Services.AddAuthentication(IdentityConstants.ApplicationScheme)
 
 // Add IdentityCore for credential validation against shared DB
 builder.Services
-    .AddIdentityCore<IdentityUser>(options =>
+    .AddIdentityCore<ApplicationUser>(options =>
     {
         // Password policy: 6+ characters minimum (same as API)
         options.Password.RequireDigit = false;
@@ -304,7 +305,7 @@ builder.Services.Configure<SecurityStampValidatorOptions>(options =>
 builder.Services.AddAuthorization();
 
 // Add revalidating authentication state provider for Blazor (checks security stamps)
-builder.Services.AddScoped<AuthenticationStateProvider, HnHMapperServer.Web.Services.RevalidatingIdentityAuthenticationStateProvider<IdentityUser>>();
+builder.Services.AddScoped<AuthenticationStateProvider, HnHMapperServer.Web.Services.RevalidatingIdentityAuthenticationStateProvider<ApplicationUser>>();
 
 // Add authentication delegating handler for API calls
 builder.Services.AddTransient<HnHMapperServer.Web.Services.AuthenticationDelegatingHandler>();
@@ -1032,8 +1033,8 @@ app.MapGet("/Account/Login", () => Results.Redirect("/login")).DisableAntiforger
 // Local login endpoint (validates via Identity, signs shared cookie for Web domain)
 app.MapPost("/api/login", async (
     HttpContext context,
-    UserManager<IdentityUser> userManager,
-    SignInManager<IdentityUser> signInManager,
+    UserManager<ApplicationUser> userManager,
+    SignInManager<ApplicationUser> signInManager,
     HnHMapperServer.Infrastructure.Data.ApplicationDbContext db) =>
 {
     string username = string.Empty;

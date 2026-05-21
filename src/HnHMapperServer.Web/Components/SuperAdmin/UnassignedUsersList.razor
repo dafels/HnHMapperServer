@@ -40,6 +40,7 @@
                       Class="mt-2">
                 <HeaderContent>
                     <MudTh>Username</MudTh>
+                    <MudTh>Discord</MudTh>
                     <MudTh>Registered</MudTh>
                     <MudTh Style="text-align: right;">Actions</MudTh>
                 </HeaderContent>
@@ -47,6 +48,16 @@
                     <MudTd DataLabel="Username">
                         <MudIcon Icon="@Icons.Material.Filled.Person" Size="Size.Small" Class="me-2" />
                         @context.Username
+                    </MudTd>
+                    <MudTd DataLabel="Discord">
+                        @if (!string.IsNullOrWhiteSpace(context.DiscordName))
+                        {
+                            <MudText Typo="Typo.body2">@context.DiscordName</MudText>
+                        }
+                        else
+                        {
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">—</MudText>
+                        }
                     </MudTd>
                     <MudTd DataLabel="Registered">
                         @if (context.RegisteredAt.HasValue)
@@ -59,13 +70,22 @@
                         }
                     </MudTd>
                     <MudTd DataLabel="Actions" Style="text-align: right;">
-                        <MudButton Variant="Variant.Filled"
-                                   Color="Color.Primary"
-                                   Size="Size.Small"
-                                   OnClick="@(() => OpenAssignDialog(context))"
-                                   StartIcon="@Icons.Material.Filled.PersonAdd">
-                            Assign to Tenant
-                        </MudButton>
+                        <MudStack Row="true" Spacing="2" Justify="Justify.FlexEnd">
+                            <MudButton Variant="Variant.Filled"
+                                       Color="Color.Primary"
+                                       Size="Size.Small"
+                                       OnClick="@(() => OpenAssignDialog(context))"
+                                       StartIcon="@Icons.Material.Filled.PersonAdd">
+                                Assign to Tenant
+                            </MudButton>
+                            <MudButton Variant="Variant.Outlined"
+                                       Color="Color.Error"
+                                       Size="Size.Small"
+                                       OnClick="@(() => ConfirmAndDeleteUser(context))"
+                                       StartIcon="@Icons.Material.Filled.Delete">
+                                Remove
+                            </MudButton>
+                        </MudStack>
                     </MudTd>
                 </RowTemplate>
             </MudTable>
@@ -167,6 +187,39 @@
         {
             // Refresh the list after successful assignment
             await LoadUnassignedUsers();
+        }
+    }
+
+    private async Task ConfirmAndDeleteUser(UnassignedUserDto user)
+    {
+        var confirmed = await DialogService.ShowMessageBox(
+            "Remove user?",
+            $"Permanently delete user '{user.Username}'? This cannot be undone.",
+            yesText: "Delete",
+            cancelText: "Cancel");
+
+        if (confirmed != true)
+            return;
+
+        try
+        {
+            var apiClient = HttpClientFactory.CreateClient("API");
+            var response = await apiClient.DeleteAsync($"/api/superadmin/users/{user.UserId}/unassigned");
+
+            if (response.IsSuccessStatusCode)
+            {
+                Snackbar.Add($"User '{user.Username}' removed", Severity.Success);
+                await LoadUnassignedUsers();
+            }
+            else
+            {
+                var body = await response.Content.ReadAsStringAsync();
+                Snackbar.Add($"Failed to remove user: {response.StatusCode} {body}", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Error removing user: {ex.Message}", Severity.Error);
         }
     }
 }

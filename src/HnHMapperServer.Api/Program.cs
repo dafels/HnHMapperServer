@@ -18,6 +18,7 @@ using HnHMapperServer.Services.Services;
 using Serilog.Events;
 using SixLabors.ImageSharp;
 using HnHMapperServer.Core.Models;
+using HnHMapperServer.Infrastructure.Identity;
 using System.Text.Json;
 using System.Threading.RateLimiting;
 using HnHMapperServer.Core.Constants;
@@ -238,7 +239,7 @@ builder.Services.AddDataProtection()
 
 // Add ASP.NET Core Identity with roles and EF stores
 builder.Services
-    .AddIdentity<IdentityUser, IdentityRole>(options =>
+    .AddIdentity<ApplicationUser, IdentityRole>(options =>
     {
         options.User.RequireUniqueEmail = false;
         // Password policy: 6+ characters minimum
@@ -550,7 +551,7 @@ using (var scope = app.Services.CreateScope())
     // Seed Identity roles and optional bootstrap admin
     var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
     var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
-    var userManager = scope.ServiceProvider.GetRequiredService<UserManager<IdentityUser>>();
+    var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
     var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
 
     // Seed Identity roles (including "Users" for admin-lite user management and "SuperAdmin" for multi-tenancy)
@@ -595,7 +596,7 @@ using (var scope = app.Services.CreateScope())
         var user = await userManager.FindByNameAsync(adminUser);
         if (user == null)
         {
-            user = new IdentityUser { UserName = adminUser };
+            user = new ApplicationUser { UserName = adminUser };
             var create = await userManager.CreateAsync(user, adminPass);
             if (!create.Succeeded)
             {

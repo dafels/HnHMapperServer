@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Options;
 using Microsoft.EntityFrameworkCore;
 using HnHMapperServer.Infrastructure.Data;
+using HnHMapperServer.Infrastructure.Identity;
 using HnHMapperServer.Core.Constants;
 using HnHMapperServer.Core.Extensions;
 
@@ -12,13 +13,13 @@ namespace HnHMapperServer.Web.Security;
 /// Custom claims principal factory that adds tenant context claims to the user principal.
 /// Called by Identity when deserializing authentication cookies on both Web and API services.
 /// </summary>
-public class TenantClaimsPrincipalFactory : UserClaimsPrincipalFactory<IdentityUser, IdentityRole>
+public class TenantClaimsPrincipalFactory : UserClaimsPrincipalFactory<ApplicationUser, IdentityRole>
 {
     private readonly ApplicationDbContext _db;
     private readonly ILogger<TenantClaimsPrincipalFactory> _logger;
 
     public TenantClaimsPrincipalFactory(
-        UserManager<IdentityUser> userManager,
+        UserManager<ApplicationUser> userManager,
         RoleManager<IdentityRole> roleManager,
         IOptions<IdentityOptions> optionsAccessor,
         ApplicationDbContext db,
@@ -29,7 +30,7 @@ public class TenantClaimsPrincipalFactory : UserClaimsPrincipalFactory<IdentityU
         _logger = logger;
     }
 
-    protected override async Task<ClaimsIdentity> GenerateClaimsAsync(IdentityUser user)
+    protected override async Task<ClaimsIdentity> GenerateClaimsAsync(ApplicationUser user)
     {
         var identity = await base.GenerateClaimsAsync(user);
 

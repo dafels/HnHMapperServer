@@ -43,6 +43,15 @@
                                   HelperText="3-20 alphanumeric characters or underscore"
                                   OnKeyPress="@HandleKeyPress" />
 
+                    <MudTextField @bind-Value="_discordName"
+                                  Label="Discord name"
+                                  Required="true"
+                                  RequiredError="Discord name is required"
+                                  Validation="@(new Func<string, string?>(ValidateDiscordName))"
+                                  Variant="Variant.Outlined"
+                                  HelperText="Your Discord name"
+                                  OnKeyPress="@HandleKeyPress" />
+
                     <MudTextField @bind-Value="_password"
                                   Label="Password"
                                   InputType="InputType.Password"
@@ -155,6 +164,7 @@
     private bool _invitationValid;
 
     private string _username = string.Empty;
+    private string _discordName = string.Empty;
     private string _password = string.Empty;
     private string _confirmPassword = string.Empty;
     private string _errorMessage = string.Empty;
@@ -219,6 +229,18 @@
         return null;
     }
 
+    private string? ValidateDiscordName(string discordName)
+    {
+        if (string.IsNullOrWhiteSpace(discordName))
+            return "Discord name is required";
+
+        var trimmed = discordName.Trim();
+        if (trimmed.Length < 2 || trimmed.Length > 32)
+            return "Discord name must be 2-32 characters";
+
+        return null;
+    }
+
     private string? ValidatePassword(string pwd)
     {
         if (string.IsNullOrWhiteSpace(pwd))
@@ -269,7 +291,8 @@
             {
                 Username = _username,
                 Password = _password,
-                InviteCode = InviteCode
+                InviteCode = InviteCode,
+                DiscordName = _discordName
             };
 
             var response = await httpClient.PostAsJsonAsync("/api/auth/register", registerData);
