@@ -77,6 +77,14 @@ public static class TenantAdminEndpoints
 
         // GET /api/tenants/{tenantId}/maps/import/status - Get import status
         group.MapGet("/maps/import/status", GetImportStatus);
+
+        // POST /api/tenants/{tenantId}/maps/import-public - Import shared PUBLIC map into a tenant map
+        group.MapPost("/maps/import-public", ImportPublicMap)
+            .DisableAntiforgery();
+
+        // GET /api/tenants/{tenantId}/maps/import-public/preview - Detailed pre-import summary
+        // for the confirmation dialog (source maps, tile counts, est. size, quota, bounds).
+        group.MapGet("/maps/import-public/preview", GetPublicImportPreview);
     }
 
     /// <summary>
@@ -1327,6 +1335,263 @@ public static class TenantAdminEndpoints
                     "Keeping temp file for debugging: {TempFile} (will be cleaned up after 7 days)",
                     tempFilePath);
             }
+        }
+    }
+
+    /// <summary>
+    /// GET /api/tenants/{tenantId}/maps/import-public/preview
+    /// Returns a discreet summary of what the PUBLIC map import would do.
+    /// Reads only the PUBLIC artifact (PublicMaps row + on-disk tile sizes + PublicMapGridIndex
+    /// row count) — no cross-tenant DB reads, no source tenant detail.
+    /// </summary>
+    private static async Task<IResult> GetPublicImportPreview(
+        string tenantId,
+        ApplicationDbContext db,
+        IConfiguration configuration,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        // Verify user has access to this tenant (unless SuperAdmin)
+        if (!context.User.IsInRole(AuthorizationConstants.Roles.SuperAdmin))
+        {
+            var currentTenantId = context.User.FindFirst(AuthorizationConstants.ClaimTypes.TenantId)?.Value;
+            if (currentTenantId != tenantId)
+            {
+                return Results.Forbid();
+            }
+        }
+
+        // Resolve the PUBLIC map the import would use — same rules as IPublicMapTenantImportService.
+        var activePublicMaps = await db.PublicMaps
+            .Where(p => p.IsActive)
+            .OrderBy(p => p.CreatedAt)
+            .ToListAsync();
+
+        var publicMap = activePublicMaps.FirstOrDefault(p => p.Id == IPublicMapTenantImportService.PreferredPublicMapId);
+        if (publicMap == null)
+        {
+            if (activePublicMaps.Count == 1)
+            {
+                publicMap = activePublicMaps[0];
+            }
+            else if (activePublicMaps.Count == 0)
+            {
+                return Results.NotFound(new
+                {
+                    error = "no_public_map",
+                    message = "No active PUBLIC map exists to import from."
+                });
+            }
+            else
+            {
+                return Results.Conflict(new
+                {
+                    error = "ambiguous_public_map",
+                    message = $"Multiple active PUBLIC maps exist and none is named '{IPublicMapTenantImportService.PreferredPublicMapId}'. Ask a SuperAdmin to designate the canonical one."
+                });
+            }
+        }
+
+        // Tenant row for quota readout.
+        var tenantRow = await db.Tenants.FirstOrDefaultAsync(t => t.Id == tenantId);
+        if (tenantRow == null)
+        {
+            return Results.NotFound(new { error = "tenant_not_found" });
+        }
+
+        // Snapshot stats: index count + on-disk WebP file count + total bytes.
+        var indexedGridCount = await db.PublicMapGridIndex
+            .CountAsync(g => g.PublicMapId == publicMap.Id);
+
+        var gridStorage = configuration["GridStorage"] ?? "map";
+        var zoom0Dir = Path.Combine(gridStorage, "public", publicMap.Id, "0");
+        int tileCount = 0;
+        long totalBytes = 0;
+        if (Directory.Exists(zoom0Dir))
+        {
+            foreach (var f in Directory.EnumerateFiles(zoom0Dir, "*.webp"))
+            {
+                tileCount++;
+                try { totalBytes += new FileInfo(f).Length; } catch { /* file vanished — ignore */ }
+            }
+        }
+
+        var preview = new PublicMapImportPreview
+        {
+            PublicMapId = publicMap.Id,
+            PublicMapName = publicMap.Name,
+            LastGeneratedAt = publicMap.LastGeneratedAt,
+            MinX = publicMap.MinX,
+            MaxX = publicMap.MaxX,
+            MinY = publicMap.MinY,
+            MaxY = publicMap.MaxY,
+            IndexedGridCount = indexedGridCount,
+            TileCount = tileCount,
+            EstimatedSizeMB = Math.Round(totalBytes / (1024.0 * 1024.0), 2),
+            TenantCurrentStorageMB = tenantRow.CurrentStorageMB,
+            TenantStorageQuotaMB = tenantRow.StorageQuotaMB
+        };
+
+        return Results.Ok(preview);
+    }
+
+    /// <summary>
+    /// POST /api/tenants/{tenantId}/maps/import-public
+    /// Imports the shared PUBLIC map into a tenant map.
+    /// No query param → create a new tenant map (safe default).
+    /// `?targetMapId={int}` → merge into that existing tenant map (advanced).
+    /// Streams SSE progress events using the same envelope as the .hmap import.
+    /// </summary>
+    private static async Task ImportPublicMap(
+        string tenantId,
+        [FromQuery] int? targetMapId,
+        IPublicMapTenantImportService importService,
+        IConfiguration configuration,
+        HttpContext context,
+        IAuditService auditService,
+        ILogger<Program> logger)
+    {
+        // Verify user has access to this tenant (unless SuperAdmin)
+        if (!context.User.IsInRole(AuthorizationConstants.Roles.SuperAdmin))
+        {
+            var currentTenantId = context.User.FindFirst(AuthorizationConstants.ClaimTypes.TenantId)?.Value;
+            if (currentTenantId != tenantId)
+            {
+                context.Response.StatusCode = 403;
+                await context.Response.WriteAsJsonAsync(new { error = "Forbidden" });
+                return;
+            }
+        }
+
+        var gridStorage = configuration["GridStorage"] ?? "map";
+
+        // Set up SSE response (same envelope as ImportHmapFile).
+        context.Response.Headers["Content-Type"] = "text/event-stream";
+        context.Response.Headers["Cache-Control"] = "no-cache";
+        context.Response.Headers["Connection"] = "keep-alive";
+
+        var writer = context.Response.BodyWriter;
+        var clientDisconnected = false;
+
+        async Task SendProgressEvent(HmapImportProgress p)
+        {
+            if (clientDisconnected) return;
+            try
+            {
+                var data = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    phase = p.Phase,
+                    current = p.CurrentItem,
+                    total = p.TotalItems,
+                    itemName = p.CurrentItemName ?? "",
+                    phaseNumber = p.PhaseNumber,
+                    totalPhases = p.TotalPhases,
+                    overallPercent = p.OverallPercent,
+                    elapsedSeconds = p.ElapsedSeconds,
+                    itemsPerSecond = p.ItemsPerSecond
+                });
+                var bytes = System.Text.Encoding.UTF8.GetBytes($"event: progress\ndata: {data}\n\n");
+                await writer.WriteAsync(bytes);
+                await writer.FlushAsync();
+            }
+            catch
+            {
+                clientDisconnected = true;
+            }
+        }
+
+        async Task SendCompleteEvent(object eventData)
+        {
+            if (clientDisconnected) return;
+            try
+            {
+                var data = System.Text.Json.JsonSerializer.Serialize(eventData);
+                var bytes = System.Text.Encoding.UTF8.GetBytes($"event: complete\ndata: {data}\n\n");
+                await writer.WriteAsync(bytes);
+                await writer.FlushAsync();
+            }
+            catch
+            {
+                clientDisconnected = true;
+            }
+        }
+
+        try
+        {
+            var progress = new Progress<HmapImportProgress>(async p => await SendProgressEvent(p));
+
+            // Import continues regardless of client connection - use CancellationToken.None
+            var importResult = await importService.ImportAsync(
+                tenantId,
+                targetMapId,
+                gridStorage,
+                progress,
+                CancellationToken.None);
+
+            if (!importResult.Success)
+            {
+                logger.LogWarning(
+                    "PUBLIC map import failed for tenant {TenantId}: code={Code}, error={Error}",
+                    tenantId, importResult.ErrorCode, importResult.ErrorMessage);
+
+                await SendCompleteEvent(new
+                {
+                    success = false,
+                    errorCode = importResult.ErrorCode,
+                    error = importResult.ErrorMessage
+                });
+                return;
+            }
+
+            // Audit
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = tenantId,
+                Action = "PublicMapImported",
+                EntityType = "Map",
+                EntityId = importResult.TargetMapId.ToString(),
+                NewValue = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    publicMapId = importResult.SourcePublicMapId,
+                    targetMapId = importResult.TargetMapId,
+                    createdNewMap = importResult.CreatedNewMap,
+                    tilesAdded = importResult.TilesAdded,
+                    tilesSkipped = importResult.TilesSkipped,
+                    markersAdded = importResult.MarkersAdded,
+                    markersSkipped = importResult.MarkersSkipped,
+                    bytesAdded = importResult.BytesAdded,
+                    durationSeconds = importResult.Duration.TotalSeconds
+                })
+            });
+
+            logger.LogInformation(
+                "PUBLIC map import succeeded for tenant {TenantId}: map={MapId}, tiles+/{TilesAdded}/-{TilesSkipped}, markers+/{MarkersAdded}/-{MarkersSkipped}",
+                tenantId, importResult.TargetMapId,
+                importResult.TilesAdded, importResult.TilesSkipped,
+                importResult.MarkersAdded, importResult.MarkersSkipped);
+
+            await SendCompleteEvent(new
+            {
+                success = true,
+                targetMapId = importResult.TargetMapId,
+                createdNewMap = importResult.CreatedNewMap,
+                tilesAdded = importResult.TilesAdded,
+                tilesSkipped = importResult.TilesSkipped,
+                markersAdded = importResult.MarkersAdded,
+                markersSkipped = importResult.MarkersSkipped,
+                bytesAdded = importResult.BytesAdded,
+                duration = importResult.Duration.TotalSeconds
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unexpected error during PUBLIC map import for tenant {TenantId}", tenantId);
+            await SendCompleteEvent(new
+            {
+                success = false,
+                errorCode = "unexpected",
+                error = "An unexpected error occurred during import"
+            });
         }
     }
 

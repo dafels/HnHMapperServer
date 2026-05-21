@@ -144,6 +144,7 @@ builder.Services.AddScoped<INotificationService, NotificationService>();  // Not
 builder.Services.AddScoped<ITimerService, TimerService>();  // Timer system
 builder.Services.AddScoped<ITimerWarningService, TimerWarningService>();  // Timer warning tracking
 builder.Services.AddScoped<IHmapImportService, HmapImportService>();  // .hmap file import service
+builder.Services.AddScoped<IPublicMapTenantImportService, PublicMapTenantImportService>();  // public/public → tenant map import
 builder.Services.AddSingleton<ImportLockService>();  // Import lock and cooldown management
 
 // Large tile service for 400x400 WebP tiles (private maps)

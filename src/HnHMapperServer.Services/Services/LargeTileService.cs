@@ -359,7 +359,14 @@ public class LargeTileService : ILargeTileService
         for (int zoom = 0; zoom <= 6; zoom++)
         {
             var cacheKey = $"{tenantId}/{mapId}/{zoom}/{largeTileX}_{largeTileY}";
-            if (_tileCache.TryRemove(cacheKey, out _) || _nonExistentTileCache.TryRemove(cacheKey, out _))
+            // IMPORTANT: must clear BOTH caches unconditionally. A previous `||` short-circuit
+            // here meant that if the positive cache had a stale entry, the negative cache
+            // entry for the same key was never evicted — so the next request returned a
+            // negative-cache hit and 404'd, even though we'd just received an upload that
+            // populated source tiles for that coord.
+            var removedPositive = _tileCache.TryRemove(cacheKey, out _);
+            var removedNegative = _nonExistentTileCache.TryRemove(cacheKey, out _);
+            if (removedPositive || removedNegative)
             {
                 invalidatedCount++;
             }

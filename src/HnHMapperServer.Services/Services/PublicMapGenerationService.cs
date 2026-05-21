@@ -112,11 +112,23 @@ public class PublicMapGenerationService : IPublicMapGenerationService
             // Get all unique coordinates from source tiles
             // The dictionary key uses UNIFIED coordinates (with offsets applied)
             // This allows tiles from different sources to properly overlap/merge
-            var allCoordinates = new Dictionary<(int zoom, int x, int y), (string tenantId, int mapId, string file, long cache)>();
+            // gridId is set for zoom-0 entries (used to populate PublicMapGridIndex below).
+            var allCoordinates = new Dictionary<(int zoom, int x, int y), (string tenantId, int mapId, string file, long cache, string? gridId)>();
 
             foreach (var source in sources)
             {
                 var offset = sourceOffsets.GetValueOrDefault(source.Id, (X: 0, Y: 0));
+
+                // Source grids → (sourceCoord) → gridId, so we can stamp the index row for each
+                // zoom-0 tile we end up picking from this source.
+                var sourceGridList = await dbContext.Grids
+                    .IgnoreQueryFilters()
+                    .Where(g => g.TenantId == source.TenantId && g.Map == source.MapId)
+                    .Select(g => new { g.Id, g.CoordX, g.CoordY })
+                    .ToListAsync();
+                var sourceGridByCoord = sourceGridList
+                    .GroupBy(g => (g.CoordX, g.CoordY))
+                    .ToDictionary(grp => grp.Key, grp => grp.First().Id);
 
                 // Only fetch zoom-0 tiles - we'll generate zoom levels 1-6 from the merged zoom-0 tiles
                 var tiles = await dbContext.Tiles
@@ -139,10 +151,14 @@ public class PublicMapGenerationService : IPublicMapGenerationService
 
                     var key = (tile.Zoom, unifiedX, unifiedY);
 
+                    string? gridId = null;
+                    if (tile.Zoom == 0 && sourceGridByCoord.TryGetValue((tile.CoordX, tile.CoordY), out var gid))
+                        gridId = gid;
+
                     // Keep the newest tile (highest Cache value)
                     if (!allCoordinates.TryGetValue(key, out var existing) || tile.Cache > existing.cache)
                     {
-                        allCoordinates[key] = (tile.TenantId, tile.MapId, tile.File, tile.Cache);
+                        allCoordinates[key] = (tile.TenantId, tile.MapId, tile.File, tile.Cache, gridId);
                     }
                 }
             }
@@ -258,6 +274,10 @@ public class PublicMapGenerationService : IPublicMapGenerationService
 
             // Generate zoom tiles 1-6 from the actually copied zoom-0 tiles
             var zoomTileCount = await GenerateZoomTilesAsync(outputPath, copiedZoom0Coords, publicMap, dbContext);
+
+            // Snapshot the per-coord gridIds into PublicMapGridIndex so tenant imports can reuse
+            // them (preserving character-marker resolution) without ever reading source tenant data.
+            await ReplaceGridIndexAsync(dbContext, publicMapId, allCoordinates, copiedZoom0Coords);
 
             stopwatch.Stop();
 
@@ -649,6 +669,120 @@ public class PublicMapGenerationService : IPublicMapGenerationService
     }
 
     /// <summary>
+    /// Wipe + repopulate <c>PublicMapGridIndex</c> rows for the regenerated PUBLIC map.
+    /// Called by both generation paths so the snapshot is consistent regardless of source type.
+    ///
+    /// Only zoom-0 winning entries with a non-null gridId AND that actually ended up on disk
+    /// (<paramref name="copiedZoom0Coords"/>) get an index row — entries we computed but never
+    /// wrote shouldn't claim a grid identity in the snapshot.
+    /// </summary>
+    private async Task ReplaceGridIndexAsync(
+        ApplicationDbContext dbContext,
+        string publicMapId,
+        Dictionary<(int zoom, int x, int y), (string tenantId, int mapId, string file, long cache, string? gridId)> allCoordinates,
+        HashSet<(int x, int y)> copiedZoom0Coords)
+    {
+        // Wipe stale entries for this public map. Cascade FK + ON DELETE CASCADE would also
+        // clean them up if the PUBLIC itself were deleted, but here we want to leave the
+        // PUBLIC row in place and refresh just the snapshot.
+        await dbContext.PublicMapGridIndex
+            .Where(g => g.PublicMapId == publicMapId)
+            .ExecuteDeleteAsync();
+
+        var now = DateTime.UtcNow;
+        // Build base-coord set from the actual on-disk zoom-0 output tiles so we don't index
+        // sub-grids the consumer can never read back.
+        var diskCoveredBaseCoords = new HashSet<(int x, int y)>();
+        foreach (var (tx, ty) in copiedZoom0Coords)
+        {
+            for (int dx = 0; dx < 4; dx++)
+            for (int dy = 0; dy < 4; dy++)
+                diskCoveredBaseCoords.Add((tx * 4 + dx, ty * 4 + dy));
+        }
+
+        var batch = new List<PublicMapGridIndexEntity>();
+        foreach (var (coord, value) in allCoordinates)
+        {
+            if (coord.zoom != 0) continue;
+            if (value.gridId == null) continue;
+            if (!diskCoveredBaseCoords.Contains((coord.x, coord.y))) continue;
+
+            batch.Add(new PublicMapGridIndexEntity
+            {
+                PublicMapId = publicMapId,
+                UnifiedX = coord.x,
+                UnifiedY = coord.y,
+                GridId = value.gridId,
+                SnapshotCache = value.cache,
+                IndexedAt = now
+            });
+        }
+
+        if (batch.Count > 0)
+        {
+            await dbContext.PublicMapGridIndex.AddRangeAsync(batch);
+            await dbContext.SaveChangesAsync();
+        }
+
+        _logger.LogInformation(
+            "PublicMapGridIndex for {PublicMapId}: wrote {Count} rows",
+            publicMapId, batch.Count);
+    }
+
+    /// <summary>
+    /// HMap-sources variant: writes one index row per rendered HMap grid using GridIdString as
+    /// the opaque content hash. Same wipe-then-repopulate semantics as
+    /// <see cref="ReplaceGridIndexAsync"/>.
+    /// </summary>
+    private async Task ReplaceGridIndexFromHmapAsync(
+        ApplicationDbContext dbContext,
+        string publicMapId,
+        Dictionary<(int x, int y), (HmapGridData grid, int priority, long hmapSourceId)> allGrids,
+        HashSet<(int x, int y)> copiedZoom0Coords)
+    {
+        await dbContext.PublicMapGridIndex
+            .Where(g => g.PublicMapId == publicMapId)
+            .ExecuteDeleteAsync();
+
+        var now = DateTime.UtcNow;
+        var diskCoveredBaseCoords = new HashSet<(int x, int y)>();
+        foreach (var (tx, ty) in copiedZoom0Coords)
+        {
+            for (int dx = 0; dx < 4; dx++)
+            for (int dy = 0; dy < 4; dy++)
+                diskCoveredBaseCoords.Add((tx * 4 + dx, ty * 4 + dy));
+        }
+
+        var batch = new List<PublicMapGridIndexEntity>();
+        foreach (var ((x, y), info) in allGrids)
+        {
+            if (!diskCoveredBaseCoords.Contains((x, y))) continue;
+            if (string.IsNullOrEmpty(info.grid.GridIdString)) continue;
+
+            batch.Add(new PublicMapGridIndexEntity
+            {
+                PublicMapId = publicMapId,
+                UnifiedX = x,
+                UnifiedY = y,
+                GridId = info.grid.GridIdString,
+                // No source Tiles.Cache for HMap sources; use 0 as a sentinel.
+                SnapshotCache = 0,
+                IndexedAt = now
+            });
+        }
+
+        if (batch.Count > 0)
+        {
+            await dbContext.PublicMapGridIndex.AddRangeAsync(batch);
+            await dbContext.SaveChangesAsync();
+        }
+
+        _logger.LogInformation(
+            "PublicMapGridIndex (HMap sources) for {PublicMapId}: wrote {Count} rows",
+            publicMapId, batch.Count);
+    }
+
+    /// <summary>
     /// Start tile generation from HMap sources for a public map.
     /// Renders tiles directly from HMap files instead of copying from tenant maps.
     /// </summary>
@@ -888,6 +1022,9 @@ public class PublicMapGenerationService : IPublicMapGenerationService
 
             // Generate zoom tiles 1-6
             var zoomTileCount = await GenerateZoomTilesAsync(outputPath, copiedZoom0Coords, publicMap, dbContext);
+
+            // Snapshot the per-coord gridIds so tenant imports can reuse them (HMap GridIdString).
+            await ReplaceGridIndexFromHmapAsync(dbContext, publicMapId, allGrids, copiedZoom0Coords);
 
             stopwatch.Stop();
 

@@ -1,0 +1,114 @@
+@using HnHMapperServer.Core.DTOs
+
+<MudDialog>
+    <TitleContent>
+        <MudIcon Icon="@Icons.Material.Filled.Verified" Class="me-2" Style="vertical-align: middle;" />
+        Confirm PUBLIC map import
+    </TitleContent>
+    <DialogContent>
+        <MudStack Spacing="3">
+            <MudAlert Severity="@(TargetIsNew ? Severity.Success : Severity.Warning)" Dense="false">
+                @if (TargetIsNew)
+                {
+                    <MudText Typo="Typo.body2">
+                        <strong>Safe import:</strong> a new map will be created in your tenant. Existing data is never touched.
+                    </MudText>
+                }
+                else
+                {
+                    <MudText Typo="Typo.body2">
+                        Merging into <strong>@TargetMapName</strong>. Existing tiles are kept — only blank coordinates are filled.
+                    </MudText>
+                }
+            </MudAlert>
+
+            <MudStack Spacing="1">
+                <MudText Typo="Typo.subtitle2">@Preview.PublicMapName</MudText>
+                @if (Preview.LastGeneratedAt.HasValue)
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Default">
+                        Generated @Preview.LastGeneratedAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+                    </MudText>
+                }
+            </MudStack>
+
+            <MudList T="string" Dense="true">
+                @if (TargetIsNew)
+                {
+                    <MudListItem T="string" Icon="@Icons.Material.Filled.AddBox" IconColor="Color.Success">
+                        Create a new map in your tenant
+                    </MudListItem>
+                }
+                else
+                {
+                    <MudListItem T="string" Icon="@Icons.Material.Filled.MergeType" IconColor="Color.Warning">
+                        Merge into <strong>@TargetMapName</strong> (existing tiles kept)
+                    </MudListItem>
+                }
+                <MudListItem T="string" Icon="@Icons.Material.Filled.Image">
+                    Copy up to <strong>@Preview.TileCount.ToString("N0")</strong> tiles (~<strong>@Preview.EstimatedSizeMB.ToString("N1") MB</strong>)
+                </MudListItem>
+                <MudListItem T="string" Icon="@Icons.Material.Filled.GridOn">
+                    Regenerate zoom levels 1–6
+                </MudListItem>
+                <MudListItem T="string" Icon="@Icons.Material.Filled.Place">
+                    Copy thingwall markers
+                </MudListItem>
+            </MudList>
+
+            @if (Preview.MinX.HasValue && Preview.MaxX.HasValue && Preview.MinY.HasValue && Preview.MaxY.HasValue)
+            {
+                <MudText Typo="Typo.caption" Color="Color.Default">
+                    Bounds: X [@Preview.MinX, @Preview.MaxX] × Y [@Preview.MinY, @Preview.MaxY]
+                </MudText>
+            }
+
+            <MudPaper Class="pa-2" Elevation="0" Style="background-color: var(--mud-palette-background-grey)">
+                <MudText Typo="Typo.caption">
+                    Storage: <strong>@Preview.TenantCurrentStorageMB.ToString("N1") MB</strong> → up to
+                    <strong>@((Preview.TenantCurrentStorageMB + Preview.EstimatedSizeMB).ToString("N1")) MB</strong>
+                    / @Preview.TenantStorageQuotaMB.ToString("N1") MB
+                    @if (Preview.QuotaWouldExceed)
+                    {
+                        <MudChip T="string" Size="Size.Small" Color="Color.Error" Class="ms-2">Over quota</MudChip>
+                    }
+                </MudText>
+            </MudPaper>
+
+            @if (Preview.QuotaWouldExceed)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true">
+                    This import is estimated to exceed your tenant's storage quota and may be rejected.
+                </MudAlert>
+            }
+
+            @if (!Preview.IndexAvailable)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true">
+                    Grid index missing — character markers won't resolve to the imported map until the PUBLIC map is regenerated.
+                </MudAlert>
+            }
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel" Variant="Variant.Text">Cancel</MudButton>
+        <MudButton OnClick="Confirm"
+                   Variant="Variant.Filled"
+                   Color="@(TargetIsNew ? Color.Success : Color.Warning)"
+                   StartIcon="@(TargetIsNew ? Icons.Material.Filled.AddBox : Icons.Material.Filled.MergeType)"
+                   Disabled="@(!Preview.IndexAvailable)">
+            @(TargetIsNew ? "Create new map and import" : $"Merge into {TargetMapName}")
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private IMudDialogInstance MudDialog { get; set; } = default!;
+
+    [Parameter, EditorRequired] public PublicMapImportPreview Preview { get; set; } = default!;
+    [Parameter, EditorRequired] public bool TargetIsNew { get; set; }
+    [Parameter, EditorRequired] public string TargetMapName { get; set; } = "";
+
+    private void Cancel() => MudDialog.Cancel();
+    private void Confirm() => MudDialog.Close(DialogResult.Ok(true));
+}

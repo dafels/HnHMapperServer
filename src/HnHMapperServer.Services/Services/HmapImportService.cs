@@ -182,6 +182,63 @@ public class HmapImportService : IHmapImportService
     /// <inheritdoc />
     public bool IsImportInProgress() => _globalImportLock.CurrentCount == 0;
 
+    /// <inheritdoc />
+    public Task<bool> TryAcquireGlobalImportLockAsync(CancellationToken cancellationToken = default)
+        => _globalImportLock.WaitAsync(TimeSpan.Zero, cancellationToken);
+
+    /// <inheritdoc />
+    public void ReleaseGlobalImportLock() => _globalImportLock.Release();
+
+    /// <inheritdoc />
+    async Task IHmapImportService.GenerateZoomLevelsForMapAsync(
+        int mapId,
+        string tenantId,
+        string gridStorage,
+        CancellationToken cancellationToken,
+        IEnumerable<(int X, int Y)>? explicitZoom0Coords)
+    {
+        if (explicitZoom0Coords == null)
+        {
+            await GenerateZoomLevelsForMapAsync(mapId, tenantId, gridStorage, tracker: null,
+                currentMapIndex: 1, totalMaps: 1, cancellationToken);
+            return;
+        }
+
+        // Synthesise minimal GridData entries from the explicit coords so the existing chunk
+        // path (which keys off grid.Coord) can be reused without touching its internals.
+        var synthetic = explicitZoom0Coords
+            .Distinct()
+            .Select(c => new GridData
+            {
+                Id = string.Empty,  // not used by the zoom regen — it only reads Coord.
+                Coord = new Coord(c.X, c.Y),
+                Map = mapId,
+                NextUpdate = DateTime.UtcNow,
+                TenantId = tenantId
+            })
+            .ToList();
+
+        if (synthetic.Count == 0) return;
+
+        const int CHUNK_SIZE = 10000;
+        if (synthetic.Count > CHUNK_SIZE)
+        {
+            var chunks = SpatialPartition(synthetic, CHUNK_SIZE);
+            int chunkIndex = 0;
+            foreach (var chunk in chunks)
+            {
+                chunkIndex++;
+                await GenerateZoomLevelsForChunkAsync(mapId, chunk, tenantId, gridStorage, tracker: null,
+                    currentMapIndex: 1, totalMaps: 1, currentChunk: chunkIndex, totalChunks: chunks.Count, cancellationToken);
+            }
+        }
+        else
+        {
+            await GenerateZoomLevelsForChunkAsync(mapId, synthetic, tenantId, gridStorage, tracker: null,
+                currentMapIndex: 1, totalMaps: 1, currentChunk: 1, totalChunks: 1, cancellationToken);
+        }
+    }
+
     public async Task<HmapImportResult> ImportAsync(
         Stream hmapStream,
         string tenantId,

@@ -40,6 +40,41 @@ public interface IHmapImportService
     /// Checks if an import is currently in progress (globally across all tenants)
     /// </summary>
     bool IsImportInProgress();
+
+    /// <summary>
+    /// Attempts to acquire the global import lock without blocking.
+    /// Returns true if acquired, false if another import is already running.
+    /// The caller MUST call <see cref="ReleaseGlobalImportLock"/> in a finally block
+    /// once it has finished the import work. Used by other import implementations
+    /// (e.g. public-map-to-tenant import) to share the single-slot serialization.
+    /// </summary>
+    Task<bool> TryAcquireGlobalImportLockAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Releases the global import lock previously acquired via
+    /// <see cref="TryAcquireGlobalImportLockAsync"/>.
+    /// </summary>
+    void ReleaseGlobalImportLock();
+
+    /// <summary>
+    /// Generates zoom levels 1-6 for the given map. Reads zoom-0 tiles from disk
+    /// (under tenants/{tenantId}/{mapId}/0/), composes 2x2 sub-tiles per parent zoom level,
+    /// writes WebP tiles to disk and inserts <c>Tiles</c> rows. Used by external imports
+    /// (e.g. public-map-to-tenant import) so the same zoom-generation pipeline is shared
+    /// with .hmap imports.
+    ///
+    /// By default the zoom-0 coords are derived from the target tenant's <c>Grids</c> rows
+    /// for <paramref name="mapId"/>. The optional <paramref name="explicitZoom0Coords"/>
+    /// parameter overrides that: when supplied, those coords drive the zoom regeneration
+    /// directly. Callers (like the PUBLIC import) that may have written tiles without
+    /// inserting matching grid rows MUST pass this so zoom 1-6 still gets built.
+    /// </summary>
+    Task GenerateZoomLevelsForMapAsync(
+        int mapId,
+        string tenantId,
+        string gridStorage,
+        CancellationToken cancellationToken = default,
+        IEnumerable<(int X, int Y)>? explicitZoom0Coords = null);
 }
 
 /// <summary>

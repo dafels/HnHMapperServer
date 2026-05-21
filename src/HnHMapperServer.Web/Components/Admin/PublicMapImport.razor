@@ -1,0 +1,597 @@
+@using HnHMapperServer.Core.DTOs
+@using HnHMapperServer.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.Extensions.Logging
+@implements IDisposable
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@inject TenantContextService TenantContext
+@inject AuthenticationStateProvider AuthenticationStateProvider
+@inject ILogger<PublicMapImport> Logger
+
+<MudStack Spacing="4">
+    <MudPaper Class="pa-4" Elevation="0" Outlined="true">
+        <MudStack Spacing="2">
+            <MudText Typo="Typo.h5">
+                <MudIcon Icon="@Icons.Material.Filled.Public" Class="me-2" />
+                Import PUBLIC Map
+            </MudText>
+            <MudText Typo="Typo.body2" Color="Color.Default">
+                Pull the shared <strong>PUBLIC</strong> world map into your tenant. Character positions will resolve to the imported map automatically.
+            </MudText>
+        </MudStack>
+    </MudPaper>
+
+    @if (loadError != null)
+    {
+        <MudAlert Severity="Severity.Error">@loadError</MudAlert>
+    }
+    else if (preview == null)
+    {
+        <MudPaper Class="pa-6 d-flex flex-column align-center" Elevation="0" Outlined="true">
+            <MudProgressCircular Color="Color.Primary" Indeterminate="true" />
+            <MudText Typo="Typo.body2" Class="mt-2">Loading...</MudText>
+        </MudPaper>
+    }
+    else
+    {
+        @* --- Compact summary card (no source detail) --- *@
+        <MudPaper Class="pa-4" Elevation="0" Outlined="true">
+            <MudStack Spacing="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                    <MudText Typo="Typo.h6">@preview.PublicMapName</MudText>
+                    @if (preview.LastGeneratedAt.HasValue)
+                    {
+                        <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined">
+                            Generated @preview.LastGeneratedAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+                        </MudChip>
+                    }
+                </MudStack>
+
+                <MudGrid>
+                    <MudItem xs="6" sm="3">
+                        <MudText Typo="Typo.caption" Color="Color.Default">Tiles</MudText>
+                        <MudText Typo="Typo.h6">@preview.TileCount.ToString("N0")</MudText>
+                    </MudItem>
+                    <MudItem xs="6" sm="3">
+                        <MudText Typo="Typo.caption" Color="Color.Default">Est. size</MudText>
+                        <MudText Typo="Typo.h6">@preview.EstimatedSizeMB.ToString("N1") MB</MudText>
+                    </MudItem>
+                    <MudItem xs="6" sm="3">
+                        <MudText Typo="Typo.caption" Color="Color.Default">Indexed grids</MudText>
+                        <MudText Typo="Typo.h6">@preview.IndexedGridCount.ToString("N0")</MudText>
+                    </MudItem>
+                    <MudItem xs="6" sm="3">
+                        <MudText Typo="Typo.caption" Color="Color.Default">Storage fit</MudText>
+                        @if (preview.QuotaWouldExceed)
+                        {
+                            <MudChip T="string" Size="Size.Small" Color="Color.Error" Icon="@Icons.Material.Filled.Warning">Over quota</MudChip>
+                        }
+                        else
+                        {
+                            <MudChip T="string" Size="Size.Small" Color="Color.Success" Icon="@Icons.Material.Filled.CheckCircle">OK</MudChip>
+                        }
+                    </MudItem>
+                </MudGrid>
+
+                @if (preview.MinX.HasValue && preview.MaxX.HasValue && preview.MinY.HasValue && preview.MaxY.HasValue)
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Default">
+                        Bounds X [@preview.MinX, @preview.MaxX] × Y [@preview.MinY, @preview.MaxY]
+                    </MudText>
+                }
+
+                @if (!preview.IndexAvailable)
+                {
+                    <MudAlert Severity="Severity.Warning" Dense="true">
+                        This PUBLIC map predates the grid index. Ask a SuperAdmin to regenerate it before importing — character markers won't resolve to the imported map until then.
+                    </MudAlert>
+                }
+            </MudStack>
+        </MudPaper>
+
+        @* --- Primary action: Create new --- *@
+        <MudPaper Class="pa-4" Elevation="0" Outlined="true">
+            <MudStack Spacing="3">
+                @if (!string.IsNullOrEmpty(actionBanner))
+                {
+                    <MudAlert Severity="Severity.Warning" Dense="true">@actionBanner</MudAlert>
+                }
+
+                <MudButton Variant="Variant.Filled"
+                           Color="Color.Success"
+                           StartIcon="@Icons.Material.Filled.AddBox"
+                           Size="Size.Large"
+                           OnClick="OpenCreateNewConfirmation"
+                           Disabled="@(!CanStartImport)">
+                    Create new map and import
+                </MudButton>
+
+                <MudExpansionPanels Elevation="0">
+                    <MudExpansionPanel Text="Advanced: merge into an existing map">
+                        <MudStack Spacing="2">
+                            <MudText Typo="Typo.body2" Color="Color.Default">
+                                Pick one of your maps to merge the PUBLIC tiles into. Existing tiles are kept — only blank coordinates are filled.
+                                Alignment requires at least 5 shared grid ids between the PUBLIC map and your map.
+                            </MudText>
+                            <MudSelect T="int?"
+                                       Label="Merge target"
+                                       @bind-Value="mergeTargetMapId"
+                                       Variant="Variant.Outlined"
+                                       Disabled="@isImporting"
+                                       Clearable="true">
+                                @foreach (var map in tenantMaps)
+                                {
+                                    <MudSelectItem T="int?" Value="@((int?)map.Id)">
+                                        @($"{map.Name}") <span style="opacity:0.6">(id @map.Id)</span> @(map.IsMain ? " — main" : "")
+                                    </MudSelectItem>
+                                }
+                            </MudSelect>
+                            <MudButton Variant="Variant.Outlined"
+                                       Color="Color.Warning"
+                                       StartIcon="@Icons.Material.Filled.MergeType"
+                                       OnClick="OpenMergeConfirmation"
+                                       Disabled="@(!CanStartMerge)">
+                                Merge into selected map
+                            </MudButton>
+                        </MudStack>
+                    </MudExpansionPanel>
+                </MudExpansionPanels>
+            </MudStack>
+        </MudPaper>
+    }
+
+    @* --- Progress display --- *@
+    @if (isImporting)
+    {
+        <MudPaper Class="pa-4" Elevation="0" Outlined="true">
+            <MudStack Spacing="2">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                    <MudText Typo="Typo.subtitle2">
+                        <MudIcon Icon="@Icons.Material.Filled.CloudSync" Class="me-2" Style="vertical-align: middle;" />
+                        PUBLIC map import in progress
+                    </MudText>
+                    <MudText Typo="Typo.body2" Color="Color.Secondary">
+                        @if (elapsedSeconds > 0)
+                        {
+                            var elapsed = TimeSpan.FromSeconds(elapsedSeconds);
+                            @($"{elapsed:mm\\:ss} elapsed")
+                        }
+                    </MudText>
+                </MudStack>
+                @if (overallPercent > 0)
+                {
+                    <MudProgressLinear Value="@overallPercent" Color="Color.Success" Size="Size.Large" Rounded="true">
+                        <MudText Typo="Typo.body2">@($"{overallPercent:F0}%")</MudText>
+                    </MudProgressLinear>
+                }
+                else
+                {
+                    <MudProgressLinear Indeterminate="true" Color="Color.Success" />
+                }
+                <MudText Typo="Typo.body2">
+                    @if (phaseNumber > 0)
+                    {
+                        @($"Phase {phaseNumber}/{totalPhases}: ")
+                    }
+                    @(progressMessage ?? "Starting...")
+                </MudText>
+            </MudStack>
+        </MudPaper>
+    }
+
+    @* --- Result --- *@
+    @if (importResult != null)
+    {
+        <MudAlert Severity="@(importResult.Success ? Severity.Success : Severity.Error)" Dense="false">
+            @if (importResult.Success)
+            {
+                <MudStack Spacing="1">
+                    <MudText Typo="Typo.subtitle2"><strong>PUBLIC map imported.</strong></MudText>
+                    <MudText Typo="Typo.body2">
+                        Target map: @importResult.TargetMapId @(importResult.CreatedNewMap ? " (new map)" : "")
+                    </MudText>
+                    <MudText Typo="Typo.body2">Tiles added: @importResult.TilesAdded — skipped @importResult.TilesSkipped</MudText>
+                    <MudText Typo="Typo.body2">Markers added: @importResult.MarkersAdded — skipped @importResult.MarkersSkipped</MudText>
+                    <MudText Typo="Typo.body2">Duration: @importResult.Duration.ToString("F1")s</MudText>
+                </MudStack>
+            }
+            else
+            {
+                <MudText>Import failed: @importResult.Error</MudText>
+            }
+        </MudAlert>
+    }
+</MudStack>
+
+@code {
+    private string? _currentTenantId;
+    private string? loadError;
+    private string? actionBanner;
+
+    private PublicMapImportPreview? preview;
+    private List<TenantMapEntry> tenantMaps = new();
+    private bool tenantMapsLoaded;
+
+    private int? mergeTargetMapId;
+
+    private bool isImporting;
+    private string? progressMessage;
+    private double overallPercent;
+    private double elapsedSeconds;
+    private int phaseNumber;
+    private int totalPhases;
+
+    private PublicImportResultDto? importResult;
+
+    private bool CanStartImport => !isImporting
+        && preview != null
+        && preview.IndexAvailable
+        && !string.IsNullOrEmpty(_currentTenantId);
+
+    private bool CanStartMerge => CanStartImport
+        && mergeTargetMapId.HasValue;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _currentTenantId = TenantContext.CurrentTenant?.Id;
+        if (string.IsNullOrEmpty(_currentTenantId))
+        {
+            var tenants = await TenantContext.GetTenantsAsync();
+            _currentTenantId = tenants.FirstOrDefault()?.Id;
+        }
+        if (string.IsNullOrEmpty(_currentTenantId))
+        {
+            var authState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+            _currentTenantId = authState.User.FindFirst(HnHMapperServer.Core.Constants.AuthorizationConstants.ClaimTypes.TenantId)?.Value;
+        }
+        if (string.IsNullOrEmpty(_currentTenantId))
+        {
+            loadError = "Unable to determine your tenant. Please reload the page.";
+            return;
+        }
+
+        await LoadPreviewAsync();
+        // Tenant maps are loaded lazily on first expand of the Advanced panel to keep the
+        // default render slim. Pre-load anyway so the first expansion is instant; it's a small list.
+        _ = LoadTenantMapsAsync();
+    }
+
+    private async Task LoadPreviewAsync()
+    {
+        if (string.IsNullOrEmpty(_currentTenantId)) return;
+
+        try
+        {
+            var httpClient = HttpClientFactory.CreateClient("API");
+            var response = await httpClient.GetAsync($"/api/tenants/{_currentTenantId}/maps/import-public/preview");
+            if (response.IsSuccessStatusCode)
+            {
+                preview = await response.Content.ReadFromJsonAsync<PublicMapImportPreview>();
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Preview returned {Status}: {Body}", response.StatusCode, errorBody);
+                try
+                {
+                    var errDto = System.Text.Json.JsonSerializer.Deserialize<ErrorDto>(errorBody,
+                        new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    loadError = errDto?.Message ?? errDto?.Error ?? $"Failed to load PUBLIC map summary (HTTP {(int)response.StatusCode}).";
+                }
+                catch
+                {
+                    loadError = $"Failed to load PUBLIC map summary (HTTP {(int)response.StatusCode}).";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load PUBLIC map preview");
+            loadError = $"Failed to load PUBLIC map summary: {ex.Message}";
+        }
+    }
+
+    private async Task LoadTenantMapsAsync()
+    {
+        if (tenantMapsLoaded || string.IsNullOrEmpty(_currentTenantId)) return;
+
+        try
+        {
+            var httpClient = HttpClientFactory.CreateClient("API");
+
+            var mapsResponse = await httpClient.GetAsync("/admin/maps?page=1&pageSize=500");
+            var paged = mapsResponse.IsSuccessStatusCode
+                ? await mapsResponse.Content.ReadFromJsonAsync<PagedAdminMaps>()
+                : null;
+
+            int? mainMapId = null;
+            var configResponse = await httpClient.GetAsync("/map/api/config");
+            if (configResponse.IsSuccessStatusCode)
+            {
+                var cfg = await configResponse.Content.ReadFromJsonAsync<MapApiConfig>();
+                mainMapId = cfg?.MainMapId;
+            }
+
+            tenantMaps = paged?.Items
+                .Select(m => new TenantMapEntry
+                {
+                    Id = m.Id,
+                    Name = m.Name,
+                    IsMain = mainMapId.HasValue && mainMapId.Value == m.Id
+                })
+                .OrderByDescending(m => m.IsMain)
+                .ThenBy(m => m.Name)
+                .ToList() ?? new();
+            tenantMapsLoaded = true;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to load tenant maps for PUBLIC import");
+        }
+    }
+
+    private Task OpenCreateNewConfirmation() => OpenConfirmationAsync(targetMapId: null);
+
+    private Task OpenMergeConfirmation()
+    {
+        if (!mergeTargetMapId.HasValue) return Task.CompletedTask;
+        return OpenConfirmationAsync(targetMapId: mergeTargetMapId.Value);
+    }
+
+    private async Task OpenConfirmationAsync(int? targetMapId)
+    {
+        if (preview == null) return;
+
+        var targetMapName = targetMapId.HasValue
+            ? (tenantMaps.FirstOrDefault(m => m.Id == targetMapId.Value)?.Name ?? targetMapId.Value.ToString())
+            : "(a new map will be created)";
+
+        var parameters = new DialogParameters
+        {
+            { nameof(PublicMapImportConfirmDialog.Preview), preview },
+            { nameof(PublicMapImportConfirmDialog.TargetIsNew), !targetMapId.HasValue },
+            { nameof(PublicMapImportConfirmDialog.TargetMapName), targetMapName }
+        };
+
+        var options = new DialogOptions
+        {
+            MaxWidth = MaxWidth.Small,
+            FullWidth = true,
+            CloseOnEscapeKey = true,
+            BackdropClick = false
+        };
+
+        var dialog = await DialogService.ShowAsync<PublicMapImportConfirmDialog>("Confirm PUBLIC map import", parameters, options);
+        var result = await dialog.Result;
+        if (result is null || result.Canceled) return;
+
+        await RunImportAsync(targetMapId);
+    }
+
+    private async Task RunImportAsync(int? targetMapId)
+    {
+        if (string.IsNullOrEmpty(_currentTenantId)) return;
+
+        isImporting = true;
+        actionBanner = null;
+        importResult = null;
+        progressMessage = "Starting...";
+        overallPercent = 0;
+        elapsedSeconds = 0;
+        phaseNumber = 0;
+        totalPhases = 0;
+        StateHasChanged();
+
+        try
+        {
+            var tenantId = _currentTenantId;
+            var url = $"/api/tenants/{tenantId}/maps/import-public";
+            if (targetMapId.HasValue) url += $"?targetMapId={targetMapId.Value}";
+
+            var httpClient = HttpClientFactory.CreateClient("APIUpload");
+            var request = new HttpRequestMessage(HttpMethod.Post, url);
+            var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Logger.LogError("PUBLIC map import failed with status {Status}: {Error}", response.StatusCode, errorContent);
+                importResult = new PublicImportResultDto { Success = false, Error = $"HTTP {(int)response.StatusCode}: {response.ReasonPhrase}" };
+                return;
+            }
+
+            using var stream = await response.Content.ReadAsStreamAsync();
+            using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 1);
+
+            string? eventType = null;
+            string eventData = "";
+            while (!reader.EndOfStream)
+            {
+                var line = await reader.ReadLineAsync();
+                if (line == null) break;
+                if (line.StartsWith("event: ")) eventType = line.Substring(7);
+                else if (line.StartsWith("data: ")) eventData += line.Substring(6);
+                else if (line == "")
+                {
+                    if (!string.IsNullOrEmpty(eventType) && !string.IsNullOrEmpty(eventData))
+                    {
+                        await ProcessSseEvent(eventType, eventData);
+                    }
+                    eventType = null;
+                    eventData = "";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "PUBLIC map import error");
+            importResult = new PublicImportResultDto { Success = false, Error = ex.Message };
+            Snackbar.Add($"PUBLIC map import error: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            isImporting = false;
+            progressMessage = null;
+            overallPercent = 0;
+            elapsedSeconds = 0;
+            phaseNumber = 0;
+            totalPhases = 0;
+
+            if (importResult?.Success == true)
+            {
+                Snackbar.Add(
+                    $"PUBLIC map imported: {importResult.TilesAdded} tiles, {importResult.MarkersAdded} markers, {importResult.Duration:F1}s",
+                    Severity.Success);
+                tenantMapsLoaded = false;
+                await LoadTenantMapsAsync();
+                await LoadPreviewAsync();
+            }
+            else if (importResult?.ErrorCode == "no_overlap")
+            {
+                actionBanner = importResult.Error ?? "Couldn't align with the chosen map. Try creating a new map instead.";
+                mergeTargetMapId = null;
+            }
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ProcessSseEvent(string eventType, string eventData)
+    {
+        try
+        {
+            if (eventType == "progress")
+            {
+                var p = System.Text.Json.JsonSerializer.Deserialize<ProgressEventDto>(eventData);
+                if (p != null)
+                {
+                    overallPercent = p.OverallPercent;
+                    elapsedSeconds = p.ElapsedSeconds;
+                    phaseNumber = p.PhaseNumber;
+                    totalPhases = p.TotalPhases;
+                    progressMessage = p.Phase;
+                    if (!string.IsNullOrEmpty(p.ItemName)) progressMessage += $" — {p.ItemName}";
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+            else if (eventType == "complete")
+            {
+                var r = System.Text.Json.JsonSerializer.Deserialize<PublicImportCompleteDto>(eventData);
+                if (r == null) return;
+
+                importResult = new PublicImportResultDto
+                {
+                    Success = r.Success,
+                    Error = r.Error,
+                    ErrorCode = r.ErrorCode,
+                    TargetMapId = r.TargetMapId,
+                    CreatedNewMap = r.CreatedNewMap,
+                    TilesAdded = r.TilesAdded,
+                    TilesSkipped = r.TilesSkipped,
+                    MarkersAdded = r.MarkersAdded,
+                    MarkersSkipped = r.MarkersSkipped,
+                    Duration = r.Duration
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to process PUBLIC import SSE event: {EventType}", eventType);
+        }
+    }
+
+    public void Dispose() { }
+
+    // ---- DTOs ----
+
+    private class TenantMapEntry
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = "";
+        public bool IsMain { get; set; }
+    }
+
+    private class PagedAdminMaps
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("items")]
+        public List<MapApiItem> Items { get; set; } = new();
+    }
+
+    private class MapApiItem
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("id")]
+        public int Id { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("name")]
+        public string Name { get; set; } = "";
+    }
+
+    private class MapApiConfig
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("mainMapId")]
+        public int? MainMapId { get; set; }
+    }
+
+    private class ErrorDto
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("error")]
+        public string? Error { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("message")]
+        public string? Message { get; set; }
+    }
+
+    private class ProgressEventDto
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("phase")]
+        public string Phase { get; set; } = "";
+        [System.Text.Json.Serialization.JsonPropertyName("itemName")]
+        public string ItemName { get; set; } = "";
+        [System.Text.Json.Serialization.JsonPropertyName("phaseNumber")]
+        public int PhaseNumber { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("totalPhases")]
+        public int TotalPhases { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("overallPercent")]
+        public double OverallPercent { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("elapsedSeconds")]
+        public double ElapsedSeconds { get; set; }
+    }
+
+    private class PublicImportResultDto
+    {
+        public bool Success { get; set; }
+        public string? Error { get; set; }
+        public string? ErrorCode { get; set; }
+        public int TargetMapId { get; set; }
+        public bool CreatedNewMap { get; set; }
+        public int TilesAdded { get; set; }
+        public int TilesSkipped { get; set; }
+        public int MarkersAdded { get; set; }
+        public int MarkersSkipped { get; set; }
+        public double Duration { get; set; }
+    }
+
+    private class PublicImportCompleteDto
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("success")]
+        public bool Success { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("error")]
+        public string? Error { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("errorCode")]
+        public string? ErrorCode { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("targetMapId")]
+        public int TargetMapId { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("createdNewMap")]
+        public bool CreatedNewMap { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("tilesAdded")]
+        public int TilesAdded { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("tilesSkipped")]
+        public int TilesSkipped { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("markersAdded")]
+        public int MarkersAdded { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("markersSkipped")]
+        public int MarkersSkipped { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("duration")]
+        public double Duration { get; set; }
+    }
+}

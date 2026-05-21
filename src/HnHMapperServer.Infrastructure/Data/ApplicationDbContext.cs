@@ -76,6 +76,7 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
     // Public map tables (global, not tenant-scoped)
     public DbSet<PublicMapEntity> PublicMaps => Set<PublicMapEntity>();
     public DbSet<PublicMapSourceEntity> PublicMapSources => Set<PublicMapSourceEntity>();
+    public DbSet<PublicMapGridIndexEntity> PublicMapGridIndex => Set<PublicMapGridIndexEntity>();
 
     // HMap source library tables (global, not tenant-scoped)
     public DbSet<HmapSourceEntity> HmapSources => Set<HmapSourceEntity>();
@@ -838,6 +839,29 @@ public sealed class ApplicationDbContext : IdentityDbContext<IdentityUser, Ident
             entity.HasOne<HmapSourceEntity>()
                 .WithMany()
                 .HasForeignKey(e => e.HmapSourceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Snapshot of which gridId lives at which unified coord in a PUBLIC map, captured at
+        // regeneration time. Read by PublicMapTenantImportService; never touched by tenant code.
+        modelBuilder.Entity<PublicMapGridIndexEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.PublicMapId).IsRequired();
+            entity.Property(e => e.UnifiedX).IsRequired();
+            entity.Property(e => e.UnifiedY).IsRequired();
+            entity.Property(e => e.GridId).IsRequired();
+            entity.Property(e => e.SnapshotCache).IsRequired();
+            entity.Property(e => e.IndexedAt).IsRequired();
+
+            // One row per coord per public map.
+            entity.HasIndex(e => new { e.PublicMapId, e.UnifiedX, e.UnifiedY }).IsUnique();
+            // Fast gridId → coord lookup for merge-mode alignment.
+            entity.HasIndex(e => new { e.PublicMapId, e.GridId });
+
+            entity.HasOne<PublicMapEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.PublicMapId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
@@ -1787,6 +1811,38 @@ public sealed class HmapSourceEntity
     /// UTC timestamp when the file was last analyzed
     /// </summary>
     public DateTime? AnalyzedAt { get; set; }
+}
+
+/// <summary>
+/// Snapshot of which source gridId lives at each unified base-grid coord in a PUBLIC map,
+/// captured atomically at PUBLIC regeneration time. Read by PublicMapTenantImportService so
+/// imported tenant grids reuse the same opaque grid ids (content hashes) the game client
+/// uploads — making character positions resolve to the imported map.
+///
+/// This is a global table - not tenant-scoped. Grid ids here are opaque world-position
+/// content hashes, not tenant identifiers, so exposing them across tenants is safe.
+/// </summary>
+public sealed class PublicMapGridIndexEntity
+{
+    public int Id { get; set; }
+
+    /// <summary>FK to PublicMapEntity.Id</summary>
+    public string PublicMapId { get; set; } = string.Empty;
+
+    /// <summary>Base-grid X in unified PUBLIC coords (zoom-0, 100x100 grid coords).</summary>
+    public int UnifiedX { get; set; }
+
+    /// <summary>Base-grid Y in unified PUBLIC coords (zoom-0, 100x100 grid coords).</summary>
+    public int UnifiedY { get; set; }
+
+    /// <summary>Opaque content-hash grid id from the winning source at snapshot time.</summary>
+    public string GridId { get; set; } = string.Empty;
+
+    /// <summary>Source-side Tiles.Cache value when the snapshot was committed.</summary>
+    public long SnapshotCache { get; set; }
+
+    /// <summary>UTC timestamp when this index row was written.</summary>
+    public DateTime IndexedAt { get; set; }
 }
 
 /// <summary>
