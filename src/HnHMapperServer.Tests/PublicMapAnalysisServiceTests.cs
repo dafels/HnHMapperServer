@@ -4,6 +4,7 @@ using HnHMapperServer.Services.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 
@@ -17,14 +18,56 @@ namespace HnHMapperServer.Tests;
 public class PublicMapAnalysisServiceTests : IDisposable
 {
     private readonly SqliteConnection _connection;
+    private readonly string _tempDir;
 
     public PublicMapAnalysisServiceTests()
     {
         _connection = new SqliteConnection("DataSource=:memory:");
         _connection.Open();
+        _tempDir = Path.Combine(Path.GetTempPath(), $"hnh-hmap-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(_tempDir);
     }
 
-    public void Dispose() => _connection.Dispose();
+    public void Dispose()
+    {
+        _connection.Dispose();
+        try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); } catch { }
+    }
+
+    /// <summary>Write a minimal valid .hmap (Version-1 grids carry only identity — enough for alignment).</summary>
+    private string WriteHmap(string relativePath, params (long gridId, int x, int y)[] grids)
+    {
+        var full = Path.Combine(_tempDir, relativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        using var fs = new FileStream(full, FileMode.Create, FileAccess.Write);
+        fs.Write(System.Text.Encoding.ASCII.GetBytes("Haven Mapfile 1"));
+        fs.WriteByte(0x78); fs.WriteByte(0xDA); // 2-byte zlib header (reader skips these)
+        using (var deflate = new System.IO.Compression.DeflateStream(fs, System.IO.Compression.CompressionMode.Compress, leaveOpen: true))
+        {
+            foreach (var (gridId, x, y) in grids)
+            {
+                var type = System.Text.Encoding.UTF8.GetBytes("grid");
+                deflate.Write(type, 0, type.Length);
+                deflate.WriteByte(0); // null terminator
+
+                using var body = new MemoryStream();
+                using (var b = new BinaryWriter(body, System.Text.Encoding.UTF8, leaveOpen: true))
+                {
+                    b.Write((byte)1);      // Version 1 (<4 -> only identity is parsed)
+                    b.Write(gridId);       // GridId (int64)
+                    b.Write(0L);           // SegmentId
+                    b.Write(123456L);      // ModifiedTime
+                    b.Write(x);            // TileX (grid coord)
+                    b.Write(y);            // TileY (grid coord)
+                }
+                var bytes = body.ToArray();
+                var len = BitConverter.GetBytes(bytes.Length);
+                deflate.Write(len, 0, len.Length);
+                deflate.Write(bytes, 0, bytes.Length);
+            }
+        }
+        return full;
+    }
 
     private ApplicationDbContext NewContext()
     {
@@ -42,7 +85,7 @@ public class PublicMapAnalysisServiceTests : IDisposable
     }
 
     private static PublicMapAnalysisService NewService(ApplicationDbContext ctx)
-        => new(ctx, new AlignmentSolver(), NullLogger<PublicMapAnalysisService>.Instance);
+        => new(ctx, new AlignmentSolver(), Mock.Of<IConfiguration>(), NullLogger<PublicMapAnalysisService>.Instance);
 
     /// <summary>Seed two tenants, three maps (S1 &amp; S2 overlap, S3 standalone), and grids.</summary>
     private static void SeedWorld(ApplicationDbContext ctx)
@@ -170,5 +213,44 @@ public class PublicMapAnalysisServiceTests : IDisposable
         await svc.AnalyzeAsync("public");
 
         Assert.Equal(1, await ctx.PublicMapAnalyses.CountAsync(a => a.PublicMapId == "public"));
+    }
+
+    [Fact]
+    public async Task Analyze_MergesTenantAndHmap_SharingGridIds_IntoOneLandmass()
+    {
+        using var ctx = NewContext();
+
+        // Tenant source whose grid ids are the int64 hmap grid ids (as strings) — the shared id space.
+        ctx.Tenants.Add(new TenantEntity { Id = "tenantA", Name = "Tenant A", StorageQuotaMB = 1024, CurrentStorageMB = 0, CreatedAt = DateTime.UtcNow, IsActive = true });
+        ctx.Maps.Add(new MapInfoEntity { Id = 1, Name = "Alpha", TenantId = "tenantA", CreatedAt = DateTime.UtcNow });
+        for (int i = 0; i < 6; i++)
+            ctx.Grids.Add(new GridDataEntity { Id = (1000 + i).ToString(), CoordX = i, CoordY = 0, Map = 1, TenantId = "tenantA", NextUpdate = DateTime.UtcNow });
+
+        // Hmap file with the SAME grid ids at a shifted origin.
+        const string rel = "hmap-sources/test.hmap";
+        WriteHmap(rel, Enumerable.Range(0, 6).Select(i => ((long)(1000 + i), 100 + i, 50)).ToArray());
+        ctx.HmapSources.Add(new HmapSourceEntity { Id = 1, Name = "Test HMap", FileName = "test.hmap", FilePath = rel, FileSizeBytes = 1, UploadedAt = DateTime.UtcNow });
+
+        ctx.PublicMaps.Add(new PublicMapEntity { Id = "public", Name = "public", IsActive = true, CreatedAt = DateTime.UtcNow, CreatedBy = "test", GenerationStatus = "pending" });
+        ctx.PublicMapSources.Add(new PublicMapSourceEntity { PublicMapId = "public", TenantId = "tenantA", MapId = 1, Priority = 0, AddedAt = DateTime.UtcNow, AddedBy = "test" });
+        ctx.PublicMapHmapSources.Add(new PublicMapHmapSourceEntity { PublicMapId = "public", HmapSourceId = 1, Priority = 0, AddedAt = DateTime.UtcNow });
+        ctx.SaveChanges();
+
+        var svc = new PublicMapAnalysisService(ctx, new AlignmentSolver(),
+            Mock.Of<IConfiguration>(c => c["GridStorage"] == _tempDir),
+            NullLogger<PublicMapAnalysisService>.Instance);
+        var report = await svc.AnalyzeAsync("public");
+
+        Assert.NotNull(report);
+        Assert.Equal(2, report!.TotalSources);
+        Assert.Equal(1, report.ClusterCount);   // tenant + hmap woven into ONE landmass
+        Assert.Equal(0, report.StandaloneCount);
+
+        var cluster = report.Clusters.Single();
+        var ts = cluster.Sources.Single(s => s.SourceType == "Tenant");
+        var hs = cluster.Sources.Single(s => s.SourceType == "Hmap");
+        Assert.Equal(1, hs.HmapSourceId);
+        // Shared grid "1000": tenant local (0,0), hmap local (100,50) -> same unified coordinate.
+        Assert.Equal((0 + ts.OffsetX, 0 + ts.OffsetY), (100 + hs.OffsetX, 50 + hs.OffsetY));
     }
 }

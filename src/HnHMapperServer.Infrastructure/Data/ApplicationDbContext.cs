@@ -873,8 +873,12 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
         {
             entity.HasKey(e => e.Id);
             entity.Property(e => e.PublicMapId).IsRequired();
-            entity.Property(e => e.SourceTenantId).IsRequired();
-            entity.Property(e => e.SourceMapId).IsRequired();
+            entity.Property(e => e.SourceType).IsRequired().HasDefaultValue("Tenant");
+            // Source reference is type-discriminated: tenant rows carry TenantId+MapId, hmap rows
+            // carry SourceHmapId — so all three are nullable.
+            entity.Property(e => e.SourceTenantId).IsRequired(false);
+            entity.Property(e => e.SourceMapId).IsRequired(false);
+            entity.Property(e => e.SourceHmapId).IsRequired(false);
             entity.Property(e => e.ComponentIndex).IsRequired();
             entity.Property(e => e.UnifiedOffsetX).IsRequired();
             entity.Property(e => e.UnifiedOffsetY).IsRequired();
@@ -883,7 +887,13 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
             entity.Property(e => e.IsStandalone).IsRequired();
             entity.Property(e => e.ComputedAt).IsRequired();
 
-            entity.HasIndex(e => new { e.PublicMapId, e.SourceTenantId, e.SourceMapId }).IsUnique();
+            // Type-discriminated uniqueness: one row per tenant source, one per hmap source.
+            entity.HasIndex(e => new { e.PublicMapId, e.SourceTenantId, e.SourceMapId })
+                .IsUnique()
+                .HasFilter("\"SourceType\" = 'Tenant'");
+            entity.HasIndex(e => new { e.PublicMapId, e.SourceHmapId })
+                .IsUnique()
+                .HasFilter("\"SourceType\" = 'Hmap'");
 
             entity.HasOne<PublicMapEntity>()
                 .WithMany()
@@ -1896,12 +1906,18 @@ public sealed class PublicMapGridIndexEntity
     /// <summary>UTC timestamp when this index row was written.</summary>
     public DateTime IndexedAt { get; set; }
 
-    /// <summary>Provenance: tenant id of the source whose tile won this coord. Nullable —
-    /// rows from before provenance was added, and the HMap path, leave it null.</summary>
+    /// <summary>Provenance: "Tenant" or "Hmap" — which kind of source won this coord. Nullable for
+    /// rows written before the unified pipeline (rewritten on next regeneration).</summary>
+    public string? SourceType { get; set; }
+
+    /// <summary>Provenance: tenant id of the source whose tile won this coord. Set for tenant winners.</summary>
     public string? SourceTenantId { get; set; }
 
-    /// <summary>Provenance: map id (within <see cref="SourceTenantId"/>) of the winning source.</summary>
+    /// <summary>Provenance: map id (within <see cref="SourceTenantId"/>) of the winning tenant source.</summary>
     public int? SourceMapId { get; set; }
+
+    /// <summary>Provenance: hmap source id when an hmap grid won this coord.</summary>
+    public int? SourceHmapId { get; set; }
 }
 
 /// <summary>
@@ -1916,11 +1932,17 @@ public sealed class PublicMapSourceAlignmentEntity
     /// <summary>FK to PublicMapEntity.Id</summary>
     public string PublicMapId { get; set; } = string.Empty;
 
-    /// <summary>Source tenant id.</summary>
-    public string SourceTenantId { get; set; } = string.Empty;
+    /// <summary>"Tenant" or "Hmap" — which kind of source this alignment row is for.</summary>
+    public string SourceType { get; set; } = "Tenant";
 
-    /// <summary>Source map id (within the tenant).</summary>
-    public int SourceMapId { get; set; }
+    /// <summary>Source tenant id (tenant sources only; null for hmap).</summary>
+    public string? SourceTenantId { get; set; }
+
+    /// <summary>Source map id within the tenant (tenant sources only; null for hmap).</summary>
+    public int? SourceMapId { get; set; }
+
+    /// <summary>Hmap source id (hmap sources only; null for tenant).</summary>
+    public int? SourceHmapId { get; set; }
 
     /// <summary>Index of the landmass/cluster this source belongs to.</summary>
     public int ComponentIndex { get; set; }

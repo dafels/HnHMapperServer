@@ -2746,25 +2746,16 @@ public static class SuperadminEndpoints
             }
 
             var username = user.FindFirstValue(ClaimTypes.Name) ?? "unknown";
-            logger.LogInformation("SuperAdmin {Username} triggered HMap source generation for public map {PublicMapId}",
+            logger.LogInformation("SuperAdmin {Username} triggered generation for public map {PublicMapId} (hmap alias)",
                 username, id);
 
-            // Start generation in background
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await generationService.StartGenerationFromHmapSourcesAsync(id);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "Background HMap generation failed for public map {PublicMapId}", id);
-                }
-            });
+            // Unified pipeline: a single queued generation merges BOTH tenant and hmap sources.
+            // This route is retained as an alias for the dedicated "Generate from HMap" button.
+            generationService.QueueGeneration(id);
 
             return Results.Json(new
             {
-                message = "Generation from HMap sources started",
+                message = "Generation started (tenant + hmap sources merged)",
                 publicMapId = id,
                 statusUrl = $"/api/superadmin/public-maps/{id}/status"
             }, statusCode: StatusCodes.Status202Accepted);

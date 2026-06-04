@@ -6,6 +6,7 @@ using HnHMapperServer.Infrastructure.Data;
 using HnHMapperServer.Services.Alignment;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace HnHMapperServer.Services.Services;
@@ -21,15 +22,18 @@ public class PublicMapAnalysisService : IPublicMapAnalysisService
 
     private readonly ApplicationDbContext _db;
     private readonly IAlignmentSolver _solver;
+    private readonly string _gridStorage;
     private readonly ILogger<PublicMapAnalysisService> _logger;
 
     public PublicMapAnalysisService(
         ApplicationDbContext db,
         IAlignmentSolver solver,
+        IConfiguration configuration,
         ILogger<PublicMapAnalysisService> logger)
     {
         _db = db;
         _solver = solver;
+        _gridStorage = configuration["GridStorage"] ?? "map";
         _logger = logger;
     }
 
@@ -38,25 +42,33 @@ public class PublicMapAnalysisService : IPublicMapAnalysisService
         var publicMap = await _db.PublicMaps.FirstOrDefaultAsync(p => p.Id == publicMapId, cancellationToken);
         if (publicMap == null) return null;
 
-        var sources = await _db.PublicMapSources
+        // Load BOTH source types and align them together (hmap + tenant share a grid-id space).
+        var tenantSources = await _db.PublicMapSources
             .Where(s => s.PublicMapId == publicMapId)
             .ToListAsync(cancellationToken);
+        var hmapLinks = await _db.PublicMapHmapSources
+            .Where(h => h.PublicMapId == publicMapId)
+            .ToListAsync(cancellationToken);
 
-        var loaded = await PublicMapSourceLoader.LoadAsync(_db, sources, cancellationToken);
-        var labels = await BuildLabelsAsync(sources, cancellationToken);
+        var tenantLoaded = await PublicMapSourceLoader.LoadAsync(_db, tenantSources, cancellationToken);
+        var hmapLoaded = await PublicMapSourceLoader.LoadHmapAsync(_db, hmapLinks, _gridStorage, cancellationToken);
+        var metas = await BuildSourceMetasAsync(tenantLoaded, hmapLoaded, cancellationToken);
 
-        var result = _solver.Align(loaded.Select(l => l.GridSet).ToList());
-        var keyToLoaded = loaded.ToDictionary(l => l.GridSet.SourceKey, l => l);
+        var metaByKey = metas.ToDictionary(m => m.GridSet.SourceKey, m => m);
+        var labelByKey = metas.ToDictionary(m => m.GridSet.SourceKey, m => m.DisplayLabel);
+        var allSets = metas.Select(m => m.GridSet).ToList();
 
-        var (minX, maxX, minY, maxY, zoom0, totalTiles) = EstimateBoundsAndTiles(loaded, result.Offsets);
+        var result = _solver.Align(allSets);
+
+        var (minX, maxX, minY, maxY, zoom0, totalTiles) = EstimateBoundsAndTiles(allSets, result.Offsets);
 
         var report = new PublicMapAnalysisReportDto
         {
             PublicMapId = publicMapId,
             AnalyzedAt = DateTime.UtcNow,
-            AlignmentHash = ComputeAlignmentHash(loaded),
-            TotalSources = sources.Count,
-            TotalGrids = loaded.Sum(l => l.GridSet.Grids.Count),
+            AlignmentHash = ComputeAlignmentHash(allSets),
+            TotalSources = metas.Count,
+            TotalGrids = allSets.Sum(s => s.Grids.Count),
             ClusterCount = result.Clusters.Count,
             StandaloneCount = result.Clusters.Count(c => c.IsStandalone),
             WarningCount = result.Warnings.Count,
@@ -84,16 +96,17 @@ public class PublicMapAnalysisService : IPublicMapAnalysisService
             };
             foreach (var key in cluster.SourceKeys)
             {
-                if (!keyToLoaded.TryGetValue(key, out var l)) continue;
+                if (!metaByKey.TryGetValue(key, out var m)) continue;
                 var off = result.Offsets[key];
-                var (tenantName, mapName) = labels.GetValueOrDefault(key, (l.Source.TenantId, $"Map {l.Source.MapId}"));
                 dto.Sources.Add(new AlignmentSourceRefDto
                 {
-                    TenantId = l.Source.TenantId,
-                    TenantName = tenantName,
-                    MapId = l.Source.MapId,
-                    MapName = mapName,
-                    GridCount = l.GridSet.Grids.Count,
+                    SourceType = m.SourceType,
+                    TenantId = m.TenantId,
+                    TenantName = m.TenantName,
+                    MapId = m.MapId,
+                    MapName = m.MapName,
+                    HmapSourceId = m.HmapSourceId,
+                    GridCount = m.GridSet.Grids.Count,
                     OffsetX = off.X,
                     OffsetY = off.Y,
                 });
@@ -105,8 +118,8 @@ public class PublicMapAnalysisService : IPublicMapAnalysisService
         {
             report.Pairs.Add(new AlignmentPairDto
             {
-                SourceAName = LabelOf(labels, e.SourceA),
-                SourceBName = LabelOf(labels, e.SourceB),
+                SourceAName = LabelOf(labelByKey, e.SourceA),
+                SourceBName = LabelOf(labelByKey, e.SourceB),
                 SharedGridCount = e.TotalMatches,
                 ConsensusOffsetX = e.OffsetX,
                 ConsensusOffsetY = e.OffsetY,
@@ -122,8 +135,8 @@ public class PublicMapAnalysisService : IPublicMapAnalysisService
             {
                 Type = w.Type,
                 Message = w.Message,
-                SourceA = w.SourceA == null ? null : LabelOf(labels, w.SourceA),
-                SourceB = w.SourceB == null ? null : LabelOf(labels, w.SourceB),
+                SourceA = w.SourceA == null ? null : LabelOf(labelByKey, w.SourceA),
+                SourceB = w.SourceB == null ? null : LabelOf(labelByKey, w.SourceB),
                 Residual = w.Residual,
             });
         }
@@ -181,17 +194,26 @@ public class PublicMapAnalysisService : IPublicMapAnalysisService
         await _db.SaveChangesAsync(cancellationToken);
     }
 
-    /// <summary>Map each source key ("tenantId:mapId") to friendly (tenantName, mapName).</summary>
-    private async Task<Dictionary<string, (string TenantName, string MapName)>> BuildLabelsAsync(
-        List<PublicMapSourceEntity> sources, CancellationToken cancellationToken)
+    /// <summary>Per-source metadata (type + friendly names) shared by clusters and pair/conflict labels.</summary>
+    private sealed record SourceMeta(
+        SourceGridSet GridSet, string SourceType, string DisplayLabel,
+        string TenantId, string TenantName, int MapId, string MapName, int? HmapSourceId);
+
+    /// <summary>Build display metadata for every tenant and hmap source.</summary>
+    private async Task<List<SourceMeta>> BuildSourceMetasAsync(
+        List<(PublicMapSourceEntity Source, SourceGridSet GridSet)> tenantLoaded,
+        List<HmapLoadedSource> hmapLoaded,
+        CancellationToken cancellationToken)
     {
-        var tenantIds = sources.Select(s => s.TenantId).Distinct().ToList();
+        var metas = new List<SourceMeta>(tenantLoaded.Count + hmapLoaded.Count);
+
+        var tenantIds = tenantLoaded.Select(t => t.Source.TenantId).Distinct().ToList();
         var tenantNames = await _db.Tenants
             .IgnoreQueryFilters()
             .Where(t => tenantIds.Contains(t.Id))
             .ToDictionaryAsync(t => t.Id, t => t.Name, cancellationToken);
 
-        var mapIds = sources.Select(s => s.MapId).Distinct().ToList();
+        var mapIds = tenantLoaded.Select(t => t.Source.MapId).Distinct().ToList();
         var mapRows = await _db.Maps
             .IgnoreQueryFilters()
             .Where(m => tenantIds.Contains(m.TenantId) && mapIds.Contains(m.Id))
@@ -199,30 +221,37 @@ public class PublicMapAnalysisService : IPublicMapAnalysisService
             .ToListAsync(cancellationToken);
         var mapNames = mapRows.ToDictionary(m => (m.TenantId, m.Id), m => m.Name);
 
-        var labels = new Dictionary<string, (string, string)>();
-        foreach (var s in sources)
+        foreach (var (source, gridSet) in tenantLoaded)
         {
-            var key = PublicMapSourceLoader.KeyFor(s.TenantId, s.MapId);
-            var tenantName = tenantNames.GetValueOrDefault(s.TenantId, s.TenantId);
-            var mapName = mapNames.GetValueOrDefault((s.TenantId, s.MapId), $"Map {s.MapId}");
-            labels[key] = (tenantName, mapName);
+            var tenantName = tenantNames.GetValueOrDefault(source.TenantId, source.TenantId);
+            var mapName = mapNames.GetValueOrDefault((source.TenantId, source.MapId), $"Map {source.MapId}");
+            metas.Add(new SourceMeta(gridSet, "Tenant", $"{tenantName} / {mapName}",
+                source.TenantId, tenantName, source.MapId, mapName, null));
         }
-        return labels;
+
+        foreach (var h in hmapLoaded)
+        {
+            var name = h.File.Name;
+            metas.Add(new SourceMeta(h.GridSet, "Hmap", $"HMap: {name}",
+                string.Empty, "HMap", 0, name, h.Link.HmapSourceId));
+        }
+
+        return metas;
     }
 
-    private static string LabelOf(Dictionary<string, (string TenantName, string MapName)> labels, string key)
-        => labels.TryGetValue(key, out var l) ? $"{l.TenantName} / {l.MapName}" : key;
+    private static string LabelOf(Dictionary<string, string> labels, string key)
+        => labels.GetValueOrDefault(key, key);
 
     private static (int? MinX, int? MaxX, int? MinY, int? MaxY, int Zoom0, int Total) EstimateBoundsAndTiles(
-        List<(PublicMapSourceEntity Source, SourceGridSet GridSet)> loaded,
+        IReadOnlyList<SourceGridSet> sets,
         IReadOnlyDictionary<string, (int X, int Y)> offsets)
     {
         int? minX = null, maxX = null, minY = null, maxY = null;
         var zoom0 = new HashSet<(int, int)>();
-        foreach (var l in loaded)
+        foreach (var set in sets)
         {
-            if (!offsets.TryGetValue(l.GridSet.SourceKey, out var off)) continue;
-            foreach (var (gx, gy) in l.GridSet.Grids.Values)
+            if (!offsets.TryGetValue(set.SourceKey, out var off)) continue;
+            foreach (var (gx, gy) in set.Grids.Values)
             {
                 int ux = gx + off.X, uy = gy + off.Y;
                 minX = minX.HasValue ? Math.Min(minX.Value, ux) : ux;
@@ -252,13 +281,13 @@ public class PublicMapAnalysisService : IPublicMapAnalysisService
     /// Stable SHA-256 over the source set + each source's grid content (ids + coords). Used to detect
     /// whether sources changed between a previewed analysis and a later generation.
     /// </summary>
-    private static string ComputeAlignmentHash(List<(PublicMapSourceEntity Source, SourceGridSet GridSet)> loaded)
+    private static string ComputeAlignmentHash(IReadOnlyList<SourceGridSet> sets)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        foreach (var l in loaded.OrderBy(l => l.GridSet.SourceKey, StringComparer.Ordinal))
+        foreach (var set in sets.OrderBy(s => s.SourceKey, StringComparer.Ordinal))
         {
-            hash.AppendData(Encoding.UTF8.GetBytes($"S:{l.GridSet.SourceKey}\n"));
-            foreach (var g in l.GridSet.Grids.OrderBy(g => g.Key, StringComparer.Ordinal))
+            hash.AppendData(Encoding.UTF8.GetBytes($"S:{set.SourceKey}\n"));
+            foreach (var g in set.Grids.OrderBy(g => g.Key, StringComparer.Ordinal))
                 hash.AppendData(Encoding.UTF8.GetBytes($"{g.Key},{g.Value.X},{g.Value.Y}\n"));
         }
         return Convert.ToHexString(hash.GetHashAndReset());

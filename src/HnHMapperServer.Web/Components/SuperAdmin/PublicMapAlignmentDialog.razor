@@ -88,7 +88,14 @@
                                 </MudChip>
                             </MudTd>
                             <MudTd DataLabel="Sources">
-                                @string.Join(", ", context.Sources.Select(s => $"{s.TenantName}/{s.MapName}"))
+                                @foreach (var s in context.Sources)
+                                {
+                                    <MudChip T="string" Size="Size.Small" Class="ma-1"
+                                             Color="@(s.SourceType == "Hmap" ? Color.Secondary : Color.Default)"
+                                             Icon="@(s.SourceType == "Hmap" ? Icons.Material.Filled.Storage : Icons.Material.Filled.Map)">
+                                        @(s.SourceType == "Hmap" ? s.MapName : $"{s.TenantName} / {s.MapName}")
+                                    </MudChip>
+                                }
                             </MudTd>
                             <MudTd DataLabel="Grids">@context.GridCount.ToString("N0")</MudTd>
                             <MudTd DataLabel="Origin">(@context.OriginX, @context.OriginY)</MudTd>

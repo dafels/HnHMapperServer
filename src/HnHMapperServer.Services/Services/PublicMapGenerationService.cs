@@ -83,26 +83,37 @@ public class PublicMapGenerationService : IPublicMapGenerationService
 
             _logger.LogInformation("Starting generation for public map {PublicMapId}", publicMapId);
 
-            // Get all sources
-            var sources = await dbContext.PublicMapSources
+            // Load BOTH source types — tenant map instances and hmap files — for one merged pipeline.
+            var tenantSources = await dbContext.PublicMapSources
                 .Where(s => s.PublicMapId == publicMapId)
                 .ToListAsync();
+            var hmapLinks = await dbContext.PublicMapHmapSources
+                .Where(h => h.PublicMapId == publicMapId)
+                .ToListAsync();
 
-            if (!sources.Any())
+            var outputPath = Path.Combine(_gridStorage, "public", publicMapId);
+
+            if (tenantSources.Count == 0 && hmapLinks.Count == 0)
             {
+                // No sources: empty the map completely so nothing stale survives.
+                if (Directory.Exists(outputPath))
+                    Directory.Delete(outputPath, recursive: true);
+                await dbContext.PublicMapGridIndex.Where(g => g.PublicMapId == publicMapId).ExecuteDeleteAsync();
+                await dbContext.PublicMapSourceAlignments.Where(a => a.PublicMapId == publicMapId).ExecuteDeleteAsync();
+
                 publicMap.GenerationStatus = "completed";
                 publicMap.GenerationProgress = 100;
                 publicMap.TileCount = 0;
+                publicMap.MinX = publicMap.MaxX = publicMap.MinY = publicMap.MaxY = null;
                 publicMap.LastGeneratedAt = DateTime.UtcNow;
                 publicMap.LastGenerationDurationSeconds = 0;
                 await dbContext.SaveChangesAsync();
 
-                _logger.LogInformation("Public map {PublicMapId} has no sources, nothing to generate", publicMapId);
+                _logger.LogInformation("Public map {PublicMapId} has no sources, emptied", publicMapId);
                 return true;
             }
 
-            // Completely wipe existing tiles before regeneration
-            var outputPath = Path.Combine(_gridStorage, "public", publicMapId);
+            // Completely wipe existing tiles before regeneration.
             if (Directory.Exists(outputPath))
             {
                 Directory.Delete(outputPath, recursive: true);
@@ -110,83 +121,99 @@ public class PublicMapGenerationService : IPublicMapGenerationService
             }
             Directory.CreateDirectory(outputPath);
 
-            // Calculate offsets automatically from shared grid IDs
-            var sourceOffsets = await CalculateSourceOffsetsAsync(dbContext, sources);
+            // Load grid sets for ALL sources and align them in ONE order-independent pass. Tenant and
+            // hmap grids share a content-hash id space, so they weave into the same landmasses.
+            var tenantLoaded = await PublicMapSourceLoader.LoadAsync(dbContext, tenantSources);
+            var hmapLoaded = await PublicMapSourceLoader.LoadHmapAsync(dbContext, hmapLinks, _gridStorage);
+            if (hmapLoaded.Count < hmapLinks.Count)
+                _logger.LogWarning("{Missing} hmap source file(s) missing or unreadable for {PublicMapId} — skipped",
+                    hmapLinks.Count - hmapLoaded.Count, publicMapId);
 
-            // Get all unique coordinates from source tiles
-            // The dictionary key uses UNIFIED coordinates (with offsets applied)
-            // This allows tiles from different sources to properly overlap/merge
-            // gridId is set for zoom-0 entries (used to populate PublicMapGridIndex below).
-            var allCoordinates = new Dictionary<(int zoom, int x, int y), (string tenantId, int mapId, string file, long cache, string? gridId)>();
+            var allSets = new List<SourceGridSet>(tenantLoaded.Count + hmapLoaded.Count);
+            allSets.AddRange(tenantLoaded.Select(t => t.GridSet));
+            allSets.AddRange(hmapLoaded.Select(h => h.GridSet));
 
-            foreach (var source in sources)
+            var alignment = _alignmentSolver.Align(allSets);
+            var sourceOffsets = alignment.Offsets;
+
+            foreach (var cluster in alignment.Clusters)
+                _logger.LogInformation(
+                    "Aligned landmass {Index}: {SourceCount} source(s), {GridCount} grids, origin ({X},{Y}), confidence {Conf:F2}{Standalone}",
+                    cluster.Index, cluster.SourceKeys.Count, cluster.GridCount,
+                    cluster.PlacedOriginX, cluster.PlacedOriginY, cluster.Confidence,
+                    cluster.IsStandalone ? " [standalone]" : "");
+            foreach (var w in alignment.Warnings)
+                _logger.LogWarning("Alignment warning ({Type}): {Message}", w.Type, w.Message);
+
+            // Persist per-source alignment (tenant + hmap) for the UI / re-imports.
+            await PersistSourceAlignmentsAsync(dbContext, publicMapId, tenantLoaded, hmapLoaded, alignment);
+
+            // Merge all sources into one set of winners keyed by UNIFIED base-grid coordinate.
+            // Tenant cells supply an existing PNG to copy; hmap cells supply a grid to render.
+            var winners = new Dictionary<(int x, int y), WinningCell>();
+
+            foreach (var (source, gridSet) in tenantLoaded)
             {
-                var offset = sourceOffsets.GetValueOrDefault(source.Id, (X: 0, Y: 0));
+                var offset = sourceOffsets.GetValueOrDefault(gridSet.SourceKey, (X: 0, Y: 0));
+                var coordToGridId = new Dictionary<(int, int), string>(gridSet.Grids.Count);
+                foreach (var kv in gridSet.Grids)
+                    coordToGridId[kv.Value] = kv.Key;
 
-                // Source grids → (sourceCoord) → gridId, so we can stamp the index row for each
-                // zoom-0 tile we end up picking from this source.
-                var sourceGridList = await dbContext.Grids
-                    .IgnoreQueryFilters()
-                    .Where(g => g.TenantId == source.TenantId && g.Map == source.MapId)
-                    .Select(g => new { g.Id, g.CoordX, g.CoordY })
-                    .ToListAsync();
-                var sourceGridByCoord = sourceGridList
-                    .GroupBy(g => (g.CoordX, g.CoordY))
-                    .ToDictionary(grp => grp.Key, grp => grp.First().Id);
-
-                // Only fetch zoom-0 tiles - we'll generate zoom levels 1-6 from the merged zoom-0 tiles
+                // Only zoom-0 tiles — zoom 1-6 are regenerated from the merged zoom-0 set.
                 var tiles = await dbContext.Tiles
                     .IgnoreQueryFilters()
                     .Where(t => t.TenantId == source.TenantId && t.MapId == source.MapId && t.Zoom == 0)
-                    .Select(t => new { t.Zoom, t.CoordX, t.CoordY, t.File, t.Cache, t.TenantId, t.MapId })
+                    .Select(t => new { t.CoordX, t.CoordY, t.File, t.Cache })
                     .ToListAsync();
 
                 foreach (var tile in tiles)
                 {
-                    // Scale offset for this zoom level
-                    // At zoom 0: 1:1 offset, at zoom N: offset / 2^N
-                    // Bit shift right divides by 2^zoom
-                    var scaledOffsetX = offset.X >> tile.Zoom;
-                    var scaledOffsetY = offset.Y >> tile.Zoom;
-
-                    // Calculate unified coordinates with offset applied
-                    var unifiedX = tile.CoordX + scaledOffsetX;
-                    var unifiedY = tile.CoordY + scaledOffsetY;
-
-                    var key = (tile.Zoom, unifiedX, unifiedY);
-
-                    string? gridId = null;
-                    if (tile.Zoom == 0 && sourceGridByCoord.TryGetValue((tile.CoordX, tile.CoordY), out var gid))
-                        gridId = gid;
-
-                    // Deterministic, order/priority-free winner for an overlapping coordinate:
-                    //   1) freshest tile (highest Cache), then
-                    //   2) smallest SourceKey (TenantId, then MapId), then
-                    //   3) smallest GridId.
-                    // This gives the same result regardless of source iteration order.
-                    if (!allCoordinates.TryGetValue(key, out var existing)
-                        || TileWins(tile.Cache, tile.TenantId, tile.MapId, gridId,
-                                    existing.cache, existing.tenantId, existing.mapId, existing.gridId))
-                    {
-                        allCoordinates[key] = (tile.TenantId, tile.MapId, tile.File, tile.Cache, gridId);
-                    }
+                    var key = (tile.CoordX + offset.X, tile.CoordY + offset.Y);
+                    coordToGridId.TryGetValue((tile.CoordX, tile.CoordY), out var gid);
+                    var cand = new WinningCell(CellSourceKind.Tenant, tile.Cache, gridSet.SourceKey, gid,
+                        source.TenantId, source.MapId, tile.File, null, null);
+                    if (!winners.TryGetValue(key, out var existing) || CellWins(cand, existing))
+                        winners[key] = cand;
                 }
             }
 
-            // Track bounds in original grid coordinates
-            int? minX = null, maxX = null, minY = null, maxY = null;
-
-            // Calculate bounds from all zoom-0 coordinates
-            foreach (var (coord, _) in allCoordinates)
+            foreach (var h in hmapLoaded)
             {
-                var (zoom, x, y) = coord;
-                if (zoom == 0)
+                var offset = sourceOffsets.GetValueOrDefault(h.GridSet.SourceKey, (X: 0, Y: 0));
+                foreach (var grid in h.Data.Grids)
                 {
-                    minX = minX.HasValue ? Math.Min(minX.Value, x) : x;
-                    maxX = maxX.HasValue ? Math.Max(maxX.Value, x) : x;
-                    minY = minY.HasValue ? Math.Min(minY.Value, y) : y;
-                    maxY = maxY.HasValue ? Math.Max(maxY.Value, y) : y;
+                    var key = (grid.TileX + offset.X, grid.TileY + offset.Y);
+                    // Only a real content-hash grid id is indexable for tenant-import reuse.
+                    var gid = grid.GridId != 0 ? grid.GridIdString : null;
+                    var cand = new WinningCell(CellSourceKind.Hmap, grid.ModifiedTime, h.GridSet.SourceKey, gid,
+                        null, null, null, h.Link.HmapSourceId, grid);
+                    if (!winners.TryGetValue(key, out var existing) || CellWins(cand, existing))
+                        winners[key] = cand;
                 }
+            }
+
+            // Bounds from the unified winner coordinates.
+            int? minX = null, maxX = null, minY = null, maxY = null;
+            foreach (var (x, y) in winners.Keys)
+            {
+                minX = minX.HasValue ? Math.Min(minX.Value, x) : x;
+                maxX = maxX.HasValue ? Math.Max(maxX.Value, x) : x;
+                minY = minY.HasValue ? Math.Min(minY.Value, y) : y;
+                maxY = maxY.HasValue ? Math.Max(maxY.Value, y) : y;
+            }
+
+            // Prefetch hmap tile textures for the cells an hmap actually wins (bounded + disk-cached).
+            TileResourceService? tileResourceService = null;
+            if (winners.Values.Any(c => c.Kind == CellSourceKind.Hmap))
+            {
+                var resourceNames = new HashSet<string>();
+                foreach (var c in winners.Values)
+                    if (c.Kind == CellSourceKind.Hmap && c.Grid != null)
+                        foreach (var ts in c.Grid.Tilesets)
+                            resourceNames.Add(ts.ResourceName);
+                tileResourceService = new TileResourceService(Path.Combine(_gridStorage, "hmap-tile-cache"));
+                await tileResourceService.PrefetchTilesAsync(resourceNames);
+                _logger.LogInformation("Prefetched {Count} hmap tile resources for {PublicMapId}", resourceNames.Count, publicMapId);
             }
 
             // Generate 400x400 tiles by combining 4x4 base tiles
@@ -211,8 +238,8 @@ public class PublicMapGenerationService : IPublicMapGenerationService
                 Method = WebpEncodingMethod.Default
             };
 
-            _logger.LogInformation("Generating {TileCount} 400x400 tiles for public map {PublicMapId} from {SourceCount} source tiles",
-                totalOutputTiles, publicMapId, allCoordinates.Count);
+            _logger.LogInformation("Generating {TileCount} 400x400 tiles for public map {PublicMapId} from {CellCount} merged cells",
+                totalOutputTiles, publicMapId, winners.Count);
 
             // Generate each 400x400 tile
             for (var tx = outMinX; tx <= outMaxX; tx++)
@@ -232,24 +259,22 @@ public class PublicMapGenerationService : IPublicMapGenerationService
                         {
                             var baseX = tx * 4 + dx;
                             var baseY = ty * 4 + dy;
-                            var key = (0, baseX, baseY);
 
-                            if (allCoordinates.TryGetValue(key, out var tileInfo))
+                            if (winners.TryGetValue((baseX, baseY), out var cell))
                             {
-                                var sourcePath = Path.Combine(_gridStorage, tileInfo.file);
-                                if (File.Exists(sourcePath))
+                                try
                                 {
-                                    try
+                                    using var baseImg = await RenderCellAsync(cell, tileResourceService);
+                                    if (baseImg != null)
                                     {
-                                        using var baseImg = await Image.LoadAsync<Rgba32>(sourcePath);
                                         // Place 100x100 base tile at correct position in 400x400 canvas
                                         img.Mutate(ctx => ctx.DrawImage(baseImg, new Point(dx * 100, dy * 100), 1f));
                                         hasAnyTile = true;
                                     }
-                                    catch (Exception ex)
-                                    {
-                                        _logger.LogWarning(ex, "Failed to load base tile at ({X}, {Y})", baseX, baseY);
-                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex, "Failed to render base cell at ({X}, {Y})", baseX, baseY);
                                 }
                             }
                         }
@@ -279,15 +304,17 @@ public class PublicMapGenerationService : IPublicMapGenerationService
             _logger.LogInformation("Successfully generated {GeneratedCount} zoom-0 tiles (400x400) for public map {PublicMapId}",
                 copiedZoom0Coords.Count, publicMapId);
 
-            // Extract and save thingwall markers from all sources
-            var markerCount = await ExtractAndSaveMarkersAsync(dbContext, sources, sourceOffsets, outputPath, publicMapId);
+            // Extract and save thingwall markers from all sources (tenant + hmap), offset-applied.
+            var markerCount = await ExtractAndSaveMarkersAsync(dbContext, tenantLoaded, hmapLoaded, sourceOffsets, outputPath, publicMapId);
 
-            // Generate zoom tiles 1-6 from the actually copied zoom-0 tiles
+            // Generate zoom tiles 1-6 from the actually written zoom-0 tiles
             var zoomTileCount = await GenerateZoomTilesAsync(outputPath, copiedZoom0Coords, publicMap, dbContext);
 
-            // Snapshot the per-coord gridIds into PublicMapGridIndex so tenant imports can reuse
-            // them (preserving character-marker resolution) without ever reading source tenant data.
-            await ReplaceGridIndexAsync(dbContext, publicMapId, allCoordinates, copiedZoom0Coords);
+            // Snapshot per-coord winning grid id + source provenance into PublicMapGridIndex so tenant
+            // imports can reuse them without ever reading the source data.
+            await ReplaceGridIndexAsync(dbContext, publicMapId, winners, copiedZoom0Coords);
+
+            tileResourceService?.Dispose();
 
             stopwatch.Stop();
 
@@ -381,61 +408,14 @@ public class PublicMapGenerationService : IPublicMapGenerationService
     }
 
     /// <summary>
-    /// Computes a unified coordinate offset for every source via the order-independent
-    /// <see cref="IAlignmentSolver"/>: overlapping sources are woven into one rigid landmass using
-    /// shared content-hash grid ids, and disjoint (standalone) sources are auto-laid-out side by side
-    /// without collision. The result is a pure function of the sources' grid content — it does NOT
-    /// depend on source order, row id, or <c>PublicMapSourceEntity.Priority</c>.
-    /// Returns offsets keyed by <c>PublicMapSourceEntity.Id</c>, matching the previous contract.
-    /// </summary>
-    private async Task<Dictionary<int, (int X, int Y)>> CalculateSourceOffsetsAsync(
-        ApplicationDbContext dbContext,
-        List<PublicMapSourceEntity> sources)
-    {
-        var offsets = new Dictionary<int, (int X, int Y)>();
-        if (sources.Count == 0)
-            return offsets;
-
-        var loaded = await PublicMapSourceLoader.LoadAsync(dbContext, sources);
-        var keyToSource = loaded.ToDictionary(l => l.GridSet.SourceKey, l => l.Source);
-        var sourceSets = loaded.Select(l => l.GridSet).ToList();
-
-        foreach (var (source, gridSet) in loaded)
-            _logger.LogInformation(
-                "Source {SourceId} ({TenantId}/{MapId}) has {GridCount} grids",
-                source.Id, source.TenantId, source.MapId, gridSet.Grids.Count);
-
-        var result = _alignmentSolver.Align(sourceSets);
-
-        foreach (var (key, off) in result.Offsets)
-            if (keyToSource.TryGetValue(key, out var src))
-                offsets[src.Id] = off;
-
-        foreach (var cluster in result.Clusters)
-            _logger.LogInformation(
-                "Aligned landmass {Index}: {SourceCount} source(s), {GridCount} grids, origin ({X},{Y}), confidence {Conf:F2}{Standalone}",
-                cluster.Index, cluster.SourceKeys.Count, cluster.GridCount,
-                cluster.PlacedOriginX, cluster.PlacedOriginY, cluster.Confidence,
-                cluster.IsStandalone ? " [standalone]" : "");
-
-        foreach (var w in result.Warnings)
-            _logger.LogWarning("Alignment warning ({Type}): {Message}", w.Type, w.Message);
-
-        // Persist per-source alignment (real generation only) so the UI / re-imports can trust
-        // placement without recomputing it.
-        await PersistSourceAlignmentsAsync(dbContext, sources[0].PublicMapId, keyToSource, result);
-
-        return offsets;
-    }
-
-    /// <summary>
     /// Wipe + rewrite the durable <c>PublicMapSourceAlignment</c> rows for this public map from the
-    /// solver result.
+    /// solver result, for BOTH tenant and hmap sources.
     /// </summary>
     private static async Task PersistSourceAlignmentsAsync(
         ApplicationDbContext dbContext,
         string publicMapId,
-        Dictionary<string, PublicMapSourceEntity> keyToSource,
+        List<(PublicMapSourceEntity Source, SourceGridSet GridSet)> tenantLoaded,
+        List<HmapLoadedSource> hmapLoaded,
         AlignmentResult result)
     {
         await dbContext.PublicMapSourceAlignments
@@ -451,28 +431,42 @@ public class PublicMapGenerationService : IPublicMapGenerationService
             matchByKey[e.SourceB] = matchByKey.GetValueOrDefault(e.SourceB) + e.TotalMatches;
         }
 
+        var tenantByKey = tenantLoaded.ToDictionary(t => t.GridSet.SourceKey, t => t.Source);
+        var hmapByKey = hmapLoaded.ToDictionary(h => h.GridSet.SourceKey, h => h.Link);
+        var clusterByKey = new Dictionary<string, AlignmentCluster>();
+        foreach (var cluster in result.Clusters)
+            foreach (var key in cluster.SourceKeys)
+                clusterByKey[key] = cluster;
+
         var now = DateTime.UtcNow;
         var rows = new List<PublicMapSourceAlignmentEntity>();
-        foreach (var cluster in result.Clusters)
+        foreach (var (key, off) in result.Offsets)
         {
-            foreach (var key in cluster.SourceKeys)
+            if (!clusterByKey.TryGetValue(key, out var cluster)) continue;
+            var row = new PublicMapSourceAlignmentEntity
             {
-                if (!keyToSource.TryGetValue(key, out var src)) continue;
-                var off = result.Offsets[key];
-                rows.Add(new PublicMapSourceAlignmentEntity
-                {
-                    PublicMapId = publicMapId,
-                    SourceTenantId = src.TenantId,
-                    SourceMapId = src.MapId,
-                    ComponentIndex = cluster.Index,
-                    UnifiedOffsetX = off.X,
-                    UnifiedOffsetY = off.Y,
-                    MatchCountToComponent = matchByKey.GetValueOrDefault(key),
-                    AlignmentConfidence = cluster.Confidence,
-                    IsStandalone = cluster.IsStandalone,
-                    ComputedAt = now
-                });
+                PublicMapId = publicMapId,
+                ComponentIndex = cluster.Index,
+                UnifiedOffsetX = off.X,
+                UnifiedOffsetY = off.Y,
+                MatchCountToComponent = matchByKey.GetValueOrDefault(key),
+                AlignmentConfidence = cluster.Confidence,
+                IsStandalone = cluster.IsStandalone,
+                ComputedAt = now
+            };
+            if (tenantByKey.TryGetValue(key, out var ts))
+            {
+                row.SourceType = "Tenant";
+                row.SourceTenantId = ts.TenantId;
+                row.SourceMapId = ts.MapId;
             }
+            else if (hmapByKey.TryGetValue(key, out var hl))
+            {
+                row.SourceType = "Hmap";
+                row.SourceHmapId = hl.HmapSourceId;
+            }
+            else continue;
+            rows.Add(row);
         }
 
         if (rows.Count > 0)
@@ -482,20 +476,38 @@ public class PublicMapGenerationService : IPublicMapGenerationService
         }
     }
 
-    /// <summary>
-    /// Total order for picking the winning tile at an overlapping unified coordinate:
-    /// freshest Cache, then smallest SourceKey (tenant, then map), then smallest grid id.
-    /// Pure and order-independent — never consults source order or Priority.
-    /// </summary>
-    private static bool TileWins(
-        long candCache, string candTenant, int candMap, string? candGrid,
-        long curCache, string curTenant, int curMap, string? curGrid)
+    private enum CellSourceKind { Tenant, Hmap }
+
+    /// <summary>One unified base-grid cell's winning source: a tenant tile to copy, or an hmap grid
+    /// to render. Carries provenance + the freshness used for conflict resolution.</summary>
+    private sealed record WinningCell(
+        CellSourceKind Kind,
+        long Freshness,
+        string SourceKey,
+        string? GridId,
+        string? TenantId,
+        int? MapId,
+        string? TileFile,
+        int? HmapSourceId,
+        HmapGridData? Grid);
+
+    /// <summary>Deterministic cell winner — see <see cref="CellConflict"/>.</summary>
+    private static bool CellWins(WinningCell c, WinningCell existing)
+        => CellConflict.Wins(
+            c.Kind == CellSourceKind.Tenant, c.Freshness, c.SourceKey, c.GridId,
+            existing.Kind == CellSourceKind.Tenant, existing.Freshness, existing.SourceKey, existing.GridId);
+
+    /// <summary>Render one 100×100 base cell: copy the tenant PNG from disk, or render the hmap grid.</summary>
+    private async Task<Image<Rgba32>?> RenderCellAsync(WinningCell cell, TileResourceService? tileResourceService)
     {
-        if (candCache != curCache) return candCache > curCache;
-        var t = string.CompareOrdinal(candTenant, curTenant);
-        if (t != 0) return t < 0;
-        if (candMap != curMap) return candMap < curMap;
-        return string.CompareOrdinal(candGrid ?? "", curGrid ?? "") < 0;
+        if (cell.Kind == CellSourceKind.Tenant)
+        {
+            var sourcePath = Path.Combine(_gridStorage, cell.TileFile!);
+            return File.Exists(sourcePath) ? await Image.LoadAsync<Rgba32>(sourcePath) : null;
+        }
+        if (tileResourceService != null && cell.Grid != null)
+            return await RenderHmapGridAsync(cell.Grid, tileResourceService);
+        return null;
     }
 
     /// <summary>
@@ -647,29 +659,28 @@ public class PublicMapGenerationService : IPublicMapGenerationService
     /// </summary>
     private async Task<int> ExtractAndSaveMarkersAsync(
         ApplicationDbContext dbContext,
-        List<PublicMapSourceEntity> sources,
-        Dictionary<int, (int X, int Y)> sourceOffsets,
+        List<(PublicMapSourceEntity Source, SourceGridSet GridSet)> tenantLoaded,
+        List<HmapLoadedSource> hmapLoaded,
+        IReadOnlyDictionary<string, (int X, int Y)> sourceOffsets,
         string outputPath,
         string publicMapId)
     {
         var allMarkers = new List<PublicMapMarkerDto>();
 
-        foreach (var source in sources)
+        // Tenant thingwall markers.
+        foreach (var (source, gridSet) in tenantLoaded)
         {
-            var offset = sourceOffsets.GetValueOrDefault(source.Id, (X: 0, Y: 0));
+            var offset = sourceOffsets.GetValueOrDefault(gridSet.SourceKey, (X: 0, Y: 0));
 
-            // Query thingwall markers (Image contains "thingwall") that are not hidden
             var markers = await dbContext.Markers
                 .IgnoreQueryFilters()
                 .Where(m => m.TenantId == source.TenantId
                            && m.Image.Contains("thingwall")
                            && !m.Hidden)
                 .ToListAsync();
-
             if (markers.Count == 0)
                 continue;
 
-            // Get grid coordinates for these markers
             var gridIds = markers.Select(m => m.GridId).Distinct().ToList();
             var grids = await dbContext.Grids
                 .IgnoreQueryFilters()
@@ -680,23 +691,42 @@ public class PublicMapGenerationService : IPublicMapGenerationService
 
             foreach (var marker in markers)
             {
-                // Skip if grid is not in this map
                 if (!grids.TryGetValue(marker.GridId, out var gridCoord))
                     continue;
-
-                // Calculate absolute position with offset applied
-                // Grid coordinate + offset gives the unified grid position
-                // Then multiply by 100 (tile size) and add marker position within grid
-                var absX = (gridCoord.CoordX + offset.X) * 100 + marker.PositionX;
-                var absY = (gridCoord.CoordY + offset.Y) * 100 + marker.PositionY;
 
                 allMarkers.Add(new PublicMapMarkerDto
                 {
                     Id = marker.Id,
                     Name = marker.Name,
-                    X = absX,
-                    Y = absY,
+                    X = (gridCoord.CoordX + offset.X) * 100 + marker.PositionX,
+                    Y = (gridCoord.CoordY + offset.Y) * 100 + marker.PositionY,
                     Image = marker.Image
+                });
+            }
+        }
+
+        // Hmap thingwall markers — apply the SAME alignment offset (previously omitted).
+        foreach (var h in hmapLoaded)
+        {
+            var offset = sourceOffsets.GetValueOrDefault(h.GridSet.SourceKey, (X: 0, Y: 0));
+            foreach (var marker in h.Data.Markers)
+            {
+                if (marker is not HmapSMarker sMarker) continue;
+                if (!sMarker.ResourceName.Contains("thingwall")) continue;
+
+                // Hmap marker coords are absolute TILE units; decompose to grid + intra-grid position.
+                var gridX = (int)Math.Floor(marker.TileX / 100.0);
+                var gridY = (int)Math.Floor(marker.TileY / 100.0);
+                var posX = ((marker.TileX % 100) + 100) % 100;
+                var posY = ((marker.TileY % 100) + 100) % 100;
+
+                allMarkers.Add(new PublicMapMarkerDto
+                {
+                    Id = (int)(sMarker.ObjectId % int.MaxValue),
+                    Name = marker.Name,
+                    X = (gridX + offset.X) * 100 + posX,
+                    Y = (gridY + offset.Y) * 100 + posY,
+                    Image = sMarker.ResourceName
                 });
             }
         }
@@ -733,12 +763,10 @@ public class PublicMapGenerationService : IPublicMapGenerationService
     private async Task ReplaceGridIndexAsync(
         ApplicationDbContext dbContext,
         string publicMapId,
-        Dictionary<(int zoom, int x, int y), (string tenantId, int mapId, string file, long cache, string? gridId)> allCoordinates,
+        Dictionary<(int x, int y), WinningCell> winners,
         HashSet<(int x, int y)> copiedZoom0Coords)
     {
-        // Wipe stale entries for this public map. Cascade FK + ON DELETE CASCADE would also
-        // clean them up if the PUBLIC itself were deleted, but here we want to leave the
-        // PUBLIC row in place and refresh just the snapshot.
+        // Wipe stale entries for this public map, then refresh the snapshot.
         await dbContext.PublicMapGridIndex
             .Where(g => g.PublicMapId == publicMapId)
             .ExecuteDeleteAsync();
@@ -755,22 +783,23 @@ public class PublicMapGenerationService : IPublicMapGenerationService
         }
 
         var batch = new List<PublicMapGridIndexEntity>();
-        foreach (var (coord, value) in allCoordinates)
+        foreach (var ((x, y), cell) in winners)
         {
-            if (coord.zoom != 0) continue;
-            if (value.gridId == null) continue;
-            if (!diskCoveredBaseCoords.Contains((coord.x, coord.y))) continue;
+            if (cell.GridId == null) continue;
+            if (!diskCoveredBaseCoords.Contains((x, y))) continue;
 
             batch.Add(new PublicMapGridIndexEntity
             {
                 PublicMapId = publicMapId,
-                UnifiedX = coord.x,
-                UnifiedY = coord.y,
-                GridId = value.gridId,
-                SnapshotCache = value.cache,
+                UnifiedX = x,
+                UnifiedY = y,
+                GridId = cell.GridId,
+                SnapshotCache = cell.Freshness,
                 IndexedAt = now,
-                SourceTenantId = value.tenantId,
-                SourceMapId = value.mapId
+                SourceType = cell.Kind == CellSourceKind.Tenant ? "Tenant" : "Hmap",
+                SourceTenantId = cell.TenantId,
+                SourceMapId = cell.MapId,
+                SourceHmapId = cell.HmapSourceId
             });
         }
 
@@ -839,8 +868,11 @@ public class PublicMapGenerationService : IPublicMapGenerationService
     }
 
     /// <summary>
-    /// Start tile generation from HMap sources for a public map.
-    /// Renders tiles directly from HMap files instead of copying from tenant maps.
+    /// SUPERSEDED — the unified <see cref="StartGenerationAsync"/> now merges tenant AND hmap sources
+    /// in one aligned pass, so this legacy hmap-only path is no longer wired (the endpoint and
+    /// background service both route through the unified pipeline). Retained temporarily for
+    /// interface compatibility; safe to delete along with ReplaceGridIndexFromHmapAsync and
+    /// ExtractAndSaveMarkersFromHmapSourcesAsync.
     /// </summary>
     public async Task<bool> StartGenerationFromHmapSourcesAsync(string publicMapId)
     {

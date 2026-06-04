@@ -353,10 +353,14 @@ public class AlignmentClusterDto
 /// <summary>A source as a member of a landmass, with friendly names and its resolved offset.</summary>
 public class AlignmentSourceRefDto
 {
+    /// <summary>"Tenant" or "Hmap".</summary>
+    public string SourceType { get; set; } = "Tenant";
     public string TenantId { get; set; } = string.Empty;
     public string TenantName { get; set; } = string.Empty;
     public int MapId { get; set; }
     public string MapName { get; set; } = string.Empty;
+    /// <summary>Set for hmap sources.</summary>
+    public int? HmapSourceId { get; set; }
     public int GridCount { get; set; }
     public int OffsetX { get; set; }
     public int OffsetY { get; set; }
