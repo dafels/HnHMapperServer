@@ -78,6 +78,8 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
     public DbSet<PublicMapEntity> PublicMaps => Set<PublicMapEntity>();
     public DbSet<PublicMapSourceEntity> PublicMapSources => Set<PublicMapSourceEntity>();
     public DbSet<PublicMapGridIndexEntity> PublicMapGridIndex => Set<PublicMapGridIndexEntity>();
+    public DbSet<PublicMapSourceAlignmentEntity> PublicMapSourceAlignments => Set<PublicMapSourceAlignmentEntity>();
+    public DbSet<PublicMapAnalysisEntity> PublicMapAnalyses => Set<PublicMapAnalysisEntity>();
 
     // HMap source library tables (global, not tenant-scoped)
     public DbSet<HmapSourceEntity> HmapSources => Set<HmapSourceEntity>();
@@ -859,6 +861,55 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
             entity.HasIndex(e => new { e.PublicMapId, e.UnifiedX, e.UnifiedY }).IsUnique();
             // Fast gridId → coord lookup for merge-mode alignment.
             entity.HasIndex(e => new { e.PublicMapId, e.GridId });
+
+            entity.HasOne<PublicMapEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.PublicMapId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Durable per-source alignment result from the order-independent aligner.
+        modelBuilder.Entity<PublicMapSourceAlignmentEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.PublicMapId).IsRequired();
+            entity.Property(e => e.SourceTenantId).IsRequired();
+            entity.Property(e => e.SourceMapId).IsRequired();
+            entity.Property(e => e.ComponentIndex).IsRequired();
+            entity.Property(e => e.UnifiedOffsetX).IsRequired();
+            entity.Property(e => e.UnifiedOffsetY).IsRequired();
+            entity.Property(e => e.MatchCountToComponent).IsRequired();
+            entity.Property(e => e.AlignmentConfidence).IsRequired();
+            entity.Property(e => e.IsStandalone).IsRequired();
+            entity.Property(e => e.ComputedAt).IsRequired();
+
+            entity.HasIndex(e => new { e.PublicMapId, e.SourceTenantId, e.SourceMapId }).IsUnique();
+
+            entity.HasOne<PublicMapEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.PublicMapId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Persisted pre-merge analysis report (one row per public map).
+        modelBuilder.Entity<PublicMapAnalysisEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.PublicMapId).IsRequired();
+            entity.Property(e => e.AnalyzedAt).IsRequired();
+            entity.Property(e => e.AlignmentHash).IsRequired();
+            entity.Property(e => e.ClusterCount).IsRequired();
+            entity.Property(e => e.StandaloneCount).IsRequired();
+            entity.Property(e => e.EstMinX).IsRequired(false);
+            entity.Property(e => e.EstMaxX).IsRequired(false);
+            entity.Property(e => e.EstMinY).IsRequired(false);
+            entity.Property(e => e.EstMaxY).IsRequired(false);
+            entity.Property(e => e.EstZoom0TileCount).IsRequired();
+            entity.Property(e => e.EstTotalTileCount).IsRequired();
+            entity.Property(e => e.WarningCount).IsRequired();
+            entity.Property(e => e.ReportJson).IsRequired();
+
+            entity.HasIndex(e => e.PublicMapId).IsUnique();
 
             entity.HasOne<PublicMapEntity>()
                 .WithMany()
@@ -1844,6 +1895,96 @@ public sealed class PublicMapGridIndexEntity
 
     /// <summary>UTC timestamp when this index row was written.</summary>
     public DateTime IndexedAt { get; set; }
+
+    /// <summary>Provenance: tenant id of the source whose tile won this coord. Nullable —
+    /// rows from before provenance was added, and the HMap path, leave it null.</summary>
+    public string? SourceTenantId { get; set; }
+
+    /// <summary>Provenance: map id (within <see cref="SourceTenantId"/>) of the winning source.</summary>
+    public int? SourceMapId { get; set; }
+}
+
+/// <summary>
+/// Durable record of how each source was placed by the order-independent aligner during the last
+/// real generation. Lets the SuperAdmin UI and re-imports trust placement without recomputation.
+/// Global table — not tenant-scoped.
+/// </summary>
+public sealed class PublicMapSourceAlignmentEntity
+{
+    public int Id { get; set; }
+
+    /// <summary>FK to PublicMapEntity.Id</summary>
+    public string PublicMapId { get; set; } = string.Empty;
+
+    /// <summary>Source tenant id.</summary>
+    public string SourceTenantId { get; set; } = string.Empty;
+
+    /// <summary>Source map id (within the tenant).</summary>
+    public int SourceMapId { get; set; }
+
+    /// <summary>Index of the landmass/cluster this source belongs to.</summary>
+    public int ComponentIndex { get; set; }
+
+    /// <summary>Unified X offset added to this source's local grid coords.</summary>
+    public int UnifiedOffsetX { get; set; }
+
+    /// <summary>Unified Y offset added to this source's local grid coords.</summary>
+    public int UnifiedOffsetY { get; set; }
+
+    /// <summary>Number of shared-grid matches that tied this source to its cluster (0 if standalone).</summary>
+    public int MatchCountToComponent { get; set; }
+
+    /// <summary>Cluster cycle-consistency confidence (1.0 = all loops close).</summary>
+    public double AlignmentConfidence { get; set; }
+
+    /// <summary>True if this source shares no grids with any other source.</summary>
+    public bool IsStandalone { get; set; }
+
+    /// <summary>UTC timestamp when this alignment was computed.</summary>
+    public DateTime ComputedAt { get; set; }
+}
+
+/// <summary>
+/// Persisted result of the most recent pre-merge analysis for a public map (one row per map).
+/// Lets the blind admin review "what the last analysis decided" before committing a regeneration.
+/// Global table — not tenant-scoped.
+/// </summary>
+public sealed class PublicMapAnalysisEntity
+{
+    public int Id { get; set; }
+
+    /// <summary>FK to PublicMapEntity.Id (one analysis row per public map).</summary>
+    public string PublicMapId { get; set; } = string.Empty;
+
+    /// <summary>UTC timestamp when this analysis was computed.</summary>
+    public DateTime AnalyzedAt { get; set; }
+
+    /// <summary>Hash over the source set + each source's grid-id fingerprint. Generation recomputes
+    /// it and warns if sources changed since this preview, so preview == result for unchanged input.</summary>
+    public string AlignmentHash { get; set; } = string.Empty;
+
+    /// <summary>Number of separate landmasses (connected components).</summary>
+    public int ClusterCount { get; set; }
+
+    /// <summary>Number of sources that share no grids with anything.</summary>
+    public int StandaloneCount { get; set; }
+
+    public int? EstMinX { get; set; }
+    public int? EstMaxX { get; set; }
+    public int? EstMinY { get; set; }
+    public int? EstMaxY { get; set; }
+
+    /// <summary>Estimated zoom-0 output (400x400) tile count.</summary>
+    public int EstZoom0TileCount { get; set; }
+
+    /// <summary>Estimated total tile count across zoom levels 0-6.</summary>
+    public int EstTotalTileCount { get; set; }
+
+    /// <summary>Number of warnings (contradictions + cycle inconsistencies).</summary>
+    public int WarningCount { get; set; }
+
+    /// <summary>Full <c>AnalysisReportDto</c> serialized as JSON (clusters, per-pair table, warnings).</summary>
+    public string ReportJson { get; set; } = string.Empty;
 }
 
 /// <summary>

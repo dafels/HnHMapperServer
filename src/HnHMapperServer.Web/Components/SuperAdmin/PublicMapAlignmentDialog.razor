@@ -1,0 +1,276 @@
+@using HnHMapperServer.Core.DTOs
+@using MudBlazor
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@inject ILogger<PublicMapAlignmentDialog> Logger
+
+<MudDialog>
+    <DialogContent>
+        <MudText Typo="Typo.h6" Class="mb-1">Merge preview — @PublicMap.Name</MudText>
+        <MudText Typo="Typo.caption" Class="mb-3">
+            How the registered tenant sources will be aligned and laid out. This is automatic and
+            does not depend on source order or priority.
+        </MudText>
+
+        @if (_isLoading)
+        {
+            <MudProgressLinear Indeterminate="true" Class="my-4" />
+            <MudText Typo="Typo.body2">Analyzing sources…</MudText>
+        }
+        else if (_report == null)
+        {
+            <MudAlert Severity="Severity.Warning" Dense="true">
+                No analysis available. This public map may have no tenant sources yet.
+            </MudAlert>
+        }
+        else
+        {
+            <MudStack Spacing="3">
+                <MudPaper Class="pa-3" Elevation="0" Outlined="true">
+                    <MudStack Row="true" Spacing="2" Wrap="Wrap.Wrap" AlignItems="AlignItems.Center">
+                        <MudChip T="string" Size="Size.Small" Color="Color.Primary" Icon="@Icons.Material.Filled.Layers">
+                            @_report.ClusterCount landmass@(_report.ClusterCount == 1 ? "" : "s")
+                        </MudChip>
+                        <MudChip T="string" Size="Size.Small" Color="Color.Default" Icon="@Icons.Material.Filled.Source">
+                            @_report.TotalSources source@(_report.TotalSources == 1 ? "" : "s")
+                        </MudChip>
+                        <MudChip T="string" Size="Size.Small" Color="@(_report.StandaloneCount > 0 ? Color.Info : Color.Default)"
+                                 Icon="@Icons.Material.Filled.CropFree">
+                            @_report.StandaloneCount standalone
+                        </MudChip>
+                        <MudChip T="string" Size="Size.Small" Color="@(_report.HasConflicts ? Color.Warning : Color.Success)"
+                                 Icon="@(_report.HasConflicts ? Icons.Material.Filled.Warning : Icons.Material.Filled.CheckCircle)">
+                            @_report.WarningCount conflict@(_report.WarningCount == 1 ? "" : "s")
+                        </MudChip>
+                        <MudChip T="string" Size="Size.Small" Color="Color.Default" Icon="@Icons.Material.Filled.GridOn">
+                            ~@_report.EstTotalTileCount.ToString("N0") tiles
+                        </MudChip>
+                        @if (_report.EstMinX.HasValue)
+                        {
+                            <MudText Typo="Typo.caption">
+                                bounds X[@_report.EstMinX..@_report.EstMaxX] Y[@_report.EstMinY..@_report.EstMaxY]
+                            </MudText>
+                        }
+                    </MudStack>
+                </MudPaper>
+
+                @if (_report.Conflicts.Any())
+                {
+                    <MudAlert Severity="Severity.Warning" Dense="true">
+                        <MudText Typo="Typo.body2" Class="mb-1"><strong>Contradictions detected</strong> — these sources share grid ids but disagree on how they line up (likely a hash collision or a cave/overlay, not a real overlap). They are treated as not overlapping.</MudText>
+                        <ul style="margin:0; padding-left:1.2rem;">
+                            @foreach (var c in _report.Conflicts)
+                            {
+                                <li><MudText Typo="Typo.caption">@c.Message</MudText></li>
+                            }
+                        </ul>
+                    </MudAlert>
+                }
+
+                <div>
+                    <MudText Typo="Typo.subtitle2" Class="mb-1">Landmasses</MudText>
+                    <MudTable T="AlignmentClusterDto" Items="@_report.Clusters" Dense="true" Hover="true" Elevation="0" Outlined="true">
+                        <HeaderContent>
+                            <MudTh>#</MudTh>
+                            <MudTh>Type</MudTh>
+                            <MudTh>Sources</MudTh>
+                            <MudTh>Grids</MudTh>
+                            <MudTh>Origin</MudTh>
+                            <MudTh>Size</MudTh>
+                            <MudTh>Confidence</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd DataLabel="#">@context.Index</MudTd>
+                            <MudTd DataLabel="Type">
+                                <MudChip T="string" Size="Size.Small" Color="@(context.IsStandalone ? Color.Info : Color.Primary)">
+                                    @(context.IsStandalone ? "standalone" : "merged")
+                                </MudChip>
+                            </MudTd>
+                            <MudTd DataLabel="Sources">
+                                @string.Join(", ", context.Sources.Select(s => $"{s.TenantName}/{s.MapName}"))
+                            </MudTd>
+                            <MudTd DataLabel="Grids">@context.GridCount.ToString("N0")</MudTd>
+                            <MudTd DataLabel="Origin">(@context.OriginX, @context.OriginY)</MudTd>
+                            <MudTd DataLabel="Size">@(context.Width)×@(context.Height)</MudTd>
+                            <MudTd DataLabel="Confidence">
+                                @if (context.IsStandalone)
+                                {
+                                    <MudText Typo="Typo.caption" Color="Color.Secondary">—</MudText>
+                                }
+                                else
+                                {
+                                    <MudChip T="string" Size="Size.Small"
+                                             Color="@(context.Confidence >= 0.999 ? Color.Success : Color.Warning)">
+                                        @($"{context.Confidence * 100:F0}%")
+                                    </MudChip>
+                                }
+                            </MudTd>
+                        </RowTemplate>
+                    </MudTable>
+                </div>
+
+                @if (_report.Pairs.Any())
+                {
+                    <MudExpansionPanels Elevation="0" Outlined="true">
+                        <MudExpansionPanel Text="@($"Source overlap detail ({_report.Pairs.Count} pair(s) share grids)")">
+                            <MudTable T="AlignmentPairDto" Items="@_report.Pairs" Dense="true" Hover="true" Elevation="0">
+                                <HeaderContent>
+                                    <MudTh>Source A</MudTh>
+                                    <MudTh>Source B</MudTh>
+                                    <MudTh>Shared grids</MudTh>
+                                    <MudTh>Offset</MudTh>
+                                    <MudTh>Agreement</MudTh>
+                                    <MudTh>Result</MudTh>
+                                </HeaderContent>
+                                <RowTemplate>
+                                    <MudTd DataLabel="Source A">@context.SourceAName</MudTd>
+                                    <MudTd DataLabel="Source B">@context.SourceBName</MudTd>
+                                    <MudTd DataLabel="Shared grids">@context.SharedGridCount</MudTd>
+                                    <MudTd DataLabel="Offset">(@context.ConsensusOffsetX, @context.ConsensusOffsetY)</MudTd>
+                                    <MudTd DataLabel="Agreement">@($"{context.Confidence * 100:F0}%")</MudTd>
+                                    <MudTd DataLabel="Result">
+                                        @if (context.Accepted)
+                                        {
+                                            <MudChip T="string" Size="Size.Small" Color="Color.Success">aligned</MudChip>
+                                        }
+                                        else
+                                        {
+                                            <MudChip T="string" Size="Size.Small" Color="Color.Warning">
+                                                @(context.RejectReason == "insufficient_matches" ? "too few shared" : "contradictory")
+                                            </MudChip>
+                                        }
+                                    </MudTd>
+                                </RowTemplate>
+                            </MudTable>
+                        </MudExpansionPanel>
+                    </MudExpansionPanels>
+                }
+
+                <MudText Typo="Typo.caption" Color="Color.Secondary">
+                    Analyzed @_report.AnalyzedAt.ToString("yyyy-MM-dd HH:mm:ss") UTC
+                </MudText>
+            </MudStack>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Close" Disabled="@_isBusy">Close</MudButton>
+        <MudButton StartIcon="@Icons.Material.Filled.Refresh"
+                   OnClick="Recompute"
+                   Disabled="@_isBusy">
+            Recompute
+        </MudButton>
+        <MudButton Color="Color.Warning"
+                   Variant="Variant.Filled"
+                   StartIcon="@Icons.Material.Filled.Autorenew"
+                   OnClick="Regenerate"
+                   Disabled="@(_isBusy || _report == null)">
+            Regenerate Now
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] IMudDialogInstance? MudDialog { get; set; }
+    [Parameter] public PublicMapDto PublicMap { get; set; } = default!;
+
+    private PublicMapAnalysisReportDto? _report;
+    private bool _isLoading = true;
+    private bool _isBusy = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAnalysis(recompute: false);
+    }
+
+    private async Task LoadAnalysis(bool recompute)
+    {
+        _isLoading = true;
+        StateHasChanged();
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var url = $"/api/superadmin/public-maps/{PublicMap.Id}/alignment-analysis";
+            var response = recompute
+                ? await client.PostAsync(url, null)
+                : await client.GetAsync(url);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _report = await response.Content.ReadFromJsonAsync<PublicMapAnalysisReportDto>();
+            }
+            else
+            {
+                Snackbar.Add("Failed to load alignment analysis", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error loading alignment analysis for {PublicMapId}", PublicMap.Id);
+            Snackbar.Add("Error loading alignment analysis", Severity.Error);
+        }
+        finally
+        {
+            _isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task Recompute()
+    {
+        _isBusy = true;
+        try
+        {
+            await LoadAnalysis(recompute: true);
+            Snackbar.Add("Analysis recomputed", Severity.Success);
+        }
+        finally
+        {
+            _isBusy = false;
+        }
+    }
+
+    private async Task Regenerate()
+    {
+        if (_report is { HasConflicts: true })
+        {
+            var confirmed = await DialogService.ShowMessageBox(
+                "Regenerate with conflicts?",
+                $"This merge has {_report.WarningCount} contradiction(s). Sources that disagree on alignment will be kept as separate landmasses. Regenerate anyway?",
+                yesText: "Regenerate", cancelText: "Cancel");
+            if (confirmed != true) return;
+        }
+
+        _isBusy = true;
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.PostAsync($"/api/superadmin/public-maps/{PublicMap.Id}/regenerate", null);
+
+            if (response.IsSuccessStatusCode)
+            {
+                Snackbar.Add($"Regeneration started for '{PublicMap.Name}'", Severity.Success);
+                MudDialog?.Close(DialogResult.Ok(true));
+            }
+            else if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+            {
+                Snackbar.Add("Generation already in progress", Severity.Warning);
+            }
+            else
+            {
+                Snackbar.Add("Failed to start regeneration", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error triggering regeneration for {PublicMapId}", PublicMap.Id);
+            Snackbar.Add("Error starting regeneration", Severity.Error);
+        }
+        finally
+        {
+            _isBusy = false;
+        }
+    }
+
+    private void Close() => MudDialog?.Cancel();
+}

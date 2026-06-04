@@ -288,3 +288,103 @@ public class SourceContributionDto
     public int NewGrids { get; set; }
     public int OverlappingGrids { get; set; }
 }
+
+// ========================================
+// Pre-merge alignment analysis DTOs
+// ========================================
+
+/// <summary>
+/// Result of the order-independent pre-merge analysis: how the registered tenant sources will be
+/// woven into landmasses and laid out, surfaced for an admin who cannot see the maps.
+/// </summary>
+public class PublicMapAnalysisReportDto
+{
+    public string PublicMapId { get; set; } = string.Empty;
+    public DateTime AnalyzedAt { get; set; }
+
+    /// <summary>Fingerprint of the source set + grid content this analysis was computed against.
+    /// If it differs at generation time, sources changed since the preview.</summary>
+    public string AlignmentHash { get; set; } = string.Empty;
+
+    public int TotalSources { get; set; }
+    public int TotalGrids { get; set; }
+
+    /// <summary>Number of separate landmasses (connected components).</summary>
+    public int ClusterCount { get; set; }
+
+    /// <summary>Sources that share no grids with anything (each its own standalone landmass).</summary>
+    public int StandaloneCount { get; set; }
+
+    public int WarningCount { get; set; }
+
+    // Estimated unified bounds + tile cost (so the admin sees scope before a full regen).
+    public int? EstMinX { get; set; }
+    public int? EstMaxX { get; set; }
+    public int? EstMinY { get; set; }
+    public int? EstMaxY { get; set; }
+    public int EstZoom0TileCount { get; set; }
+    public int EstTotalTileCount { get; set; }
+
+    public List<AlignmentClusterDto> Clusters { get; set; } = new();
+    public List<AlignmentPairDto> Pairs { get; set; } = new();
+    public List<AlignmentConflictDto> Conflicts { get; set; } = new();
+
+    public bool HasConflicts => WarningCount > 0;
+}
+
+/// <summary>One landmass: the sources that align together (or a single standalone source).</summary>
+public class AlignmentClusterDto
+{
+    public int Index { get; set; }
+    public bool IsStandalone { get; set; }
+    public int GridCount { get; set; }
+    public int OriginX { get; set; }
+    public int OriginY { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
+
+    /// <summary>1.0 = every overlap loop closes; &lt;1.0 = contradictory overlaps were found.</summary>
+    public double Confidence { get; set; }
+    public int MaxResidual { get; set; }
+
+    public List<AlignmentSourceRefDto> Sources { get; set; } = new();
+}
+
+/// <summary>A source as a member of a landmass, with friendly names and its resolved offset.</summary>
+public class AlignmentSourceRefDto
+{
+    public string TenantId { get; set; } = string.Empty;
+    public string TenantName { get; set; } = string.Empty;
+    public int MapId { get; set; }
+    public string MapName { get; set; } = string.Empty;
+    public int GridCount { get; set; }
+    public int OffsetX { get; set; }
+    public int OffsetY { get; set; }
+}
+
+/// <summary>How a pair of sources relate via shared grid ids (accepted = they overlap and align).</summary>
+public class AlignmentPairDto
+{
+    public string SourceAName { get; set; } = string.Empty;
+    public string SourceBName { get; set; } = string.Empty;
+    public int SharedGridCount { get; set; }
+    public int ConsensusOffsetX { get; set; }
+    public int ConsensusOffsetY { get; set; }
+
+    /// <summary>Fraction of shared grids agreeing on the dominant offset (alignment confidence).</summary>
+    public double Confidence { get; set; }
+    public bool Accepted { get; set; }
+
+    /// <summary>"insufficient_matches" or "contradiction" when not accepted.</summary>
+    public string? RejectReason { get; set; }
+}
+
+/// <summary>A reportable problem: a contradictory overlap or an inconsistent alignment loop.</summary>
+public class AlignmentConflictDto
+{
+    public string Type { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public string? SourceA { get; set; }
+    public string? SourceB { get; set; }
+    public int Residual { get; set; }
+}

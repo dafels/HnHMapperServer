@@ -153,6 +153,8 @@ builder.Services.AddScoped<ILargeTileService, LargeTileService>();
 
 // Public maps services (global, not tenant-scoped)
 builder.Services.AddScoped<IPublicMapService, PublicMapService>();
+builder.Services.AddSingleton<IAlignmentSolver, AlignmentSolver>();  // pure, order-independent source aligner
+builder.Services.AddScoped<IPublicMapAnalysisService, PublicMapAnalysisService>();  // pre-merge analysis/preview
 builder.Services.AddSingleton<IPublicMapGenerationService, PublicMapGenerationService>();
 builder.Services.AddScoped<IHmapSourceService, HmapSourceService>();  // HMap source library service
 

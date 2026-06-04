@@ -128,6 +128,12 @@
                                               Size="Size.Small"
                                               OnClick="@(() => ManageHmapSources(context))" />
                             </MudTooltip>
+                            <MudTooltip Text="Analyze / Preview Merge">
+                                <MudIconButton Icon="@Icons.Material.Filled.Insights"
+                                              Color="Color.Tertiary"
+                                              Size="Size.Small"
+                                              OnClick="@(() => AnalyzeAlignment(context))" />
+                            </MudTooltip>
                             <MudTooltip Text="@(context.GenerationStatus == "running" ? "Generation in progress..." : "Regenerate Now")">
                                 <MudIconButton Icon="@Icons.Material.Filled.Autorenew"
                                               Color="Color.Warning"
@@ -314,6 +320,24 @@
         var result = await dialog.Result;
 
         if (!result.Canceled)
+        {
+            await LoadPublicMaps();
+        }
+    }
+
+    private async Task AnalyzeAlignment(PublicMapDto publicMap)
+    {
+        var parameters = new DialogParameters<PublicMapAlignmentDialog>
+        {
+            { x => x.PublicMap, publicMap }
+        };
+        var options = new DialogOptions { MaxWidth = MaxWidth.Large, FullWidth = true };
+
+        var dialog = await DialogService.ShowAsync<PublicMapAlignmentDialog>("Merge Preview", parameters, options);
+        var result = await dialog.Result;
+
+        // Dialog returns Ok(true) only when the admin triggered a regeneration from it.
+        if (result is not null && !result.Canceled)
         {
             await LoadPublicMaps();
         }

@@ -520,12 +520,7 @@ public class PublicMapTenantImportService : IPublicMapTenantImportService
         return ((Median(dxs), Median(dys)), targetGrids.Count);
     }
 
-    private static int Median(List<int> values)
-    {
-        values.Sort();
-        var n = values.Count;
-        return n % 2 == 1 ? values[n / 2] : (values[n / 2 - 1] + values[n / 2]) / 2;
-    }
+    private static int Median(List<int> values) => Alignment.AlignmentMath.Median(values);
 
     private static bool IsSubTileFullyTransparent(Image<Rgba32> img, int originX, int originY)
     {

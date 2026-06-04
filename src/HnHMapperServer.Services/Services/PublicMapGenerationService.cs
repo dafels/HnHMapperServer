@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using HnHMapperServer.Core.DTOs;
 using HnHMapperServer.Infrastructure.Data;
+using HnHMapperServer.Services.Alignment;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -24,6 +25,7 @@ public class PublicMapGenerationService : IPublicMapGenerationService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IAlignmentSolver _alignmentSolver;
     private readonly ILogger<PublicMapGenerationService> _logger;
     private readonly string _gridStorage;
     private readonly ConcurrentQueue<string> _generationQueue = new();
@@ -32,11 +34,13 @@ public class PublicMapGenerationService : IPublicMapGenerationService
     public PublicMapGenerationService(
         IServiceProvider serviceProvider,
         IHttpClientFactory httpClientFactory,
+        IAlignmentSolver alignmentSolver,
         IConfiguration configuration,
         ILogger<PublicMapGenerationService> logger)
     {
         _serviceProvider = serviceProvider;
         _httpClientFactory = httpClientFactory;
+        _alignmentSolver = alignmentSolver;
         _logger = logger;
         _gridStorage = configuration["GridStorage"] ?? "map";
     }
@@ -155,8 +159,14 @@ public class PublicMapGenerationService : IPublicMapGenerationService
                     if (tile.Zoom == 0 && sourceGridByCoord.TryGetValue((tile.CoordX, tile.CoordY), out var gid))
                         gridId = gid;
 
-                    // Keep the newest tile (highest Cache value)
-                    if (!allCoordinates.TryGetValue(key, out var existing) || tile.Cache > existing.cache)
+                    // Deterministic, order/priority-free winner for an overlapping coordinate:
+                    //   1) freshest tile (highest Cache), then
+                    //   2) smallest SourceKey (TenantId, then MapId), then
+                    //   3) smallest GridId.
+                    // This gives the same result regardless of source iteration order.
+                    if (!allCoordinates.TryGetValue(key, out var existing)
+                        || TileWins(tile.Cache, tile.TenantId, tile.MapId, gridId,
+                                    existing.cache, existing.tenantId, existing.mapId, existing.gridId))
                     {
                         allCoordinates[key] = (tile.TenantId, tile.MapId, tile.File, tile.Cache, gridId);
                     }
@@ -371,77 +381,121 @@ public class PublicMapGenerationService : IPublicMapGenerationService
     }
 
     /// <summary>
-    /// Calculates coordinate offsets for each source by finding shared grid IDs.
-    /// Uses the same approach as GridService.ProcessGridUpdateAsync for map merging.
+    /// Computes a unified coordinate offset for every source via the order-independent
+    /// <see cref="IAlignmentSolver"/>: overlapping sources are woven into one rigid landmass using
+    /// shared content-hash grid ids, and disjoint (standalone) sources are auto-laid-out side by side
+    /// without collision. The result is a pure function of the sources' grid content — it does NOT
+    /// depend on source order, row id, or <c>PublicMapSourceEntity.Priority</c>.
+    /// Returns offsets keyed by <c>PublicMapSourceEntity.Id</c>, matching the previous contract.
     /// </summary>
     private async Task<Dictionary<int, (int X, int Y)>> CalculateSourceOffsetsAsync(
         ApplicationDbContext dbContext,
         List<PublicMapSourceEntity> sources)
     {
         var offsets = new Dictionary<int, (int X, int Y)>();
-
         if (sources.Count == 0)
             return offsets;
 
-        // First source is the base (offset 0,0)
-        var baseSource = sources.First();
-        offsets[baseSource.Id] = (0, 0);
+        var loaded = await PublicMapSourceLoader.LoadAsync(dbContext, sources);
+        var keyToSource = loaded.ToDictionary(l => l.GridSet.SourceKey, l => l.Source);
+        var sourceSets = loaded.Select(l => l.GridSet).ToList();
 
-        if (sources.Count == 1)
-            return offsets;
-
-        // Load base grids: gridId → (coordX, coordY)
-        var baseGrids = await dbContext.Grids
-            .IgnoreQueryFilters()
-            .Where(g => g.TenantId == baseSource.TenantId && g.Map == baseSource.MapId)
-            .ToDictionaryAsync(g => g.Id, g => (g.CoordX, g.CoordY));
-
-        _logger.LogInformation(
-            "Base source {SourceId} ({TenantId}/{MapId}) has {GridCount} grids",
-            baseSource.Id, baseSource.TenantId, baseSource.MapId, baseGrids.Count);
-
-        // Calculate offset for each other source
-        foreach (var source in sources.Skip(1))
-        {
-            var sourceGrids = await dbContext.Grids
-                .IgnoreQueryFilters()
-                .Where(g => g.TenantId == source.TenantId && g.Map == source.MapId)
-                .ToDictionaryAsync(g => g.Id, g => (g.CoordX, g.CoordY));
-
+        foreach (var (source, gridSet) in loaded)
             _logger.LogInformation(
                 "Source {SourceId} ({TenantId}/{MapId}) has {GridCount} grids",
-                source.Id, source.TenantId, source.MapId, sourceGrids.Count);
+                source.Id, source.TenantId, source.MapId, gridSet.Grids.Count);
 
-            // Find first shared grid ID
-            var sharedGridId = baseGrids.Keys.FirstOrDefault(id => sourceGrids.ContainsKey(id));
+        var result = _alignmentSolver.Align(sourceSets);
 
-            if (sharedGridId != null)
+        foreach (var (key, off) in result.Offsets)
+            if (keyToSource.TryGetValue(key, out var src))
+                offsets[src.Id] = off;
+
+        foreach (var cluster in result.Clusters)
+            _logger.LogInformation(
+                "Aligned landmass {Index}: {SourceCount} source(s), {GridCount} grids, origin ({X},{Y}), confidence {Conf:F2}{Standalone}",
+                cluster.Index, cluster.SourceKeys.Count, cluster.GridCount,
+                cluster.PlacedOriginX, cluster.PlacedOriginY, cluster.Confidence,
+                cluster.IsStandalone ? " [standalone]" : "");
+
+        foreach (var w in result.Warnings)
+            _logger.LogWarning("Alignment warning ({Type}): {Message}", w.Type, w.Message);
+
+        // Persist per-source alignment (real generation only) so the UI / re-imports can trust
+        // placement without recomputing it.
+        await PersistSourceAlignmentsAsync(dbContext, sources[0].PublicMapId, keyToSource, result);
+
+        return offsets;
+    }
+
+    /// <summary>
+    /// Wipe + rewrite the durable <c>PublicMapSourceAlignment</c> rows for this public map from the
+    /// solver result.
+    /// </summary>
+    private static async Task PersistSourceAlignmentsAsync(
+        ApplicationDbContext dbContext,
+        string publicMapId,
+        Dictionary<string, PublicMapSourceEntity> keyToSource,
+        AlignmentResult result)
+    {
+        await dbContext.PublicMapSourceAlignments
+            .Where(a => a.PublicMapId == publicMapId)
+            .ExecuteDeleteAsync();
+
+        // Sum of accepted-edge matches incident to a source = how strongly it's tied to its cluster.
+        var matchByKey = new Dictionary<string, int>();
+        foreach (var e in result.Edges)
+        {
+            if (!e.Accepted) continue;
+            matchByKey[e.SourceA] = matchByKey.GetValueOrDefault(e.SourceA) + e.TotalMatches;
+            matchByKey[e.SourceB] = matchByKey.GetValueOrDefault(e.SourceB) + e.TotalMatches;
+        }
+
+        var now = DateTime.UtcNow;
+        var rows = new List<PublicMapSourceAlignmentEntity>();
+        foreach (var cluster in result.Clusters)
+        {
+            foreach (var key in cluster.SourceKeys)
             {
-                var baseCoord = baseGrids[sharedGridId];
-                var sourceCoord = sourceGrids[sharedGridId];
-                var calculatedOffset = (X: baseCoord.CoordX - sourceCoord.CoordX,
-                                        Y: baseCoord.CoordY - sourceCoord.CoordY);
-                offsets[source.Id] = calculatedOffset;
-
-                _logger.LogInformation(
-                    "Auto-aligned source {SourceId} using shared grid {GridId}: " +
-                    "base coord ({BaseX}, {BaseY}), source coord ({SourceX}, {SourceY}) → offset ({OffsetX}, {OffsetY})",
-                    source.Id, sharedGridId,
-                    baseCoord.CoordX, baseCoord.CoordY,
-                    sourceCoord.CoordX, sourceCoord.CoordY,
-                    calculatedOffset.X, calculatedOffset.Y);
-            }
-            else
-            {
-                offsets[source.Id] = (0, 0);
-                _logger.LogWarning(
-                    "No shared grids found between base source and source {SourceId} ({TenantId}/{MapId}) - using offset (0, 0). " +
-                    "Maps may not align correctly.",
-                    source.Id, source.TenantId, source.MapId);
+                if (!keyToSource.TryGetValue(key, out var src)) continue;
+                var off = result.Offsets[key];
+                rows.Add(new PublicMapSourceAlignmentEntity
+                {
+                    PublicMapId = publicMapId,
+                    SourceTenantId = src.TenantId,
+                    SourceMapId = src.MapId,
+                    ComponentIndex = cluster.Index,
+                    UnifiedOffsetX = off.X,
+                    UnifiedOffsetY = off.Y,
+                    MatchCountToComponent = matchByKey.GetValueOrDefault(key),
+                    AlignmentConfidence = cluster.Confidence,
+                    IsStandalone = cluster.IsStandalone,
+                    ComputedAt = now
+                });
             }
         }
 
-        return offsets;
+        if (rows.Count > 0)
+        {
+            await dbContext.PublicMapSourceAlignments.AddRangeAsync(rows);
+            await dbContext.SaveChangesAsync();
+        }
+    }
+
+    /// <summary>
+    /// Total order for picking the winning tile at an overlapping unified coordinate:
+    /// freshest Cache, then smallest SourceKey (tenant, then map), then smallest grid id.
+    /// Pure and order-independent — never consults source order or Priority.
+    /// </summary>
+    private static bool TileWins(
+        long candCache, string candTenant, int candMap, string? candGrid,
+        long curCache, string curTenant, int curMap, string? curGrid)
+    {
+        if (candCache != curCache) return candCache > curCache;
+        var t = string.CompareOrdinal(candTenant, curTenant);
+        if (t != 0) return t < 0;
+        if (candMap != curMap) return candMap < curMap;
+        return string.CompareOrdinal(candGrid ?? "", curGrid ?? "") < 0;
     }
 
     /// <summary>
@@ -714,7 +768,9 @@ public class PublicMapGenerationService : IPublicMapGenerationService
                 UnifiedY = coord.y,
                 GridId = value.gridId,
                 SnapshotCache = value.cache,
-                IndexedAt = now
+                IndexedAt = now,
+                SourceTenantId = value.tenantId,
+                SourceMapId = value.mapId
             });
         }
 

@@ -156,6 +156,12 @@ public static class SuperadminEndpoints
         // GET /api/superadmin/public-maps/{id}/status - Get generation status
         group.MapGet("/public-maps/{id}/status", GetPublicMapGenerationStatus);
 
+        // GET /api/superadmin/public-maps/{id}/alignment-analysis - Pre-merge alignment preview
+        group.MapGet("/public-maps/{id}/alignment-analysis", GetPublicMapAlignmentAnalysis);
+
+        // POST /api/superadmin/public-maps/{id}/alignment-analysis - Recompute + persist preview
+        group.MapPost("/public-maps/{id}/alignment-analysis", RecomputePublicMapAlignmentAnalysis);
+
         // GET /api/superadmin/available-tenant-maps - Get available tenant maps for source selection
         group.MapGet("/available-tenant-maps", GetAvailableTenantMaps);
 
@@ -2309,6 +2315,54 @@ public static class SuperadminEndpoints
         {
             logger.LogError(ex, "Error triggering regeneration for public map {PublicMapId}", id);
             return Results.Problem("Failed to trigger regeneration");
+        }
+    }
+
+    /// <summary>
+    /// GET /api/superadmin/public-maps/{id}/alignment-analysis
+    /// Returns the last persisted pre-merge alignment analysis, computing it on demand if none
+    /// has been stored yet. Lets a blind admin preview how sources will merge before regenerating.
+    /// </summary>
+    private static async Task<IResult> GetPublicMapAlignmentAnalysis(
+        string id,
+        IPublicMapAnalysisService analysisService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var report = await analysisService.GetStoredAsync(id)
+                         ?? await analysisService.AnalyzeAsync(id);
+            if (report == null)
+                return Results.NotFound(new { error = "Public map not found" });
+            return Results.Ok(report);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error getting alignment analysis for public map {PublicMapId}", id);
+            return Results.Problem("Failed to get alignment analysis");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/public-maps/{id}/alignment-analysis
+    /// Recomputes and persists the pre-merge alignment analysis from current source data.
+    /// </summary>
+    private static async Task<IResult> RecomputePublicMapAlignmentAnalysis(
+        string id,
+        IPublicMapAnalysisService analysisService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var report = await analysisService.AnalyzeAsync(id);
+            if (report == null)
+                return Results.NotFound(new { error = "Public map not found" });
+            return Results.Ok(report);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error computing alignment analysis for public map {PublicMapId}", id);
+            return Results.Problem("Failed to compute alignment analysis");
         }
     }
 
