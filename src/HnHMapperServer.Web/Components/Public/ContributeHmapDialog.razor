@@ -40,7 +40,7 @@
             @if (fileTooLarge)
             {
                 <MudAlert Severity="Severity.Error" Dense="true">
-                    File too large. Maximum size is 200 MB.
+                    File too large. Maximum size is 300 MB.
                 </MudAlert>
             }
 
@@ -97,7 +97,7 @@
     [Parameter]
     public string Slug { get; set; } = string.Empty;
 
-    private const long MaxFileSizeBytes = 200L * 1024 * 1024; // 200 MB
+    private const long MaxFileSizeBytes = 300L * 1024 * 1024; // 300 MB
     private ElementReference fileInput;
 
     // Store file data read via JS interop
@@ -153,7 +153,7 @@
             if (result.Size > MaxFileSizeBytes)
             {
                 fileTooLarge = true;
-                errorMessage = $"File too large ({FormatFileSize(result.Size)}). Maximum size is 200 MB.";
+                errorMessage = $"File too large ({FormatFileSize(result.Size)}). Maximum size is 300 MB.";
                 return;
             }
 
@@ -213,7 +213,7 @@
             }
             else if (response.StatusCode == System.Net.HttpStatusCode.RequestEntityTooLarge)
             {
-                errorMessage = "File too large. Maximum size is 200 MB.";
+                errorMessage = "File too large. Maximum size is 300 MB.";
                 Snackbar.Add(errorMessage, Severity.Error);
             }
             else

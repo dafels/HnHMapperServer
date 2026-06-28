@@ -11,7 +11,7 @@ namespace HnHMapperServer.Api.Endpoints;
 /// </summary>
 public static class PublicContributionEndpoints
 {
-    private const int MaxFileSizeBytes = 200 * 1024 * 1024; // 200 MB
+    private const int MaxFileSizeBytes = 300 * 1024 * 1024; // 300 MB
     private const string HmapSignature = "Haven Mapfile 1";
     private static readonly Regex SafeFilenameRegex = new(@"[^a-zA-Z0-9\-_\.]", RegexOptions.Compiled);
 

@@ -144,8 +144,8 @@ public class HmapImportService : IHmapImportService
     private readonly ILogger<HmapImportService> _logger;
     private const int GRID_SIZE = 100; // 100x100 tiles per grid
 
-    // Security: Maximum HMAP file size (200 MB)
-    private const long MaxHmapFileSizeBytes = 200 * 1024 * 1024;
+    // Security: Maximum HMAP file size (300 MB)
+    private const long MaxHmapFileSizeBytes = 300 * 1024 * 1024;
 
     // Global lock to prevent concurrent imports across all tenants
     // Only one .hmap import can run at a time to prevent server overload
