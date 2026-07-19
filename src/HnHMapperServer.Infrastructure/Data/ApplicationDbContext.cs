@@ -85,6 +85,12 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
     public DbSet<HmapSourceEntity> HmapSources => Set<HmapSourceEntity>();
     public DbSet<PublicMapHmapSourceEntity> PublicMapHmapSources => Set<PublicMapHmapSourceEntity>();
 
+    // Cookbook food catalog (tenant-scoped: imports and client uploads are per tenant)
+    public DbSet<FoodEntity> Foods => Set<FoodEntity>();
+    public DbSet<FoodVariantEntity> FoodVariants => Set<FoodVariantEntity>();
+    public DbSet<FoodPanelEntity> FoodPanels => Set<FoodPanelEntity>();
+    public DbSet<FoodPanelItemEntity> FoodPanelItems => Set<FoodPanelItemEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -927,6 +933,120 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        // Cookbook food catalog configuration (tenant-scoped)
+        modelBuilder.Entity<FoodEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.TenantId).IsRequired();
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.ResourceName).IsRequired().HasMaxLength(300);
+            entity.Property(e => e.WikiUrl).IsRequired(false).HasMaxLength(500);
+            entity.Property(e => e.RecipeText).IsRequired(false).HasMaxLength(500);
+            entity.Property(e => e.CookingStation).IsRequired(false).HasMaxLength(300);
+            entity.Property(e => e.Energy).IsRequired();
+            entity.Property(e => e.Hunger).IsRequired();
+            entity.Property(e => e.ImportedAt).IsRequired();
+
+            entity.HasIndex(e => e.TenantId);
+            // One food name per tenant
+            entity.HasIndex(e => new { e.TenantId, e.Name }).IsUnique();
+
+            // Feps/Ingredients are owned collections stored as JSON columns;
+            // Categories/SatiationGroups are primitive collections (JSON TEXT).
+            entity.OwnsMany(e => e.Feps, b => b.ToJson());
+            entity.OwnsMany(e => e.Ingredients, b => b.ToJson());
+
+            entity.HasOne<TenantEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Cookbook recipe variations (tenant-scoped).
+        // One row per distinct ingredient combination recorded for a food.
+        modelBuilder.Entity<FoodVariantEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.TenantId).IsRequired();
+            entity.Property(e => e.FoodId).IsRequired();
+            entity.Property(e => e.IngredientSignature).IsRequired().HasMaxLength(1000);
+            entity.Property(e => e.Energy).IsRequired();
+            entity.Property(e => e.Hunger).IsRequired();
+            entity.Property(e => e.TimesSeen).IsRequired();
+
+            entity.HasIndex(e => e.TenantId);
+            entity.HasIndex(e => e.FoodId);
+            // Upsert key for client uploads: one row per ingredient combination per food
+            entity.HasIndex(e => new { e.FoodId, e.IngredientSignature }).IsUnique();
+
+            entity.OwnsMany(e => e.Feps, b => b.ToJson());
+            entity.OwnsMany(e => e.Ingredients, b => b.ToJson());
+
+            entity.HasOne<FoodEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.FoodId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne<TenantEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Cookbook food panels (tenant-scoped; per-user ownership enforced in the service)
+        modelBuilder.Entity<FoodPanelEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.TenantId).IsRequired();
+            entity.Property(e => e.UserId).IsRequired();
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.IsShared).IsRequired().HasDefaultValue(false);
+            entity.Property(e => e.IsFavorites).IsRequired().HasDefaultValue(false);
+            entity.Property(e => e.CreatedAt).IsRequired();
+            entity.Property(e => e.UpdatedAt).IsRequired();
+
+            entity.HasIndex(e => e.TenantId);
+            entity.HasIndex(e => e.UserId);
+            // One panel name per user per tenant
+            entity.HasIndex(e => new { e.TenantId, e.UserId, e.Name }).IsUnique();
+            // At most one Favorites panel per user per tenant
+            entity.HasIndex(e => new { e.TenantId, e.UserId })
+                .IsUnique()
+                .HasFilter("\"IsFavorites\" = 1");
+
+            entity.HasOne<TenantEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne<ApplicationUser>()
+                .WithMany()
+                .HasForeignKey(e => e.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // Cookbook food panel items. Foods/variants are referenced BY NAME (+ ingredient
+        // signature for variants) so panels survive the wipe-and-replace catalog imports;
+        // unresolved names render grayed in the UI.
+        modelBuilder.Entity<FoodPanelItemEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.PanelId).IsRequired();
+            entity.Property(e => e.FoodName).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.IngredientSignature).IsRequired().HasMaxLength(1000).HasDefaultValue(string.Empty);
+            entity.Property(e => e.Label).IsRequired(false).HasMaxLength(300);
+            entity.Property(e => e.Position).IsRequired();
+            entity.Property(e => e.AddedAt).IsRequired();
+
+            entity.HasIndex(e => e.PanelId);
+            entity.HasIndex(e => new { e.PanelId, e.FoodName, e.IngredientSignature }).IsUnique();
+
+            entity.HasOne<FoodPanelEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.PanelId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         // Global query filters for automatic tenant isolation
         // These filters automatically add "WHERE TenantId = {currentTenantId}" to all queries
         // GetCurrentTenantId() is evaluated at query time (not model creation time)
@@ -945,6 +1065,17 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
 
         modelBuilder.Entity<CustomMarkerEntity>()
             .HasQueryFilter(c => c.TenantId == GetCurrentTenantId());
+
+        modelBuilder.Entity<FoodEntity>()
+            .HasQueryFilter(f => f.TenantId == GetCurrentTenantId());
+
+        modelBuilder.Entity<FoodVariantEntity>()
+            .HasQueryFilter(v => v.TenantId == GetCurrentTenantId());
+
+        // Panel items have no TenantId; they are only reachable through their
+        // (tenant-filtered) panel, which the service resolves first.
+        modelBuilder.Entity<FoodPanelEntity>()
+            .HasQueryFilter(p => p.TenantId == GetCurrentTenantId());
 
         modelBuilder.Entity<RoadEntity>()
             .HasQueryFilter(r => r.TenantId == GetCurrentTenantId());
@@ -2051,4 +2182,161 @@ public sealed class PublicMapHmapSourceEntity
     /// Number of grids that overlap with other selected sources
     /// </summary>
     public int? OverlappingGrids { get; set; }
+}
+
+/// <summary>
+/// A Haven &amp; Hearth food with its FEP values, ingredients, and wiki-sourced
+/// grouping data. Tenant-scoped: populated per tenant by the superadmin import
+/// (wipe-and-replace) and by game-client uploads (additive).
+/// </summary>
+public sealed class FoodEntity
+{
+    public int Id { get; set; }
+
+    public string TenantId { get; set; } = string.Empty;
+
+    /// <summary>Display name, volume-prefix normalized (e.g. "Cave Slime", not "0.01 l of Cave Slime").</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Full game resource path, e.g. "gfx/invobjs/autumnsteak".</summary>
+    public string ResourceName { get; set; } = string.Empty;
+
+    /// <summary>Energy restored when eaten (in game percent points, e.g. 800 = 800%).</summary>
+    public int Energy { get; set; }
+
+    /// <summary>Hunger cost per bite. Fractional values are meaningful (e.g. 0.25).</summary>
+    public decimal Hunger { get; set; }
+
+    /// <summary>ringofbrodgar.com page URL when the food matched a wiki page.</summary>
+    public string? WikiUrl { get; set; }
+
+    /// <summary>
+    /// Canonical recipe from the wiki ("Raw Meat, Salad Greens, Edible Mushroom x2,
+    /// optional: Spices"). NULL when the wiki has no usable recipe for this food.
+    /// </summary>
+    public string? RecipeText { get; set; }
+
+    /// <summary>Cooking station from the wiki ("Frying Pan and Fire"). NULL when unknown.</summary>
+    public string? CookingStation { get; set; }
+
+    /// <summary>UTC timestamp of the import batch that produced this row.</summary>
+    public DateTime ImportedAt { get; set; }
+
+    /// <summary>
+    /// Identity UserId of the player whose client upload created this food;
+    /// NULL for admin-imported foods. Plain string (no FK) so user deletion
+    /// never cascades into the catalog.
+    /// </summary>
+    public string? ContributedBy { get; set; }
+
+    /// <summary>Wiki categories, e.g. ["Meat Dishes"]. Empty when no wiki match.</summary>
+    public List<string> Categories { get; set; } = new();
+
+    /// <summary>In-game satiation groups this food drains, e.g. ["Meat", "Mushrooms"].</summary>
+    public List<string> SatiationGroups { get; set; } = new();
+
+    public List<FoodFep> Feps { get; set; } = new();
+
+    public List<FoodIngredient> Ingredients { get; set; } = new();
+}
+
+/// <summary>One FEP line of a food, owned by <see cref="FoodEntity"/> (stored as JSON).</summary>
+public sealed class FoodFep
+{
+    /// <summary>Stat abbreviation: STR, AGI, INT, CON, PER, CHA, DEX, WILL, PSY.</summary>
+    public string Attribute { get; set; } = string.Empty;
+
+    /// <summary>1 for +1 FEPs, 2 for +2 FEPs.</summary>
+    public int Tier { get; set; }
+
+    public decimal Value { get; set; }
+}
+
+/// <summary>One ingredient of a food, owned by <see cref="FoodEntity"/> (stored as JSON).</summary>
+public sealed class FoodIngredient
+{
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>How much of the recipe this ingredient fills, 0-100.</summary>
+    public decimal Percentage { get; set; }
+}
+
+/// <summary>
+/// A user's named food collection. The auto-created Favorites panel is a regular
+/// panel flagged IsFavorites (pinned first in the UI, quick-toggled via the star).
+/// Shared panels are visible read-only to everyone in the tenant.
+/// </summary>
+public sealed class FoodPanelEntity
+{
+    public int Id { get; set; }
+
+    public string TenantId { get; set; } = string.Empty;
+
+    /// <summary>Owner (AspNetUsers.Id). Only the owner can modify the panel.</summary>
+    public string UserId { get; set; } = string.Empty;
+
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Visible read-only to all users of the tenant when true.</summary>
+    public bool IsShared { get; set; }
+
+    /// <summary>The user's auto-created Favorites panel (at most one per user per tenant).</summary>
+    public bool IsFavorites { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+}
+
+/// <summary>
+/// One food (or one specific recipe variant) inside a panel, referenced by
+/// (tenant-unique) food NAME plus the variant's ingredient signature, so panel
+/// contents survive wipe-and-replace catalog imports.
+/// </summary>
+public sealed class FoodPanelItemEntity
+{
+    public int Id { get; set; }
+
+    public int PanelId { get; set; }
+
+    public string FoodName { get; set; } = string.Empty;
+
+    /// <summary>Empty string = the whole food; otherwise the pinned variant's signature.</summary>
+    public string IngredientSignature { get; set; } = string.Empty;
+
+    /// <summary>Display label for variant items (their ingredient list), NULL for whole foods.</summary>
+    public string? Label { get; set; }
+
+    /// <summary>Display order within the panel (0-based, gaps allowed).</summary>
+    public int Position { get; set; }
+
+    public DateTime AddedAt { get; set; }
+}
+
+/// <summary>
+/// One recorded recipe variation of a food: a distinct ingredient combination with the
+/// FEP/hunger/energy values observed for it (lowest-quality record kept as representative).
+/// Tenant-scoped; client uploads upsert by (FoodId, IngredientSignature).
+/// </summary>
+public sealed class FoodVariantEntity
+{
+    public int Id { get; set; }
+
+    public string TenantId { get; set; } = string.Empty;
+
+    public int FoodId { get; set; }
+
+    /// <summary>Canonical ingredient-combination key: sorted "name:roundedPct" joined with '|'.</summary>
+    public string IngredientSignature { get; set; } = string.Empty;
+
+    public int Energy { get; set; }
+
+    public decimal Hunger { get; set; }
+
+    /// <summary>How many source records had this exact ingredient combination.</summary>
+    public int TimesSeen { get; set; }
+
+    public List<FoodFep> Feps { get; set; } = new();
+
+    public List<FoodIngredient> Ingredients { get; set; } = new();
 }

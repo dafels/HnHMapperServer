@@ -3,16 +3,19 @@ using System;
 using HnHMapperServer.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace HnHMapperServer.Infrastructure.Migrations
+namespace HnHMapperServer.Infrastructure.Data.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260718191302_AddCookbook")]
+    partial class AddCookbook
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.10");
@@ -367,13 +370,6 @@ namespace HnHMapperServer.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("ContributedBy")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CookingStation")
-                        .HasMaxLength(300)
-                        .HasColumnType("TEXT");
-
                     b.Property<int>("Energy")
                         .HasColumnType("INTEGER");
 
@@ -386,10 +382,6 @@ namespace HnHMapperServer.Infrastructure.Migrations
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("RecipeText")
-                        .HasMaxLength(500)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ResourceName")
@@ -417,98 +409,6 @@ namespace HnHMapperServer.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("Foods");
-                });
-
-            modelBuilder.Entity("HnHMapperServer.Infrastructure.Data.FoodPanelEntity", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("IsFavorites")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER")
-                        .HasDefaultValue(false);
-
-                    b.Property<bool>("IsShared")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER")
-                        .HasDefaultValue(false);
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("TenantId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("UserId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId");
-
-                    b.HasIndex("UserId");
-
-                    b.HasIndex("TenantId", "UserId")
-                        .IsUnique()
-                        .HasFilter("\"IsFavorites\" = 1");
-
-                    b.HasIndex("TenantId", "UserId", "Name")
-                        .IsUnique();
-
-                    b.ToTable("FoodPanels");
-                });
-
-            modelBuilder.Entity("HnHMapperServer.Infrastructure.Data.FoodPanelItemEntity", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<DateTime>("AddedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("FoodName")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("IngredientSignature")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(1000)
-                        .HasColumnType("TEXT")
-                        .HasDefaultValue("");
-
-                    b.Property<string>("Label")
-                        .HasMaxLength(300)
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("PanelId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("Position")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("PanelId");
-
-                    b.HasIndex("PanelId", "FoodName", "IngredientSignature")
-                        .IsUnique();
-
-                    b.ToTable("FoodPanelItems");
                 });
 
             modelBuilder.Entity("HnHMapperServer.Infrastructure.Data.FoodVariantEntity", b =>
@@ -1939,30 +1839,6 @@ namespace HnHMapperServer.Infrastructure.Migrations
                     b.Navigation("Feps");
 
                     b.Navigation("Ingredients");
-                });
-
-            modelBuilder.Entity("HnHMapperServer.Infrastructure.Data.FoodPanelEntity", b =>
-                {
-                    b.HasOne("HnHMapperServer.Core.Models.TenantEntity", null)
-                        .WithMany()
-                        .HasForeignKey("TenantId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("HnHMapperServer.Infrastructure.Identity.ApplicationUser", null)
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
-            modelBuilder.Entity("HnHMapperServer.Infrastructure.Data.FoodPanelItemEntity", b =>
-                {
-                    b.HasOne("HnHMapperServer.Infrastructure.Data.FoodPanelEntity", null)
-                        .WithMany()
-                        .HasForeignKey("PanelId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
                 });
 
             modelBuilder.Entity("HnHMapperServer.Infrastructure.Data.FoodVariantEntity", b =>

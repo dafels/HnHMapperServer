@@ -40,23 +40,52 @@
 
                         <MudTable Items="@tokens" Hover="true" Breakpoint="Breakpoint.Sm" Loading="@isLoading">
                             <HeaderContent>
-                                <MudTh>Token URL</MudTh>
+                                <MudTh>Endpoint URLs</MudTh>
                                 <MudTh>Permissions</MudTh>
-                                <MudTh>Actions</MudTh>
                             </HeaderContent>
                             <RowTemplate Context="token">
-                                <MudTd DataLabel="Token URL">
-                                    <MudText Typo="Typo.caption" Style="font-family: monospace; word-break: break-all;">@token.Url</MudText>
+                                <MudTd DataLabel="Endpoint URLs">
+                                    <MudStack Spacing="1">
+                                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+                                            <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Text">Mapper</MudChip>
+                                            <MudText Typo="Typo.caption" Style="font-family: monospace; word-break: break-all;">@token.Url</MudText>
+                                            <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Color="Color.Primary"
+                                                           OnClick="@(() => CopyToClipboard(token.Url))" Title="Copy mapper URL" />
+                                        </MudStack>
+                                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+                                            <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Text">Cookbook</MudChip>
+                                            <MudText Typo="Typo.caption" Style="font-family: monospace; word-break: break-all;">@CookbookUrl(token.Url)</MudText>
+                                            <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Color="Color.Warning"
+                                                           OnClick="@(() => CopyToClipboard(CookbookUrl(token.Url)))" Title="Copy cookbook URL" />
+                                        </MudStack>
+                                    </MudStack>
                                 </MudTd>
                                 <MudTd DataLabel="Permissions">
                                     @string.Join(", ", token.Permissions)
                                 </MudTd>
-                                <MudTd DataLabel="Actions">
-                                    <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Color="Color.Primary"
-                                                   OnClick="@(() => CopyToClipboard(token.Url))" Title="Copy URL to clipboard" />
-                                </MudTd>
                             </RowTemplate>
                         </MudTable>
+
+                        <MudExpansionPanels Elevation="0" Class="mt-2">
+                            <MudExpansionPanel Text="How to connect your game client">
+                                <MudStack Spacing="1">
+                                    <MudText Typo="Typo.body2">
+                                        <strong>Map uploads:</strong> paste the <strong>Mapper</strong> URL into your
+                                        client's mapper / API endpoint setting.
+                                    </MudText>
+                                    <MudText Typo="Typo.body2">
+                                        <strong>Cookbook (Hurricane):</strong> Options &rarr; <em>Cookbook Endpoint</em> =
+                                        the <strong>Cookbook</strong> URL. Leave the "Cookbook Token" field empty &mdash;
+                                        the token is already inside the URL. Every food you eat is then added to your
+                                        community's cookbook, credited to you.
+                                    </MudText>
+                                    <MudText Typo="Typo.body2">
+                                        <strong>Cookbook (KamiClient):</strong> nothing extra &mdash; set the Mapper URL
+                                        as usual and enable <em>autofood tracking</em> in the options.
+                                    </MudText>
+                                </MudStack>
+                            </MudExpansionPanel>
+                        </MudExpansionPanels>
 
                         @if (hasUploadPermission)
                         {
@@ -257,6 +286,9 @@
             isLoading = false;
         }
     }
+
+    /// <summary>Food-upload endpoint of a mapper token URL (same token, "/food" suffix).</summary>
+    private static string CookbookUrl(string mapperUrl) => mapperUrl.TrimEnd('/') + "/food";
 
     private async Task CopyToClipboard(string text)
     {

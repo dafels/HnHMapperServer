@@ -882,3 +882,63 @@ h6 .mud-icon {
     margin-top: 1px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
+/* ===== Cookbook FEP tooltip (floating element appended to <body> by fep-tooltip.js) ===== */
+.fep-tt {
+    position: fixed;
+    z-index: 3000;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(4px) scale(0.97);
+    transition: opacity 0.12s ease, transform 0.12s ease;
+    background: rgba(33, 43, 54, 0.94);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    padding: 7px 11px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    white-space: nowrap;
+}
+
+.fep-tt-show {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+.fep-tt-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 2px;
+}
+
+.fep-tt-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    flex: 0 0 auto;
+}
+
+.fep-tt-name {
+    color: #f2f5f7;
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+
+.fep-tt-t2 {
+    background: linear-gradient(160deg, #f3cf66, #d4a017);
+    color: #3a2c00;
+    font-size: 0.66rem;
+    font-weight: 800;
+    border-radius: 7px;
+    padding: 0 6px;
+    line-height: 1.6;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.fep-tt-body {
+    color: #b9c4cd;
+    font-size: 0.74rem;
+}

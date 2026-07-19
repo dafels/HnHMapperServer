@@ -41,6 +41,12 @@
                     <span class="d-none d-md-inline">Map</span>
                 </MudButton>
 
+                <MudButton StartIcon="@Icons.Material.Filled.Restaurant"
+                           Color="Color.Inherit"
+                           Href="/cookbook">
+                    <span class="d-none d-md-inline">Cookbook</span>
+                </MudButton>
+
                 <AuthorizeView Roles="SuperAdmin" Context="superAdminAuth">
                     <Authorized>
                         <MudButton StartIcon="@Icons.Material.Filled.SupervisorAccount"

@@ -97,6 +97,7 @@ public static partial class ClientEndpoints
             .RequireRateLimiting("TileUpload");
 
         group.MapPost("/positionUpdate", PositionUpdate).DisableAntiforgery();
+        group.MapPost("/food", FoodUpload).DisableAntiforgery(); // Cookbook uploads (Hurricane/KamiClient/Amber)
         group.MapPost("/markerBulkUpload", MarkerBulkUpload).DisableAntiforgery();
         group.MapPost("/markerDelete", MarkerDelete).DisableAntiforgery();
         group.MapPost("/markerUpdate", MarkerUpdate).DisableAntiforgery();
@@ -107,6 +108,170 @@ public static partial class ClientEndpoints
     private static IResult RedirectToMap()
     {
         return Results.Redirect("/map/");
+    }
+
+    // Security: cap client food upload batches (clients flush every ~10s; batches are small)
+    private const int MaxFoodUploadBatch = 500;
+
+    private static readonly JsonSerializerOptions FoodUploadJsonOpts = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    /// <summary>
+    /// POST /client/{token}/food
+    /// Game-client cookbook uploads. Accepts both known client payload shapes:
+    /// a JSON array of records (Hurricane cookbook integration / Amber) or a JSON
+    /// object keyed by client-side hash (KamiClient autofood). Requires Upload scope.
+    /// </summary>
+    private static async Task<IResult> FoodUpload(
+        [FromRoute] string token,
+        HttpContext context,
+        ApplicationDbContext db,
+        ITokenService tokenService,
+        IFoodCatalogService foodCatalogService,
+        INotificationService notificationService,
+        ITenantActivityService activityService,
+        ILogger<Program> logger)
+    {
+        if (!await ClientTokenHelpers.HasUploadAsync(context, db, tokenService, token, logger))
+        {
+            return Results.Unauthorized();
+        }
+
+        var tenantId = context.Items["TenantId"] as string;
+        if (string.IsNullOrEmpty(tenantId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var userId = context.Items["UserId"] as string;
+        activityService.RecordActivity(tenantId);
+
+        List<FoodUploadRecordDto> records;
+        try
+        {
+            using var document = await JsonDocument.ParseAsync(context.Request.Body);
+            records = ParseFoodUploadRecords(document.RootElement);
+        }
+        catch (JsonException)
+        {
+            return Results.BadRequest(new { error = "Invalid food upload payload" });
+        }
+
+        if (records.Count == 0)
+        {
+            return Results.Ok(new FoodUploadResultDto());
+        }
+
+        if (records.Count > MaxFoodUploadBatch)
+        {
+            return Results.BadRequest(new { error = $"Batch too large (max {MaxFoodUploadBatch} records)" });
+        }
+
+        var result = await foodCatalogService.IngestClientRecordsAsync(tenantId, userId, records);
+
+        if (result.NewFoods > 0)
+        {
+            await NotifyTenantOfNewFoodsAsync(db, notificationService, tenantId, userId, result, logger);
+        }
+
+        if (result.NewFoods > 0 || result.NewVariants > 0)
+        {
+            logger.LogInformation(
+                "Food upload for tenant {TenantId}: {NewFoods} new foods, {NewVariants} new variants from {Received} records",
+                tenantId, result.NewFoods, result.NewVariants, result.Received);
+        }
+
+        return Results.Json(result);
+    }
+
+    /// <summary>
+    /// One digest notification per upload batch that created new foods,
+    /// broadcast to the whole tenant (UserId = null).
+    /// </summary>
+    private static async Task NotifyTenantOfNewFoodsAsync(
+        ApplicationDbContext db,
+        INotificationService notificationService,
+        string tenantId,
+        string? userId,
+        FoodUploadResultDto result,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var username = "A player";
+            if (!string.IsNullOrEmpty(userId))
+            {
+                username = await db.Users.AsNoTracking()
+                    .Where(u => u.Id == userId)
+                    .Select(u => u.UserName)
+                    .FirstOrDefaultAsync() ?? username;
+            }
+
+            var names = result.NewFoodNames.Take(3).ToList();
+            var listed = string.Join(", ", names);
+            if (result.NewFoodNames.Count > names.Count)
+            {
+                listed += $", … (+{result.NewFoodNames.Count - names.Count} more)";
+            }
+
+            await notificationService.CreateAsync(new CreateNotificationDto
+            {
+                TenantId = tenantId,
+                UserId = null, // broadcast to everyone in the tenant
+                Type = "CookbookFoodAdded",
+                Title = "New cookbook entries",
+                Message = result.NewFoodNames.Count == 1
+                    ? $"{username} discovered {listed} — check it out in the cookbook!"
+                    : $"{username} discovered {result.NewFoodNames.Count} new foods: {listed}",
+                ActionType = "NoAction"
+            });
+        }
+        catch (Exception ex)
+        {
+            // A failed notification must never fail the upload.
+            logger.LogWarning(ex, "Failed to create cookbook notification for tenant {TenantId}", tenantId);
+        }
+    }
+
+    /// <summary>
+    /// Normalizes the two client payload shapes into a flat record list:
+    /// Hurricane/Amber send an array, KamiClient sends { md5hash: record, ... }.
+    /// Malformed elements are skipped rather than failing the batch.
+    /// </summary>
+    private static List<FoodUploadRecordDto> ParseFoodUploadRecords(JsonElement root)
+    {
+        IEnumerable<JsonElement> elements = root.ValueKind switch
+        {
+            JsonValueKind.Array => root.EnumerateArray().ToList(),
+            JsonValueKind.Object => root.EnumerateObject().Select(p => p.Value).ToList(),
+            _ => Array.Empty<JsonElement>()
+        };
+
+        var records = new List<FoodUploadRecordDto>();
+        foreach (var element in elements)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            try
+            {
+                var record = element.Deserialize<FoodUploadRecordDto>(FoodUploadJsonOpts);
+                if (record != null)
+                {
+                    records.Add(record);
+                }
+            }
+            catch (JsonException)
+            {
+                // Skip malformed records; the rest of the batch is still usable.
+            }
+        }
+
+        return records;
     }
 
     private static IResult CheckVersion([FromRoute] string token, [FromQuery] string version)

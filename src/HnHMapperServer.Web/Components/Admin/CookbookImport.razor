@@ -1,0 +1,290 @@
+@using HnHMapperServer.Core.DTOs
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@inject ILogger<CookbookImport> Logger
+@inject TenantContextService TenantContext
+
+<MudStack Spacing="3">
+    <MudAlert Severity="Severity.Info" Dense="true">
+        <MudIcon Icon="@Icons.Material.Filled.Info" Size="Size.Small" Class="me-1" />
+        Select <strong>food-info2.json</strong> to seed your organization's cookbook with all recipe
+        variations (groups/satiations come from bundled wiki data; Ctrl-click a newer
+        <strong>wiki-food-data.json</strong> to override). Importing replaces the whole catalog —
+        game clients extend it afterwards.
+    </MudAlert>
+
+    <MudPaper Elevation="0" Class="pa-3 mud-background-gray">
+        <MudStack Spacing="2">
+            <MudStack Row="true" Spacing="3" AlignItems="AlignItems.Center" Class="flex-wrap">
+                <MudFileUpload T="IReadOnlyList<IBrowserFile>"
+                               FilesChanged="ImportFilesAsync"
+                               Accept=".json"
+                               MaximumFileCount="3"
+                               Disabled="@(_isImporting || string.IsNullOrEmpty(_tenantId))">
+                    <ActivatorContent>
+                        <MudButton Variant="Variant.Filled"
+                                   Color="Color.Success"
+                                   StartIcon="@Icons.Material.Filled.CloudUpload"
+                                   Disabled="@(_isImporting || string.IsNullOrEmpty(_tenantId))">
+                            @if (_isImporting)
+                            {
+                                <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                                <span>Importing...</span>
+                            }
+                            else
+                            {
+                                <span>Import food data</span>
+                            }
+                        </MudButton>
+                    </ActivatorContent>
+                </MudFileUpload>
+
+                @if (string.IsNullOrEmpty(_tenantId))
+                {
+                    <MudText Typo="Typo.body2">Loading tenant...</MudText>
+                }
+                else if (_status == null)
+                {
+                    <MudText Typo="Typo.body2">Loading...</MudText>
+                }
+                else if (_status.FoodCount == 0)
+                {
+                    <MudText Typo="Typo.body2">No food data yet.</MudText>
+                }
+                else
+                {
+                    <MudText Typo="Typo.body2">
+                        <strong>@_status.FoodCount</strong> foods with
+                        <strong>@_status.VariantCount.ToString("N0")</strong> recipe variations,
+                        last updated @_status.LastImportedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+                    </MudText>
+                }
+
+                <MudSpacer />
+
+                <MudButton Variant="Variant.Outlined"
+                           Color="Color.Error"
+                           StartIcon="@Icons.Material.Filled.DeleteForever"
+                           Disabled="@(_isImporting || _isClearing || _status == null || _status.FoodCount == 0)"
+                           OnClick="ClearAllAsync">
+                    @if (_isClearing)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                        <span>Clearing...</span>
+                    }
+                    else
+                    {
+                        <span>Clear all food data</span>
+                    }
+                </MudButton>
+            </MudStack>
+
+            @if (_lastResult != null && _lastResult.Errors.Count > 0)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true">
+                    <MudText Typo="Typo.body2"><strong>@_lastResult.Errors.Count issue(s):</strong></MudText>
+                    @foreach (var error in _lastResult.Errors.Take(10))
+                    {
+                        <MudText Typo="Typo.caption">@error</MudText>
+                    }
+                </MudAlert>
+            }
+        </MudStack>
+    </MudPaper>
+
+    <MudPaper Elevation="0" Class="pa-3 mud-background-gray">
+        <MudStack Spacing="1">
+            <MudText Typo="Typo.subtitle1">Game-client uploads</MudText>
+            <MudText Typo="Typo.body2">
+                Players can feed the cookbook automatically (requires a mapper token with the
+                <strong>Upload</strong> permission):
+            </MudText>
+            <MudText Typo="Typo.body2">
+                <strong>Hurricane:</strong> Options &rarr; Cookbook Endpoint =
+                <code>{server}/client/{token}/food</code> (leave the token field empty).
+            </MudText>
+            <MudText Typo="Typo.body2">
+                <strong>KamiClient:</strong> uses the configured mapper endpoint automatically &mdash;
+                just enable <em>autofood tracking</em> in the options.
+            </MudText>
+        </MudStack>
+    </MudPaper>
+</MudStack>
+
+@code {
+    private const long MaxFileSize = 100 * 1024 * 1024; // 100 MB
+
+    private string? _tenantId;
+    private CookbookStatusDto? _status;
+    private bool _isImporting;
+    private bool _isClearing;
+    private CookbookImportResultDto? _lastResult;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Same resolution as the other admin tabs: current tenant, else first tenant.
+        _tenantId = TenantContext.CurrentTenant?.Id;
+        if (string.IsNullOrEmpty(_tenantId))
+        {
+            var tenants = await TenantContext.GetTenantsAsync();
+            _tenantId = tenants.FirstOrDefault()?.Id;
+        }
+
+        await LoadStatusAsync();
+    }
+
+    private async Task LoadStatusAsync()
+    {
+        if (string.IsNullOrEmpty(_tenantId))
+        {
+            return;
+        }
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            _status = await client.GetFromJsonAsync<CookbookStatusDto>(
+                $"/api/tenants/{Uri.EscapeDataString(_tenantId)}/cookbook/status");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load cookbook status");
+            Snackbar.Add("Failed to load cookbook status", Severity.Error);
+        }
+    }
+
+    /// <summary>Fires straight from the file dialog: classify the picked files and import immediately.</summary>
+    private async Task ImportFilesAsync(IReadOnlyList<IBrowserFile>? files)
+    {
+        if (files == null || files.Count == 0 || _isImporting || string.IsNullOrEmpty(_tenantId))
+        {
+            return;
+        }
+
+        var wikiFile = files.FirstOrDefault(f => f.Name.Contains("wiki", StringComparison.OrdinalIgnoreCase));
+        var foodsFile = files.FirstOrDefault(f => !f.Name.Contains("wiki", StringComparison.OrdinalIgnoreCase));
+
+        if (foodsFile == null)
+        {
+            Snackbar.Add("Select food-info2.json (the game data dump) — the wiki file alone is not enough", Severity.Warning);
+            return;
+        }
+
+        _isImporting = true;
+        _lastResult = null;
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("APIUpload");
+
+            using var content = new MultipartFormDataContent();
+
+            var foodsContent = new StreamContent(foodsFile.OpenReadStream(MaxFileSize));
+            foodsContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+            content.Add(foodsContent, "foods", foodsFile.Name);
+
+            if (wikiFile != null)
+            {
+                var wikiContent = new StreamContent(wikiFile.OpenReadStream(MaxFileSize));
+                wikiContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                content.Add(wikiContent, "wiki", wikiFile.Name);
+            }
+
+            var response = await client.PostAsync(
+                $"/api/tenants/{Uri.EscapeDataString(_tenantId)}/cookbook/import", content);
+            await HandleImportResponseAsync(response);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Cookbook import failed");
+            Snackbar.Add($"Import failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isImporting = false;
+        }
+    }
+
+    private async Task ClearAllAsync()
+    {
+        if (_isClearing || string.IsNullOrEmpty(_tenantId) || _status == null || _status.FoodCount == 0)
+        {
+            return;
+        }
+
+        var confirmed = await DialogService.ShowMessageBox(
+            "Clear all food data?",
+            (MarkupString)($"This permanently deletes <strong>{_status.FoodCount} foods</strong> and " +
+                           $"<strong>{_status.VariantCount:N0} recipe variations</strong> from your organization's cookbook — " +
+                           "<strong>including everything players' clients have contributed since the last import</strong>, " +
+                           "which cannot be re-imported from a file.<br /><br />" +
+                           "Panels and favorites are kept: their entries show as grayed out until the foods " +
+                           "come back via an import or new client uploads."),
+            yesText: "Clear everything",
+            cancelText: "Cancel");
+
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        _isClearing = true;
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.DeleteAsync($"/api/tenants/{Uri.EscapeDataString(_tenantId)}/cookbook");
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<CookbookClearResultDto>();
+                Snackbar.Add(
+                    $"Cleared {result?.Foods ?? 0} foods and {result?.Variants ?? 0:N0} recipe variations",
+                    Severity.Success);
+                _lastResult = null;
+                await LoadStatusAsync();
+            }
+            else
+            {
+                Snackbar.Add($"Clear failed: HTTP {(int)response.StatusCode}", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Cookbook clear failed");
+            Snackbar.Add($"Clear failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isClearing = false;
+        }
+    }
+
+    private async Task HandleImportResponseAsync(HttpResponseMessage response)
+    {
+        CookbookImportResultDto? result = null;
+        try
+        {
+            result = await response.Content.ReadFromJsonAsync<CookbookImportResultDto>();
+        }
+        catch (Exception)
+        {
+            // Non-result error payload (e.g. { error: ... }); fall through to status-code handling.
+        }
+
+        _lastResult = result;
+
+        if (response.IsSuccessStatusCode && result != null)
+        {
+            Snackbar.Add(
+                $"Imported {result.Imported} foods with {result.Variants} recipe variations ({result.WikiMatched} wiki-matched)",
+                Severity.Success);
+            await LoadStatusAsync();
+        }
+        else
+        {
+            var firstError = result?.Errors.FirstOrDefault() ?? $"HTTP {(int)response.StatusCode}";
+            Snackbar.Add($"Import failed: {firstError}", Severity.Error);
+        }
+    }
+}

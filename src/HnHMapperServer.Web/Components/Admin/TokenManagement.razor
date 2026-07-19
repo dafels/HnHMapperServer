@@ -26,11 +26,32 @@
         </MudButton>
     </div>
 
+    <MudAlert Severity="Severity.Info" Dense="true">
+        Each token has two URLs: the <strong>Mapper</strong> URL goes into the client's map/API endpoint
+        setting; the <strong>Cookbook</strong> URL goes into Hurricane's <em>Options &rarr; Cookbook Endpoint</em>
+        (leave its "Cookbook Token" field empty &mdash; the token is already in the URL).
+        KamiClient only needs the Mapper URL with <em>autofood</em> enabled. Both require the
+        <strong>Upload</strong> permission.
+    </MudAlert>
+
     <MudDataGrid T="TokenDto" Items="@tokens" Loading="@isLoading" Filterable="true" SortMode="SortMode.Multiple" Hover="true">
         <Columns>
-            <TemplateColumn Title="Token URL">
+            <TemplateColumn Title="Endpoint URLs">
                 <CellTemplate>
-                    <MudText Style="font-family: monospace; font-size: 0.875rem; word-break: break-all;">@context.Item.Url</MudText>
+                    <MudStack Spacing="1">
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+                            <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Text">Mapper</MudChip>
+                            <MudText Style="font-family: monospace; font-size: 0.8rem; word-break: break-all;">@context.Item.Url</MudText>
+                            <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Color="Color.Primary"
+                                           OnClick="@(() => CopyToClipboard(context.Item.Url))" Title="Copy mapper URL" />
+                        </MudStack>
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+                            <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Text">Cookbook</MudChip>
+                            <MudText Style="font-family: monospace; font-size: 0.8rem; word-break: break-all;">@CookbookUrl(context.Item.Url)</MudText>
+                            <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Color="Color.Warning"
+                                           OnClick="@(() => CopyToClipboard(CookbookUrl(context.Item.Url)))" Title="Copy cookbook URL" />
+                        </MudStack>
+                    </MudStack>
                 </CellTemplate>
             </TemplateColumn>
             <PropertyColumn Property="x => x.Username" Title="Owner" />
@@ -46,10 +67,7 @@
             </TemplateColumn>
             <TemplateColumn Title="Actions">
                 <CellTemplate>
-                    <MudStack Row="true" Spacing="1">
-                        <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Color="Color.Primary" OnClick="@(() => CopyToClipboard(context.Item.Url))" Title="Copy URL to clipboard" />
-                        <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error" OnClick="@(() => ShowRevokeTokenDialog(context.Item))" Title="Revoke token" />
-                    </MudStack>
+                    <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error" OnClick="@(() => ShowRevokeTokenDialog(context.Item))" Title="Revoke token" />
                 </CellTemplate>
             </TemplateColumn>
         </Columns>
@@ -143,6 +161,9 @@
             isLoading = false;
         }
     }
+
+    /// <summary>Food-upload endpoint of a mapper token URL (same token, "/food" suffix).</summary>
+    private static string CookbookUrl(string mapperUrl) => mapperUrl.TrimEnd('/') + "/food";
 
     private Color GetAuthColor(string auth)
     {

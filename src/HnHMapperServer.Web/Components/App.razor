@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 
 <head>
@@ -11,15 +11,15 @@
     <link rel="stylesheet" href="lib/leaflet/1.9.4/leaflet.css" />
     <link rel="stylesheet" href="lib/leaflet.markercluster/MarkerCluster.css" />
     <link rel="stylesheet" href="lib/leaflet.markercluster/MarkerCluster.Default.css" />
-    <link rel="stylesheet" href="css/map-styles.css" asp-append-version="true" />
-    <link rel="stylesheet" href="app.css" asp-append-version="true" />
-    <link rel="stylesheet" href="HnHMapperServer.Web.styles.css" />
+    <link rel="stylesheet" href="css/map-styles.css?v=@AssetVersion" />
+    <link rel="stylesheet" href="app.css?v=@AssetVersion" />
+    <link rel="stylesheet" href="HnHMapperServer.Web.styles.css?v=@AssetVersion" />
     <HeadOutlet @rendermode="InteractiveServer" />
 </head>
 
 <body>
     <Routes @rendermode="InteractiveServer" />
-    <script src="js/blazor-diagnostics.js" asp-append-version="true"></script>
+    <script src="js/blazor-diagnostics.js?v=@AssetVersion"></script>
     <script src="_framework/blazor.web.js"></script>
     <script src="_content/MudBlazor/MudBlazor.min.js"></script>
     <script src="lib/leaflet/1.9.4/leaflet.js"></script>
@@ -27,8 +27,18 @@
     <script src="lib/d3-delaunay/d3-delaunay.min.js"></script>
     <script src="lib/leaflet-plugins/rotatedmarker/0.2.0/leaflet.rotatedMarker.min.js"></script>
     <script src="lib/leaflet-plugins/marker-slideto/latest/L.Marker.SlideTo.js"></script>
-    <script src="js/notification-center.js" asp-append-version="true"></script>
-    <script src="js/file-upload-helper.js" asp-append-version="true"></script>
+    <script src="js/notification-center.js?v=@AssetVersion"></script>
+    <script src="js/file-upload-helper.js?v=@AssetVersion"></script>
+    <script src="js/fep-tooltip.js?v=@AssetVersion"></script>
+    <script src="js/cookbook-dnd.js?v=@AssetVersion"></script>
 </body>
 
 </html>
+
+@code {
+    // Cache-busting stamp for project-owned static assets, changes on every build/deploy.
+    // (asp-append-version is a Razor Pages tag helper — it does nothing in Blazor components,
+    // which previously left stale CSS/JS in browsers after updates.)
+    private static readonly long AssetVersion =
+        System.IO.File.GetLastWriteTimeUtc(typeof(App).Assembly.Location).Ticks;
+}

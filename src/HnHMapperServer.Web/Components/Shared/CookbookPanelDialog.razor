@@ -1,0 +1,83 @@
+@* Create/rename dialog for cookbook food panels. Returns the chosen name via DialogResult. *@
+
+<MudDialog>
+    <DialogContent>
+        <MudStack Spacing="2">
+            @if (!IsRename)
+            {
+                <MudText Typo="Typo.body2">
+                    A panel is your own named collection of foods and recipes — plan feasts,
+                    keep shopping lists, or group foods by stat. You can <strong>share a panel
+                    with everyone in your tenant</strong> using the globe button on its card.
+                </MudText>
+
+                @if (!string.IsNullOrEmpty(FoodToAdd))
+                {
+                    <MudAlert Severity="Severity.Info" Dense="true">
+                        <strong>@FoodToAdd</strong>@(IsVariantTarget ? " (this specific recipe)" : "")
+                        will be added to the new panel right away.
+                    </MudAlert>
+                }
+            }
+
+            <MudTextField T="string"
+                          @bind-Value="_name"
+                          Label="Panel name"
+                          Variant="Variant.Outlined"
+                          Margin="Margin.Dense"
+                          MaxLength="100"
+                          Immediate="true"
+                          AutoFocus="true"
+                          OnKeyDown="OnKeyDown" />
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel">Cancel</MudButton>
+        <MudButton Color="Color.Primary" Variant="Variant.Filled"
+                   Disabled="@(string.IsNullOrWhiteSpace(_name))"
+                   OnClick="Submit">
+            @(IsRename ? "Rename" : "Create panel")
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] IMudDialogInstance MudDialog { get; set; } = null!;
+
+    /// <summary>Pre-filled name (rename) or empty (create).</summary>
+    [Parameter] public string InitialName { get; set; } = string.Empty;
+
+    /// <summary>Food that will be added to the panel right after creation, if any.</summary>
+    [Parameter] public string? FoodToAdd { get; set; }
+
+    /// <summary>True when FoodToAdd refers to one specific recipe variant.</summary>
+    [Parameter] public bool IsVariantTarget { get; set; }
+
+    [Parameter] public bool IsRename { get; set; }
+
+    private string _name = string.Empty;
+
+    protected override void OnInitialized()
+    {
+        _name = InitialName;
+    }
+
+    private void Submit()
+    {
+        var name = _name.Trim();
+        if (name.Length > 0)
+        {
+            MudDialog.Close(DialogResult.Ok(name));
+        }
+    }
+
+    private void Cancel() => MudDialog.Cancel();
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            Submit();
+        }
+    }
+}

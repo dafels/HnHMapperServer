@@ -23,4 +23,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Bundled wiki dump: supplies food groups/satiations when a cookbook import
+         uploads only food-info2.json. -->
+    <Content Update="Data\wiki-food-data.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

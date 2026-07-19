@@ -1,0 +1,1833 @@
+@page "/cookbook"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@using System.Text.RegularExpressions
+@using HnHMapperServer.Core.DTOs
+@using HnHMapperServer.Web.Components.Shared
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+
+<PageTitle>Cookbook - HnH Mapper</PageTitle>
+
+<div class="admin-panel cookbook-page">
+    <MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="mt-4 mb-8">
+
+        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Class="mb-4">
+            <MudIcon Icon="@Icons.Material.Filled.Restaurant" Size="Size.Large" Style="color: #2c3e50;" />
+            <MudText Typo="Typo.h4" Style="color: #2c3e50;">Cookbook</MudText>
+            <MudSpacer />
+            @if (_rows.Count > 0)
+            {
+                <MudText Typo="Typo.body2" Style="color: #2c3e50;">
+                    @FilteredCount of @_rows.Count foods
+                </MudText>
+            }
+        </MudStack>
+
+        <div class="sticky-stack">
+        <div class="cookbook-toolbar glass-morphism">
+            <MudGrid Spacing="2" Class="align-center">
+                <MudItem xs="12" md="8">
+                    <MudTextField T="string"
+                                  @bind-Value="_search"
+                                  Immediate="true"
+                                  DebounceInterval="200"
+                                  Clearable="true"
+                                  Placeholder="Search by food or ingredient..."
+                                  Adornment="Adornment.Start"
+                                  AdornmentIcon="@Icons.Material.Filled.Search"
+                                  Variant="Variant.Outlined"
+                                  Margin="Margin.Dense" />
+                </MudItem>
+                <MudItem xs="12" sm="6" md="4">
+                    <MudNumericField T="int"
+                                     @bind-Value="_quality"
+                                     Immediate="true"
+                                     Min="1" Max="999"
+                                     Label="Quality"
+                                     HelperText="@($"FEP ×{QualityMultiplier:0.00}")"
+                                     Adornment="Adornment.Start"
+                                     AdornmentText="Q"
+                                     Variant="Variant.Outlined"
+                                     Margin="Margin.Dense" />
+                </MudItem>
+            </MudGrid>
+            <div class="stat-chips">
+                <span class="chips-label">FEP</span>
+                @foreach (var stat in StatOrderList)
+                {
+                    var count = StatCount(stat);
+                    <button type="button"
+                            class="stat-chip @(_selectedStat == stat ? "selected" : "") @(count == 0 ? "empty" : "")"
+                            style="--chip-color: @StatColors[stat];"
+                            title="@(StatFullNames[stat]): @count foods"
+                            @onclick="() => ToggleStat(stat)">
+                        @stat<span class="stat-chip-count">@count</span>
+                    </button>
+                }
+            </div>
+            @if (_allSatiations.Count > 0)
+            {
+                <div class="stat-chips">
+                    <span class="chips-label">Satiation</span>
+                    @foreach (var satiation in _allSatiations)
+                    {
+                        var count = SatiationCount(satiation);
+                        <button type="button"
+                                class="stat-chip satiation @(_selectedSatiation == satiation ? "selected" : "") @(count == 0 ? "empty" : "")"
+                                title="@satiation satiation: @count foods"
+                                @onclick="() => ToggleSatiation(satiation)">
+                            @satiation<span class="stat-chip-count">@count</span>
+                        </button>
+                    }
+                </div>
+            }
+            @if (_allPreps.Count > 0)
+            {
+                <div class="stat-chips">
+                    <span class="chips-label">Prep</span>
+                    @foreach (var prep in _allPreps)
+                    {
+                        var count = PrepCount(prep);
+                        <button type="button"
+                                class="stat-chip prep @(_selectedPrep == prep ? "selected" : "") @(count == 0 ? "empty" : "")"
+                                title="@prep foods: @count"
+                                @onclick="() => TogglePrep(prep)">
+                            @prep<span class="stat-chip-count">@count</span>
+                        </button>
+                    }
+                    @{ var plainCount = PrepCount(PlainPrepKey); }
+                    <button type="button"
+                            class="stat-chip prep plain @(_selectedPrep == PlainPrepKey ? "selected" : "") @(plainCount == 0 ? "empty" : "")"
+                            title="Foods without a preparation prefix: @plainCount"
+                            @onclick="() => TogglePrep(PlainPrepKey)">
+                        @PlainPrepKey<span class="stat-chip-count">@plainCount</span>
+                    </button>
+                </div>
+            }
+        </div>
+
+        <div class="panels-bar glass-morphism">
+            <button type="button" class="panels-toggle" @onclick="() => _panelsExpanded = !_panelsExpanded">
+                <MudIcon Icon="@(_panelsExpanded ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)" Size="Size.Small" />
+                <span>Panels (@_panels.Count)</span>
+            </button>
+            @if (_activePanelId != null)
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Outlined"
+                         OnClose="ClearPanelFilter">@(_panels.FirstOrDefault(p => p.Id == _activePanelId)?.Name)</MudChip>
+            }
+            @if (_focusFoodName != null)
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined"
+                         Icon="@Icons.Material.Filled.CenterFocusStrong"
+                         OnClose="ClearFocus">@_focusFoodName</MudChip>
+            }
+            <div class="panels-bar-spacer"></div>
+            <MudButton StartIcon="@Icons.Material.Filled.Add" Size="Size.Small" Variant="Variant.Text"
+                       OnClick="@(() => OpenCreatePanelDialogAsync(null, string.Empty))">New panel</MudButton>
+        </div>
+        @if (_panelsExpanded)
+        {
+            <div class="panels-strip">
+                @{ var firstSharedIndex = _panels.FindIndex(p => !p.IsOwn); }
+                @foreach (var (panel, panelIndex) in _panels.Select((p, i) => (p, i)))
+                {
+                    @if (panelIndex == firstSharedIndex && firstSharedIndex > 0)
+                    {
+                        <div class="panels-divider"><span>Shared with you</span></div>
+                    }
+                    <div @key="panel.Id"
+                         class="panel-card @(panel.IsOwn ? "own" : "shared-other") @(panel.IsShared ? "is-shared" : "") @(_dragActive && panel.IsOwn ? "droppable" : "") @(_dragOverPanelId == panel.Id ? "drag-over" : "") @(_activePanelId == panel.Id ? "active" : "")"
+                         style="--panel-accent: hsl(@PanelHueAt(panelIndex), 62%, 55%);"
+                         @ondragover:preventDefault
+                         @ondragenter="() => OnPanelDragEnter(panel)"
+                         @ondrop="() => HandleDropOnPanelAsync(panel)">
+                        <div class="panel-card-header">
+                            @if (panel.IsFavorites)
+                            {
+                                <MudIcon Icon="@Icons.Material.Filled.Star" Size="Size.Small" Style="color: var(--ck-gold-icon);" />
+                            }
+                            <button type="button" class="panel-name-btn"
+                                    title="Show only this panel's foods in the table"
+                                    @onclick="() => TogglePanelFilter(panel)">@PanelTitle(panel)</button>
+                            <span class="panel-count">@panel.Items.Count</span>
+                            @if (panel.IsShared && panel.IsOwn)
+                            {
+                                <span class="panel-badge">Shared</span>
+                            }
+                            @if (panel.IsOwn)
+                            {
+                                <span title="@(panel.IsShared ? "Shared with your tenant — click to make private" : "Share this panel with your tenant")">
+                                    <MudIconButton Icon="@(panel.IsShared ? Icons.Material.Filled.Public : Icons.Material.Filled.PublicOff)"
+                                                   Size="Size.Small"
+                                                   Class="@(panel.IsShared ? "share-btn shared" : "share-btn")"
+                                                   OnClick="() => ToggleShareAsync(panel)" />
+                                </span>
+                                <MudMenu Icon="@Icons.Material.Filled.MoreVert" Size="Size.Small" Dense="true"
+                                         AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight">
+                                    <MudMenuItem Icon="@Icons.Material.Filled.Edit" OnClick="() => OpenRenameDialogAsync(panel)">Rename</MudMenuItem>
+                                    <MudMenuItem Icon="@Icons.Material.Filled.Delete" OnClick="() => DeletePanelAsync(panel)">Delete</MudMenuItem>
+                                </MudMenu>
+                            }
+                        </div>
+                        <div class="panel-items">
+                            @foreach (var item in panel.Items)
+                            {
+                                var known = _rowsByName.TryGetValue(item.FoodName, out var itemRow);
+                                var isVariant = item.IngredientSignature.Length > 0;
+                                <div @key="item.ItemId"
+                                     class="panel-item @(item.Resolved ? "" : "unknown")"
+                                     draggable="@(panel.IsOwn ? "true" : "false")"
+                                     title="@ChipTooltip(item, known)"
+                                     @onclick="() => FocusItemAsync(item)"
+                                     @ondragstart="() => StartChipDrag(panel, item)"
+                                     @ondragend="ClearDrag"
+                                     @ondragover:preventDefault
+                                     @ondrop="() => HandleDropOnChipAsync(panel, item)"
+                                     @ondrop:stopPropagation="true">
+                                    <div class="item-line1">
+                                        @if (known)
+                                        {
+                                            <img class="chip-icon" src="@LocalIconSrc(itemRow!.Food)" onerror="@RemoteIconFallback(itemRow!.Food)" alt="" />
+                                        }
+                                        else
+                                        {
+                                            <MudIcon Icon="@Icons.Material.Filled.HelpOutline" Class="item-missing-icon" />
+                                        }
+                                        <span class="item-name">@item.FoodName</span>
+                                        <span class="item-right">
+                                            @if (item.Resolved && ItemTotal(item) > 0)
+                                            {
+                                                <span class="item-total" title="Total FEP">@ScaledFep(ItemTotal(item)).ToString("0.#")</span>
+                                            }
+                                            @if (panel.IsOwn)
+                                            {
+                                                <button type="button" class="chip-x" title="Remove"
+                                                        @onclick="() => RemoveItemAsync(panel, item)"
+                                                        @onclick:stopPropagation="true">×</button>
+                                            }
+                                        </span>
+                                    </div>
+                                    <div class="item-line2">
+                                        @if (item.Resolved)
+                                        {
+                                            @if (ItemTotal(item) > 0)
+                                            {
+                                                <div class="item-bar">
+                                                    @foreach (var fep in item.Feps)
+                                                    {
+                                                        <div class="item-bar-seg @(fep.Tier == 2 ? "tier2" : "")"
+                                                             style="width: @RatioWidth(fep.Value, ItemTotal(item)); background: @StatColor(fep.Attribute);"
+                                                             @attributes="FtAttrs(fep, ItemTotal(item))"></div>
+                                                    }
+                                                </div>
+                                                <span class="item-eff" title="FEP per hunger">
+                                                    @(item.Hunger > 0 ? ScaledFep(ItemTotal(item) / item.Hunger).ToString("0.0#") + "/h" : "—")
+                                                </span>
+                                            }
+                                            @if (isVariant)
+                                            {
+                                                <span class="item-sub">@ShortVariantLabel(item)</span>
+                                            }
+                                        }
+                                        else
+                                        {
+                                            <span class="item-sub">not in the catalog right now</span>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                            @if (panel.Items.Count == 0)
+                            {
+                                <span class="detail-muted">@(panel.IsOwn ? "Empty — drag foods here" : "Empty")</span>
+                            }
+                        </div>
+                    </div>
+                }
+                @if (_panels.Count == 0)
+                {
+                    <div class="panel-card ghost">
+                        <MudIcon Icon="@Icons.Material.Filled.StarBorder" Size="Size.Small" />
+                        <span>Star a food or create a panel — fill it with <MudIcon Icon="@Icons.Material.Filled.PlaylistAdd" Size="Size.Small" Style="vertical-align: text-bottom;" /> or by dragging, then share it with your tenant.</span>
+                    </div>
+                }
+            </div>
+        }
+        </div>
+
+        <MudPaper Class="glass-morphism pa-2" Elevation="0">
+            @if (_loading)
+            {
+                <div class="pa-4">
+                    @for (var i = 0; i < 8; i++)
+                    {
+                        <MudSkeleton SkeletonType="SkeletonType.Rectangle" Height="42px" Class="mb-2" />
+                    }
+                </div>
+            }
+            else if (_loadFailed)
+            {
+                <MudAlert Severity="Severity.Error" Class="ma-2">
+                    Failed to load the cookbook.
+                    <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="LoadCatalogAsync">Retry</MudButton>
+                </MudAlert>
+            }
+            else if (_rows.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Class="ma-2">
+                    The cookbook is empty. A superadmin needs to import food data
+                    (Admin Panel &rarr; Cookbook).
+                </MudAlert>
+            }
+            else
+            {
+                <MudTable T="FoodRow"
+                          @ref="_masterTable"
+                          Items="@Filtered"
+                          Dense="true"
+                          Hover="true"
+                          Elevation="0"
+                          RowsPerPage="50"
+                          OnRowClick="RowClicked"
+                          Breakpoint="Breakpoint.Sm">
+                    <HeaderContent>
+                        <MudTh Style="width: 36px;"></MudTh>
+                        <MudTh Style="width: 62px;"></MudTh>
+                        <MudTh Style="width: 44px;"></MudTh>
+                        <MudTh>
+                            <MudTableSortLabel T="FoodRow" SortBy="@(r => r.BaseName + " " + (r.Prep ?? " "))">Food</MudTableSortLabel>
+                        </MudTh>
+                        <MudTh>Satiations</MudTh>
+                        <MudTh Style="text-align: right;">
+                            <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.Food.Energy)">Energy</MudTableSortLabel>
+                        </MudTh>
+                        <MudTh Style="text-align: right;">
+                            <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.Food.Hunger)">Hunger</MudTableSortLabel>
+                        </MudTh>
+                        <MudTh>FEPs</MudTh>
+                        @if (_selectedStat != null)
+                        {
+                            <MudTh Style="text-align: right;">
+                                <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.StatTotals.GetValueOrDefault(_selectedStat!))">@_selectedStat FEP</MudTableSortLabel>
+                            </MudTh>
+                        }
+                        <MudTh Style="text-align: right;">
+                            <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.TotalFep)">Total</MudTableSortLabel>
+                        </MudTh>
+                        <MudTh Style="text-align: right;">
+                            <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.FepPerHunger)">FEP/Hunger</MudTableSortLabel>
+                        </MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd Class="py-1 star-cell">
+                            <span @onclick:stopPropagation="true">
+                                <MudIconButton Icon="@(IsFavorite(context.Food.Name, "") ? Icons.Material.Filled.Star : Icons.Material.Filled.StarBorder)"
+                                               Size="Size.Small"
+                                               Class="@(IsFavorite(context.Food.Name, "") ? "star-on" : "star-off")"
+                                               OnClick="@(() => ToggleFavoriteAsync(context.Food.Name, ""))" />
+                            </span>
+                        </MudTd>
+                        <MudTd Class="py-1 drag-cell">
+                            <span class="drag-grip" draggable="true"
+                                  title="Drag onto a panel"
+                                  @ondragstart="() => StartFoodDrag(context.Food.Name)"
+                                  @ondragend="ClearDrag"
+                                  @onclick:stopPropagation="true">
+                                <MudIcon Icon="@Icons.Material.Filled.DragIndicator" Size="Size.Small" />
+                            </span>
+                            @AddToPanelMenu((context.Food.Name, ""))
+                        </MudTd>
+                        <MudTd Class="py-1">
+                            <img class="food-icon"
+                                 src="@LocalIconSrc(context.Food)"
+                                 onerror="@RemoteIconFallback(context.Food)"
+                                 loading="lazy" alt="" />
+                        </MudTd>
+                        <MudTd>
+                            <div class="drag-handle" draggable="true"
+                                 @ondragstart="() => StartFoodDrag(context.Food.Name)"
+                                 @ondragend="ClearDrag">
+                                <span class="food-name">@context.BaseName</span>
+                                @if (context.Prep != null)
+                                {
+                                    <span class="prep-badge">@context.Prep</span>
+                                }
+                                @if (context.Food.VariantCount > 1)
+                                {
+                                    <span class="variant-hint">@context.Food.VariantCount recipes</span>
+                                }
+                                @if (context.Food.ContributedByName != null)
+                                {
+                                    <span class="contrib-name" title="Discovered by @context.Food.ContributedByName on @context.Food.ImportedAt.ToString("yyyy-MM-dd")">
+                                        <MudIcon Icon="@Icons.Material.Filled.PersonAddAlt1" Size="Size.Small" />@context.Food.ContributedByName
+                                    </span>
+                                }
+                            </div>
+                        </MudTd>
+                        <MudTd>
+                            @if (context.Food.SatiationGroups.Count > 0)
+                            {
+                                <div class="category-chips">
+                                    @foreach (var satiation in context.Food.SatiationGroups)
+                                    {
+                                        <span class="category-chip satiation-chip">@satiation</span>
+                                    }
+                                </div>
+                            }
+                            else
+                            {
+                                <span class="detail-muted">—</span>
+                            }
+                        </MudTd>
+                        <MudTd Style="text-align: right;">@context.Food.Energy</MudTd>
+                        <MudTd Style="text-align: right;">@context.Food.Hunger.ToString("0.##")</MudTd>
+                        <MudTd>
+                            <div class="fep-pills">
+                                @foreach (var fep in context.Food.Feps)
+                                {
+                                    <span class="fep-pill @(fep.Tier == 2 ? "tier2" : "")"
+                                          style="background: @StatColor(fep.Attribute);"
+                                          @attributes="FtAttrs(fep, context.TotalFep)">
+                                        @fep.Attribute@(fep.Tier == 2 ? "+2" : "") @ScaledFep(fep.Value).ToString("0.##")
+                                    </span>
+                                }
+                            </div>
+                        </MudTd>
+                        @if (_selectedStat != null)
+                        {
+                            <MudTd Style="text-align: right;">
+                                <span class="stat-value" style="--chip-color: @StatColors[_selectedStat!];">
+                                    @ScaledFep(context.StatTotals.GetValueOrDefault(_selectedStat!)).ToString("0.##")
+                                </span>
+                            </MudTd>
+                        }
+                        <MudTd Style="text-align: right;">
+                            <strong>@ScaledFep(context.TotalFep).ToString("0.##")</strong>
+                        </MudTd>
+                        <MudTd Style="text-align: right;">
+                            @(context.Food.Hunger > 0 ? ScaledFep(context.FepPerHunger).ToString("0.0#") : "—")
+                        </MudTd>
+                    </RowTemplate>
+                    <ChildRowContent>
+                        @if (_expanded.Contains(context.Food.Id))
+                        {
+                            <MudTr>
+                                <td colspan="@(_selectedStat != null ? 11 : 10)" class="food-detail">
+                                    <div class="food-detail-inner">
+                                        <div class="detail-block">
+                                            @{
+                                                var recipeBase = BaseRecipeSource(context);
+                                                var recipeText = !string.IsNullOrEmpty(context.Food.RecipeText)
+                                                    ? context.Food.RecipeText
+                                                    : recipeBase?.Recipe;
+                                                var stationText = !string.IsNullOrEmpty(context.Food.CookingStation)
+                                                    ? context.Food.CookingStation
+                                                    : recipeBase?.Station;
+                                            }
+                                            @if (!string.IsNullOrEmpty(recipeText))
+                                            {
+                                                var recipeSeed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { context.Food.Name };
+                                                if (recipeBase != null)
+                                                {
+                                                    recipeSeed.Add(recipeBase.BaseName);
+                                                }
+                                                <div class="detail-title">
+                                                    Recipe
+                                                    @if (string.IsNullOrEmpty(context.Food.RecipeText) && recipeBase != null)
+                                                    {
+                                                        <span class="recipe-inherit"
+                                                              title="@context.Food.Name is a preparation of @recipeBase.BaseName — same recipe.">
+                                                            of @recipeBase.BaseName
+                                                        </span>
+                                                    }
+                                                </div>
+                                                @RecipeList(BuildRecipeNodes(recipeText, 0, recipeSeed), false)
+                                            }
+                                            else if (context.Food.Ingredients.Count > 0)
+                                            {
+                                                <div class="detail-title"
+                                                     title="The wiki has no fixed recipe for this food — this is one combination players actually made it with. See Variations for all recorded ones.">
+                                                    Recorded combination
+                                                </div>
+                                                <ul class="ingredient-list">
+                                                    @foreach (var ingredient in context.Food.Ingredients)
+                                                    {
+                                                        <li>
+                                                            @ingredient.Name
+                                                            @if (ingredient.Percentage != 100)
+                                                            {
+                                                                <span class="ingredient-pct">@ingredient.Percentage.ToString("0.#")%</span>
+                                                            }
+                                                        </li>
+                                                    }
+                                                </ul>
+                                            }
+                                            else
+                                            {
+                                                <div class="detail-title">Recipe</div>
+                                                <span class="detail-muted">No recipe data</span>
+                                            }
+                                            @if (!string.IsNullOrEmpty(stationText))
+                                            {
+                                                <div class="recipe-station" title="Cooked with">
+                                                    <MudIcon Icon="@Icons.Material.Filled.OutdoorGrill" />
+                                                    <span>@stationText</span>
+                                                </div>
+                                            }
+                                        </div>
+                                        <div class="detail-block">
+                                            <div class="detail-title">FEP breakdown @(_quality != 10 ? $"(at Q{_quality})" : "(base Q10)")</div>
+                                            @if (context.TotalFep > 0)
+                                            {
+                                                <div class="fep-bar">
+                                                    @foreach (var fep in context.Food.Feps)
+                                                    {
+                                                        <div class="fep-bar-segment @(fep.Tier == 2 ? "tier2" : "")"
+                                                             style="width: @RatioWidth(fep.Value, context.TotalFep); background: @StatColor(fep.Attribute);"
+                                                             @attributes="FtAttrs(fep, context.TotalFep)"></div>
+                                                    }
+                                                </div>
+                                                <table class="fep-detail-table">
+                                                    @foreach (var fep in context.Food.Feps)
+                                                    {
+                                                        <tr>
+                                                            <td>
+                                                                <span class="fep-pill @(fep.Tier == 2 ? "tier2" : "")"
+                                                                      style="background: @StatColor(fep.Attribute);"
+                                                                      @attributes="FtAttrs(fep, context.TotalFep)">
+                                                                    @fep.Attribute@(fep.Tier == 2 ? "+2" : "")
+                                                                </span>
+                                                            </td>
+                                                            <td class="fep-full-name">
+                                                                @(StatFullNames.GetValueOrDefault(fep.Attribute, fep.Attribute))@(fep.Tier == 2 ? " +2" : "")
+                                                            </td>
+                                                            <td class="fep-detail-value">@ScaledFep(fep.Value).ToString("0.##")</td>
+                                                            <td class="detail-muted">@((fep.Value / context.TotalFep).ToString("0%"))</td>
+                                                        </tr>
+                                                    }
+                                                </table>
+                                            }
+                                            else
+                                            {
+                                                <span class="detail-muted">No FEPs</span>
+                                            }
+                                        </div>
+                                        <div class="detail-block">
+                                            <div class="detail-title">Details</div>
+                                            @if (context.Food.Categories.Count > 0)
+                                            {
+                                                <div class="detail-row">
+                                                    <span class="detail-label">Wiki tags</span>
+                                                    <div class="category-chips">
+                                                        @foreach (var category in context.Food.Categories)
+                                                        {
+                                                            <span class="category-chip">@category</span>
+                                                        }
+                                                    </div>
+                                                </div>
+                                            }
+                                            <div class="detail-row">
+                                                <span class="detail-label">Energy per hunger</span>
+                                                <span>@(context.Food.Hunger > 0 ? (context.Food.Energy / context.Food.Hunger).ToString("0.#") : "—")</span>
+                                            </div>
+                                            @if (context.Food.WikiUrl != null)
+                                            {
+                                                <div class="detail-row">
+                                                    <MudLink Href="@context.Food.WikiUrl" Target="_blank" Typo="Typo.body2">
+                                                        Open wiki page
+                                                        <MudIcon Icon="@Icons.Material.Filled.OpenInNew" Size="Size.Small" Style="vertical-align: text-bottom;" />
+                                                    </MudLink>
+                                                </div>
+                                            }
+                                            @if (context.Food.ContributedByName != null)
+                                            {
+                                                <div class="detail-row">
+                                                    <span class="detail-label">Added by</span>
+                                                    <span>@context.Food.ContributedByName &middot; @context.Food.ImportedAt.ToString("yyyy-MM-dd")</span>
+                                                </div>
+                                            }
+                                            <div class="detail-row">
+                                                <span class="detail-resource">@context.Food.ResourceName</span>
+                                            </div>
+                                        </div>
+                                        @if (_prepSiblings.TryGetValue(context.BaseName, out var siblings))
+                                        {
+                                            <div class="variations-block">
+                                                <div class="detail-title">Preparations of @context.BaseName</div>
+                                                <table class="prep-compare">
+                                                    <tr>
+                                                        <th></th>
+                                                        <th>FEPs</th>
+                                                        <th class="num">Total</th>
+                                                        <th class="num">Hunger</th>
+                                                        <th class="num">Energy</th>
+                                                        <th class="num">FEP/Hunger</th>
+                                                    </tr>
+                                                    @foreach (var sibling in siblings)
+                                                    {
+                                                        <tr class="@(sibling.Food.Id == context.Food.Id ? "prep-compare-current" : "")">
+                                                            <td>
+                                                                @if (sibling.Prep != null)
+                                                                {
+                                                                    <span class="prep-badge">@sibling.Prep</span>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <span class="prep-badge plain">@PlainPrepKey</span>
+                                                                }
+                                                            </td>
+                                                            <td>
+                                                                <div class="fep-pills">
+                                                                    @foreach (var fep in sibling.Food.Feps)
+                                                                    {
+                                                                        <span class="fep-pill @(fep.Tier == 2 ? "tier2" : "")"
+                                                                              style="background: @StatColor(fep.Attribute);"
+                                                                              @attributes="FtAttrs(fep, sibling.TotalFep)">
+                                                                            @fep.Attribute@(fep.Tier == 2 ? "+2" : "") @ScaledFep(fep.Value).ToString("0.##")
+                                                                        </span>
+                                                                    }
+                                                                </div>
+                                                            </td>
+                                                            <td class="num"><strong>@ScaledFep(sibling.TotalFep).ToString("0.#")</strong></td>
+                                                            <td class="num">@sibling.Food.Hunger.ToString("0.##")</td>
+                                                            <td class="num">@sibling.Food.Energy</td>
+                                                            <td class="num">@(sibling.Food.Hunger > 0 ? ScaledFep(sibling.FepPerHunger).ToString("0.0#") : "—")</td>
+                                                        </tr>
+                                                    }
+                                                </table>
+                                            </div>
+                                        }
+                                        @if (context.Food.VariantCount > 1 || (_focusFoodName == context.Food.Name && _focusVariantKey != null))
+                                        {
+                                            <div class="variations-block">
+                                                <div class="detail-title">Recorded variations (@context.Food.VariantCount)</div>
+                                                @if (!_variations.ContainsKey(context.Food.Id))
+                                                {
+                                                    <MudProgressLinear Indeterminate="true" Class="my-2" />
+                                                }
+                                                else
+                                                {
+                                                    @if (context.Food.VariantCount > VariantsPerPage)
+                                                    {
+                                                        <MudTextField T="string"
+                                                                      Value="@GetVariantFilter(context.Food.Id)"
+                                                                      ValueChanged="@(v => SetVariantFilter(context.Food.Id, v))"
+                                                                      Immediate="true"
+                                                                      DebounceInterval="200"
+                                                                      Clearable="true"
+                                                                      Placeholder="Filter by ingredient..."
+                                                                      Adornment="Adornment.Start"
+                                                                      AdornmentIcon="@Icons.Material.Filled.Search"
+                                                                      Variant="Variant.Outlined"
+                                                                      Margin="Margin.Dense"
+                                                                      Class="variant-filter" />
+                                                    }
+
+                                                    <MudTable T="VariantRow"
+                                                              Items="@FilteredVariants(context.Food.Id, context.Food.Name)"
+                                                              Dense="true"
+                                                              Hover="true"
+                                                              Elevation="0"
+                                                              RowsPerPage="@VariantsPerPage"
+                                                              Breakpoint="Breakpoint.Sm"
+                                                              RowClassFunc="@((vr, _) => _focusVariantKey != null && _focusVariantKey == FavKey(context.Food.Name, vr.Variant.IngredientSignature) ? "variant-focused" : "")"
+                                                              Class="variant-table">
+                                                        <HeaderContent>
+                                                            <MudTh Style="width: 88px;"></MudTh>
+                                                            <MudTh>
+                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => r.RecipeText)">Recipe</MudTableSortLabel>
+                                                            </MudTh>
+                                                            <MudTh>FEPs</MudTh>
+                                                            <MudTh Style="text-align: right;">
+                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.Total)">Total</MudTableSortLabel>
+                                                            </MudTh>
+                                                            <MudTh Style="text-align: right;">
+                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.Variant.Hunger)">Hunger</MudTableSortLabel>
+                                                            </MudTh>
+                                                            <MudTh Style="text-align: right;">
+                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.Variant.Energy)">Energy</MudTableSortLabel>
+                                                            </MudTh>
+                                                            <MudTh Style="text-align: right;">
+                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.PerHunger)">FEP/Hunger</MudTableSortLabel>
+                                                            </MudTh>
+                                                        </HeaderContent>
+                                                        <RowTemplate Context="variantRow">
+                                                            <MudTd Class="py-0 variant-actions">
+                                                                <MudIconButton Icon="@(IsFavorite(context.Food.Name, variantRow.Variant.IngredientSignature) ? Icons.Material.Filled.Star : Icons.Material.Filled.StarBorder)"
+                                                                               Size="Size.Small"
+                                                                               Class="@(IsFavorite(context.Food.Name, variantRow.Variant.IngredientSignature) ? "star-on" : "star-off")"
+                                                                               OnClick="() => ToggleFavoriteAsync(context.Food.Name, variantRow.Variant.IngredientSignature)" />
+                                                                <span class="drag-grip" draggable="true"
+                                                                      title="Drag this recipe onto a panel"
+                                                                      @ondragstart="() => StartVariantDrag(context.Food.Name, variantRow.Variant.IngredientSignature)"
+                                                                      @ondragend="ClearDrag">
+                                                                    <MudIcon Icon="@Icons.Material.Filled.DragIndicator" Size="Size.Small" />
+                                                                </span>
+                                                                @AddToPanelMenu((context.Food.Name, variantRow.Variant.IngredientSignature))
+                                                            </MudTd>
+                                                            <MudTd>
+                                                                @variantRow.RecipeText
+                                                                @if (variantRow.Variant.TimesSeen > 1)
+                                                                {
+                                                                    <span class="variant-seen">×@variantRow.Variant.TimesSeen</span>
+                                                                }
+                                                            </MudTd>
+                                                            <MudTd Class="py-1">
+                                                                <div class="variant-bar">
+                                                                    @foreach (var fep in variantRow.Variant.Feps)
+                                                                    {
+                                                                        <div class="variant-bar-segment @(fep.Tier == 2 ? "tier2" : "")"
+                                                                             style="width: @RatioWidth(fep.Value, variantRow.Total); background: @StatColor(fep.Attribute);"
+                                                                             @attributes="FtAttrs(fep, variantRow.Total)"></div>
+                                                                    }
+                                                                </div>
+                                                                @if (variantRow.Total > 0)
+                                                                {
+                                                                    <div class="fep-dist">
+                                                                        @foreach (var fep in variantRow.Variant.Feps)
+                                                                        {
+                                                                            <span class="fep-dist-item" @attributes="FtAttrs(fep, variantRow.Total)">
+                                                                                <span class="fep-dist-dot" style="background: @StatColor(fep.Attribute);"></span>@fep.Attribute@(fep.Tier == 2 ? "+2" : "") @((fep.Value / variantRow.Total).ToString("0%"))
+                                                                            </span>
+                                                                        }
+                                                                    </div>
+                                                                }
+                                                            </MudTd>
+                                                            <MudTd Style="text-align: right;">
+                                                                <strong>@ScaledFep(variantRow.Total).ToString("0.#")</strong>
+                                                            </MudTd>
+                                                            <MudTd Style="text-align: right;">@variantRow.Variant.Hunger.ToString("0.##")</MudTd>
+                                                            <MudTd Style="text-align: right;">@variantRow.Variant.Energy</MudTd>
+                                                            <MudTd Style="text-align: right;">
+                                                                @(variantRow.Variant.Hunger > 0 ? ScaledFep(variantRow.PerHunger).ToString("0.0#") : "—")
+                                                            </MudTd>
+                                                        </RowTemplate>
+                                                        <NoRecordsContent>
+                                                            <span class="detail-muted">No variations match the filter.</span>
+                                                        </NoRecordsContent>
+                                                        <PagerContent>
+                                                            @if (FilteredVariants(context.Food.Id, context.Food.Name).Count() > VariantsPerPage)
+                                                            {
+                                                                <MudTablePager PageSizeOptions="new[] { 25, 50, 100 }" />
+                                                            }
+                                                        </PagerContent>
+                                                    </MudTable>
+                                                }
+                                            </div>
+                                        }
+                                    </div>
+                                </td>
+                            </MudTr>
+                        }
+                    </ChildRowContent>
+                    <NoRecordsContent>
+                        <div class="no-results">
+                            <MudText Typo="Typo.body1">No foods match your search.</MudText>
+                            <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="ClearFilters">Clear filters</MudButton>
+                        </div>
+                    </NoRecordsContent>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 25, 50, 100 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+        </MudPaper>
+
+    </MudContainer>
+</div>
+
+@code {
+    // Fresh per-stat palette: game-recognizable hues, tuned for dark text on the light glass theme.
+    private static readonly Dictionary<string, string> StatColors = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["STR"] = "#f2a9a3",
+        ["AGI"] = "#b3aef0",
+        ["INT"] = "#9fd8e8",
+        ["CON"] = "#f0a9d4",
+        ["PER"] = "#f7cd9c",
+        ["CHA"] = "#a8e8bb",
+        ["DEX"] = "#f7f3a3",
+        ["WILL"] = "#d6ee9d",
+        ["PSY"] = "#cfa9f5"
+    };
+
+    private static readonly Dictionary<string, string> StatFullNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["STR"] = "Strength",
+        ["AGI"] = "Agility",
+        ["INT"] = "Intelligence",
+        ["CON"] = "Constitution",
+        ["PER"] = "Perception",
+        ["CHA"] = "Charisma",
+        ["DEX"] = "Dexterity",
+        ["WILL"] = "Will",
+        ["PSY"] = "Psyche"
+    };
+
+    private sealed record FoodRow(
+        FoodDto Food,
+        string SearchBlob,
+        decimal TotalFep,
+        decimal FepPerHunger,
+        Dictionary<string, decimal> StatTotals,
+        string? Prep,
+        string BaseName);
+
+    /// <summary>Preparation-type name prefixes ("Smoked Beef" → prep Smoked, base Beef).</summary>
+    private static readonly string[] PrepPrefixes =
+    {
+        "Sizzling", "Smoked", "Spitroast", "Roast", "Dried", "Boiled",
+        "Pickled", "Baked", "Fried", "Grilled", "Raw", "Yesteryear's"
+    };
+
+    private const string PlainPrepKey = "Plain";
+
+    private sealed record VariantRow(FoodVariantDto Variant, string RecipeText, string SearchBlob, decimal Total, decimal PerHunger);
+
+    /// <summary>One entry of a wiki canonical recipe: "Edible Mushroom x2" → ("Edible Mushroom", "x2").</summary>
+    private sealed record RecipePart(string Name, string? Qty, bool Optional);
+
+    /// <summary>Splits a trailing quantity ("x2", "(0.5 kg)", "0.1 L") off a recipe entry.</summary>
+    private static readonly Regex RecipeQtyRegex = new(
+        @"^(?<name>.+?)(?:\s*(?<qty>x\s?\d+|\([^)]*\)|\d+(?:[.,]\d+)?\s*(?:l|ml|kg|g)\.?))?$",
+        RegexOptions.IgnoreCase);
+
+    private sealed record InheritedRecipe(string BaseName, string Recipe, string? Station);
+
+    /// <summary>
+    /// For prep-variants without their own wiki page ("Sizzling Roast Beef"), the recipe
+    /// to inherit: the base food's ("Roast Beef"), or — when the base is not an eaten
+    /// food ("Roast Beef Bollock" → "Beef Bollock") — the wiki recipe index entry.
+    /// </summary>
+    private InheritedRecipe? BaseRecipeSource(FoodRow row)
+    {
+        if (row.Prep == null || !string.IsNullOrEmpty(row.Food.RecipeText))
+        {
+            return null;
+        }
+
+        if (_rowsByName.TryGetValue(row.BaseName, out var baseRow)
+            && !string.IsNullOrEmpty(baseRow.Food.RecipeText))
+        {
+            return new InheritedRecipe(baseRow.Food.Name, baseRow.Food.RecipeText!, baseRow.Food.CookingStation);
+        }
+
+        if (_recipeIndex.TryGetValue(row.BaseName, out var entry))
+        {
+            return new InheritedRecipe(row.BaseName, entry.Recipe, entry.Station);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// One resolved recipe entry: the part itself, the inline chain of single-ingredient
+    /// intermediates behind it ("Raw Badger ← Badger"), and — when the chain ends in a
+    /// multi-ingredient intermediate ("Unbaked Meatpie") — that recipe's own entries nested.
+    /// </summary>
+    private sealed record RecipeNode(RecipePart Part, List<RecipePart> Chain, List<RecipeNode>? Sub);
+
+    private const int MaxRecipeNesting = 3;
+    private const int MaxRecipeChainLinks = 8;
+
+    /// <summary>Wiki recipe line per craftable (incl. non-food intermediates); empty until loaded.</summary>
+    private Dictionary<string, RecipeIndexEntryDto> _recipeIndex = new(StringComparer.OrdinalIgnoreCase);
+
+    private List<RecipeNode> BuildRecipeNodes(string recipeText, int depth, HashSet<string> path)
+    {
+        var nodes = new List<RecipeNode>();
+        foreach (var part in RecipeParts(recipeText))
+        {
+            var visited = new HashSet<string>(path, StringComparer.OrdinalIgnoreCase);
+            var chain = new List<RecipePart>();
+            List<RecipeNode>? sub = null;
+            var current = part.Name;
+
+            while (chain.Count < MaxRecipeChainLinks
+                   && visited.Add(current)
+                   && _recipeIndex.TryGetValue(current, out var entry))
+            {
+                var subParts = RecipeParts(entry.Recipe);
+                if (subParts.Count == 1)
+                {
+                    chain.Add(subParts[0]);
+                    current = subParts[0].Name;
+                    continue;
+                }
+
+                if (depth < MaxRecipeNesting)
+                {
+                    sub = BuildRecipeNodes(entry.Recipe, depth + 1, visited);
+                }
+
+                break;
+            }
+
+            nodes.Add(new RecipeNode(part, chain, sub));
+        }
+
+        return nodes;
+    }
+
+    private RenderFragment RecipeList(List<RecipeNode> nodes, bool nested) =>
+        @<ul class="ingredient-list @(nested ? "recipe-sub" : null)">
+            @foreach (var node in nodes)
+            {
+                <li>
+                    @node.Part.Name
+                    @if (node.Part.Qty != null)
+                    {
+                        <span class="ingredient-pct">@node.Part.Qty</span>
+                    }
+                    @if (node.Part.Optional)
+                    {
+                        <span class="recipe-optional">optional</span>
+                    }
+                    @foreach (var link in node.Chain)
+                    {
+                        <span class="recipe-chain" title="made from">←</span>
+                        @link.Name
+                        @if (link.Qty != null)
+                        {
+                            <span class="ingredient-pct">@link.Qty</span>
+                        }
+                    }
+                    @if (node.Sub != null)
+                    {
+                        @RecipeList(node.Sub, true)
+                    }
+                </li>
+            }
+        </ul>;
+
+    private static List<RecipePart> RecipeParts(string recipeText)
+    {
+        var parts = new List<RecipePart>();
+        foreach (var rawPart in recipeText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var text = rawPart;
+            var optional = text.StartsWith("optional:", StringComparison.OrdinalIgnoreCase);
+            if (optional)
+            {
+                text = text["optional:".Length..].Trim();
+            }
+
+            if (text.Length == 0)
+            {
+                continue;
+            }
+
+            var match = RecipeQtyRegex.Match(text);
+            parts.Add(match.Success && match.Groups["qty"].Success
+                ? new RecipePart(match.Groups["name"].Value.Trim(), match.Groups["qty"].Value, optional)
+                : new RecipePart(text, null, optional));
+        }
+
+        return parts;
+    }
+
+    private const int VariantsPerPage = 25;
+
+    private static readonly string[] StatOrderList = { "STR", "AGI", "INT", "CON", "PER", "CHA", "DEX", "WILL", "PSY" };
+
+    private List<FoodRow> _rows = new();
+    private List<string> _allSatiations = new();
+    private List<string> _allPreps = new();
+    private Dictionary<string, List<FoodRow>> _prepSiblings = new(StringComparer.Ordinal);
+    private readonly HashSet<int> _expanded = new();
+    private readonly Dictionary<int, List<VariantRow>> _variations = new();
+    private readonly Dictionary<int, string> _variantFilters = new();
+    private string? _selectedStat;
+    private string? _selectedSatiation;
+    private string? _selectedPrep;
+
+    // Panels & favorites
+    private List<FoodPanelDto> _panels = new();
+    private HashSet<string> _favoriteKeys = new(StringComparer.Ordinal);
+    private Dictionary<string, FoodRow> _rowsByName = new(StringComparer.Ordinal);
+    private bool _panelsExpanded = true;
+    private int? _activePanelId;
+    private HashSet<string>? _activePanelNames;
+    private string? _draggingFood;
+    private string _draggingSignature = string.Empty;
+    private (int PanelId, int ItemId)? _draggingChip;
+    private int? _dragOverPanelId;
+    private bool _dragActive;
+    private string? _focusVariantKey;
+    private string? _focusFoodName;
+    private MudTable<FoodRow>? _masterTable;
+
+    /// <summary>Composite key for favorite lookups: food name + variant signature ("" = whole food).</summary>
+    private static string FavKey(string foodName, string signature) => foodName + "" + signature;
+
+    private bool IsFavorite(string foodName, string signature) => _favoriteKeys.Contains(FavKey(foodName, signature));
+
+    private bool _loading = true;
+    private bool _loadFailed;
+    private string _search = string.Empty;
+    private int _quality = 10;
+
+    private double QualityMultiplier => Math.Sqrt(Math.Max(1, _quality) / 10.0);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Task.WhenAll(LoadCatalogAsync(), LoadPanelsAsync());
+    }
+
+    private async Task LoadCatalogAsync()
+    {
+        _loading = true;
+        _loadFailed = false;
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var recipeIndexTask = LoadRecipeIndexAsync(client);
+            var foods = await client.GetFromJsonAsync<List<FoodDto>>("/api/v1/cookbook/foods") ?? new List<FoodDto>();
+            await recipeIndexTask;
+
+            _rows = foods.Select(food =>
+            {
+                var blob = (food.Name + "\n"
+                            + string.Join("\n", food.Ingredients.Select(i => i.Name)) + "\n"
+                            + food.RecipeText)
+                    .ToLowerInvariant();
+                var total = food.Feps.Sum(f => f.Value);
+                var perHunger = food.Hunger > 0 ? total / food.Hunger : 0m;
+                var statTotals = food.Feps
+                    .GroupBy(f => f.Attribute, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
+                var prep = PrepPrefixes.FirstOrDefault(p =>
+                    food.Name.StartsWith(p + " ", StringComparison.Ordinal));
+                var baseName = prep != null ? food.Name[(prep.Length + 1)..] : food.Name;
+                return new FoodRow(food, blob, total, perHunger, statTotals, prep, baseName);
+            }).ToList();
+
+            _rowsByName = _rows.ToDictionary(r => r.Food.Name, StringComparer.Ordinal);
+
+            _allPreps = _rows
+                .Where(r => r.Prep != null)
+                .GroupBy(r => r.Prep!)
+                .OrderByDescending(g => g.Count())
+                .Select(g => g.Key)
+                .ToList();
+
+            _prepSiblings = _rows
+                .GroupBy(r => r.BaseName, StringComparer.Ordinal)
+                .Where(g => g.Count() > 1)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.OrderByDescending(r => r.TotalFep).ToList(),
+                    StringComparer.Ordinal);
+
+            _variations.Clear();
+
+            _allSatiations = _rows
+                .SelectMany(r => r.Food.SatiationGroups)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (Exception)
+        {
+            _loadFailed = true;
+            Snackbar.Add("Failed to load the cookbook", Severity.Error);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task LoadRecipeIndexAsync(HttpClient client)
+    {
+        try
+        {
+            var entries = await client.GetFromJsonAsync<List<RecipeIndexEntryDto>>("/api/v1/cookbook/recipe-index")
+                          ?? new List<RecipeIndexEntryDto>();
+            var index = new Dictionary<string, RecipeIndexEntryDto>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in entries)
+            {
+                index.TryAdd(entry.Name, entry);
+            }
+
+            _recipeIndex = index;
+        }
+        catch (Exception)
+        {
+            // Recursive recipe expansion is progressive enhancement — the page works without it.
+        }
+    }
+
+    /// <summary>Text search only — the chip rows show their counts over this set.</summary>
+    private IEnumerable<FoodRow> BaseFiltered
+    {
+        get
+        {
+            // A focused panel chip overrides everything: show exactly that food
+            // (the free-text search also matches ingredients, which would bury it).
+            if (_focusFoodName != null)
+            {
+                return _rows.Where(r => r.Food.Name == _focusFoodName);
+            }
+
+            IEnumerable<FoodRow> rows = _rows;
+
+            if (!string.IsNullOrWhiteSpace(_search))
+            {
+                var term = _search.Trim().ToLowerInvariant();
+                rows = rows.Where(r => r.SearchBlob.Contains(term, StringComparison.Ordinal));
+            }
+
+            return rows;
+        }
+    }
+
+    private IEnumerable<FoodRow> Filtered
+    {
+        get
+        {
+            var rows = BaseFiltered;
+
+            if (_selectedSatiation != null)
+            {
+                rows = rows.Where(r => r.Food.SatiationGroups.Contains(_selectedSatiation));
+            }
+
+            if (_selectedPrep != null)
+            {
+                rows = _selectedPrep == PlainPrepKey
+                    ? rows.Where(r => r.Prep == null)
+                    : rows.Where(r => r.Prep == _selectedPrep);
+            }
+
+            if (_activePanelNames != null)
+            {
+                rows = rows.Where(r => _activePanelNames.Contains(r.Food.Name));
+            }
+
+            if (_selectedStat != null)
+            {
+                rows = rows
+                    .Where(r => r.StatTotals.ContainsKey(_selectedStat))
+                    .OrderByDescending(r => r.StatTotals[_selectedStat]);
+            }
+
+            return rows;
+        }
+    }
+
+    private int FilteredCount => Filtered.Count();
+
+    private int StatCount(string stat) => BaseFiltered.Count(r => r.StatTotals.ContainsKey(stat));
+
+    private int SatiationCount(string satiation) =>
+        BaseFiltered.Count(r => r.Food.SatiationGroups.Contains(satiation));
+
+    private void ToggleStat(string stat)
+    {
+        _selectedStat = _selectedStat == stat ? null : stat;
+    }
+
+    private void ToggleSatiation(string satiation)
+    {
+        _selectedSatiation = _selectedSatiation == satiation ? null : satiation;
+    }
+
+    private int PrepCount(string prep) =>
+        prep == PlainPrepKey
+            ? BaseFiltered.Count(r => r.Prep == null)
+            : BaseFiltered.Count(r => r.Prep == prep);
+
+    private void TogglePrep(string prep)
+    {
+        _selectedPrep = _selectedPrep == prep ? null : prep;
+    }
+
+    private decimal ScaledFep(decimal baseValue) => baseValue * (decimal)QualityMultiplier;
+
+    private static string StatColor(string attribute) =>
+        StatColors.TryGetValue(attribute, out var color) ? color : "#d8d8d8";
+
+    private string FepTitle(FoodFepDto fep)
+    {
+        var name = StatFullNames.TryGetValue(fep.Attribute, out var full) ? full : fep.Attribute;
+        return $"{name} +{fep.Tier}: {ScaledFep(fep.Value):0.##}";
+    }
+
+    /// <summary>Data attributes consumed by js/fep-tooltip.js (styled hover card).</summary>
+    private Dictionary<string, object> FtAttrs(FoodFepDto fep, decimal total) => new()
+    {
+        ["data-ft-stat"] = StatFullNames.GetValueOrDefault(fep.Attribute, fep.Attribute),
+        ["data-ft-tier"] = fep.Tier,
+        ["data-ft-value"] = ScaledFep(fep.Value).ToString("0.##"),
+        ["data-ft-share"] = total > 0 ? (fep.Value / total).ToString("0%") : "—",
+        ["data-ft-color"] = StatColor(fep.Attribute)
+    };
+
+    private static string LocalIconSrc(FoodDto food) => "/" + food.ResourceName + ".png";
+
+    private static string RemoteIconFallback(FoodDto food) =>
+        $"this.onerror=null;this.src='https://www.havenandhearth.com/mt/r/{food.ResourceName}';";
+
+    private async Task RowClicked(TableRowClickEventArgs<FoodRow> args)
+    {
+        if (args.Item == null)
+        {
+            return;
+        }
+
+        var id = args.Item.Food.Id;
+        if (!_expanded.Add(id))
+        {
+            _expanded.Remove(id);
+            if (_focusFoodName == args.Item.Food.Name)
+            {
+                ClearFocus();
+            }
+
+            return;
+        }
+
+        if (args.Item.Food.VariantCount > 1 && !_variations.ContainsKey(id))
+        {
+            await LoadVariationsAsync(id);
+        }
+    }
+
+    private async Task LoadVariationsAsync(int foodId)
+    {
+        List<FoodVariantDto> variants;
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            variants = await client.GetFromJsonAsync<List<FoodVariantDto>>(
+                $"/api/v1/cookbook/foods/{foodId}/variations") ?? new List<FoodVariantDto>();
+        }
+        catch (Exception)
+        {
+            variants = new List<FoodVariantDto>();
+            Snackbar.Add("Failed to load recipe variations", Severity.Error);
+        }
+
+        _variations[foodId] = variants.Select(v =>
+        {
+            var text = string.Join(", ", v.Ingredients.Select(i =>
+                i.Percentage != 100 ? $"{i.Name} {i.Percentage:0.#}%" : i.Name));
+            var total = v.Feps.Sum(f => f.Value);
+            return new VariantRow(
+                v,
+                text,
+                text.ToLowerInvariant(),
+                total,
+                v.Hunger > 0 ? total / v.Hunger : 0m);
+        }).ToList();
+    }
+
+    private IEnumerable<VariantRow> FilteredVariants(int foodId, string foodName)
+    {
+        if (!_variations.TryGetValue(foodId, out var rows))
+        {
+            return Enumerable.Empty<VariantRow>();
+        }
+
+        // When a panel chip focused a variant of this food, the target must be visible:
+        // skip the ingredient filter and pin the focused variant to the front (page 1).
+        var focusedHere = _focusVariantKey != null
+            && rows.Any(r => FavKey(foodName, r.Variant.IngredientSignature) == _focusVariantKey);
+
+        IEnumerable<VariantRow> result = rows;
+
+        var filter = GetVariantFilter(foodId);
+        if (!focusedHere && !string.IsNullOrWhiteSpace(filter))
+        {
+            var term = filter.Trim().ToLowerInvariant();
+            result = result.Where(r => r.SearchBlob.Contains(term, StringComparison.Ordinal));
+        }
+
+        if (focusedHere)
+        {
+            result = result.OrderByDescending(r =>
+                FavKey(foodName, r.Variant.IngredientSignature) == _focusVariantKey);
+        }
+
+        return result;
+    }
+
+    private string GetVariantFilter(int foodId) => _variantFilters.GetValueOrDefault(foodId, string.Empty);
+
+    private void SetVariantFilter(int foodId, string value)
+    {
+        _variantFilters[foodId] = value ?? string.Empty;
+    }
+
+    /// <summary>CSS percentage width (invariant culture — a comma decimal separator breaks CSS).</summary>
+    private static string RatioWidth(decimal value, decimal total) =>
+        total > 0
+            ? (Math.Clamp(value / total * 100m, 0m, 100m)).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + "%"
+            : "0";
+
+    private void ClearFilters()
+    {
+        _search = string.Empty;
+        _selectedStat = null;
+        _selectedSatiation = null;
+        _selectedPrep = null;
+        ClearFocus();
+        ClearPanelFilter();
+    }
+
+    // ----- Panels & favorites -----
+
+    private async Task LoadPanelsAsync()
+    {
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            _panels = await client.GetFromJsonAsync<List<FoodPanelDto>>("/api/v1/cookbook/panels")
+                      ?? new List<FoodPanelDto>();
+            SyncFavorites();
+        }
+        catch (Exception)
+        {
+            Snackbar.Add("Failed to load food panels", Severity.Error);
+        }
+    }
+
+    private void SyncFavorites()
+    {
+        _favoriteKeys = _panels
+            .FirstOrDefault(p => p.IsOwn && p.IsFavorites)?
+            .Items.Select(i => FavKey(i.FoodName, i.IngredientSignature))
+            .ToHashSet(StringComparer.Ordinal)
+            ?? new HashSet<string>(StringComparer.Ordinal);
+    }
+
+    /// <summary>Replaces (or inserts) one panel in the local list and refreshes derived state.</summary>
+    private void UpsertPanel(FoodPanelDto updated)
+    {
+        var index = _panels.FindIndex(p => p.Id == updated.Id);
+        if (index >= 0)
+        {
+            updated.OwnerName = _panels[index].OwnerName;
+            _panels[index] = updated;
+        }
+        else
+        {
+            _panels.Insert(0, updated);
+        }
+
+        SyncFavorites();
+        if (_activePanelId == updated.Id)
+        {
+            _activePanelNames = updated.Items.Select(i => i.FoodName).ToHashSet(StringComparer.Ordinal);
+        }
+    }
+
+    private async Task ToggleFavoriteAsync(string foodName, string ingredientSignature)
+    {
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.PostAsJsonAsync("/api/v1/cookbook/panels/favorites/toggle",
+                new PanelItemRequestDto { FoodName = foodName, IngredientSignature = ingredientSignature });
+            var result = await response.Content.ReadFromJsonAsync<FavoriteToggleResultDto>();
+            if (response.IsSuccessStatusCode && result?.Panel != null)
+            {
+                result.Panel.IsOwn = true;
+                UpsertPanel(result.Panel);
+                var what = ingredientSignature.Length > 0 ? $"{foodName} recipe" : foodName;
+                Snackbar.Add(result.IsFavorite ? $"{what} added to Favorites" : $"{what} removed from Favorites",
+                    Severity.Success);
+            }
+            else
+            {
+                Snackbar.Add("Could not update Favorites", Severity.Error);
+            }
+        }
+        catch (Exception)
+        {
+            Snackbar.Add("Could not update Favorites", Severity.Error);
+        }
+    }
+
+    private static decimal ItemTotal(FoodPanelItemDto item) => item.Feps.Sum(f => f.Value);
+
+    /// <summary>Others' shared panels carry the owner in the title ("Bronk's Favorites").</summary>
+    private static string PanelTitle(FoodPanelDto panel) =>
+        panel.IsOwn ? panel.Name : $"{panel.OwnerName}'s {panel.Name}";
+
+    /// <summary>Short distinguishing line for variant chips: first two ingredients + "+N".</summary>
+    private static string ShortVariantLabel(FoodPanelItemDto item)
+    {
+        if (string.IsNullOrWhiteSpace(item.Label))
+        {
+            return "specific recipe";
+        }
+
+        var parts = item.Label.Split(", ");
+        return parts.Length <= 2 ? item.Label : $"{parts[0]}, {parts[1]} +{parts.Length - 2}";
+    }
+
+    private string ChipTooltip(FoodPanelItemDto item, bool known)
+    {
+        var suffix = known ? "" : " (not in the catalog right now)";
+        return item.IngredientSignature.Length > 0
+            ? $"{item.FoodName} — {item.Label ?? "specific recipe"}{suffix} · click to view"
+            : $"{item.FoodName}{suffix} · click to view";
+    }
+
+    /// <summary>Chip click: focus the food in the master table with full details, like a search.</summary>
+    private async Task FocusItemAsync(FoodPanelItemDto item)
+    {
+        if (!_rowsByName.TryGetValue(item.FoodName, out var row))
+        {
+            Snackbar.Add($"{item.FoodName} is not in the catalog right now", Severity.Info);
+            return;
+        }
+
+        _focusFoodName = item.FoodName;
+        _expanded.Add(row.Food.Id);
+        _variantFilters.Remove(row.Food.Id);
+        _focusVariantKey = item.IngredientSignature.Length > 0
+            ? FavKey(item.FoodName, item.IngredientSignature)
+            : null;
+
+        _masterTable?.NavigateTo(0);
+
+        // Load variations for the pinned recipe even when the food only has one.
+        if ((row.Food.VariantCount > 1 || item.IngredientSignature.Length > 0)
+            && !_variations.ContainsKey(row.Food.Id))
+        {
+            await LoadVariationsAsync(row.Food.Id);
+        }
+    }
+
+    private void ClearFocus()
+    {
+        _focusFoodName = null;
+        _focusVariantKey = null;
+    }
+
+    /// <summary>
+    /// Dialog-based panel creation. When a food/variant was the entry point, it is
+    /// added to the freshly created panel right away.
+    /// </summary>
+    private async Task OpenCreatePanelDialogAsync(string? foodToAdd, string signature)
+    {
+        var parameters = new DialogParameters<CookbookPanelDialog>
+        {
+            { x => x.FoodToAdd, foodToAdd },
+            { x => x.IsVariantTarget, signature.Length > 0 }
+        };
+        var dialog = await DialogService.ShowAsync<CookbookPanelDialog>("New panel", parameters,
+            new DialogOptions { MaxWidth = MaxWidth.ExtraSmall, FullWidth = true });
+        var result = await dialog.Result;
+        if (result is not { Canceled: false, Data: string name })
+        {
+            return;
+        }
+
+        var created = await CreatePanelCoreAsync(name);
+        if (created == null)
+        {
+            return;
+        }
+
+        _panelsExpanded = true;
+        if (foodToAdd != null)
+        {
+            await AddFoodToPanelAsync(created, foodToAdd, signature);
+        }
+        else
+        {
+            Snackbar.Add($"Panel '{created.Name}' created — star foods or use the ➕ menu to fill it", Severity.Success);
+        }
+    }
+
+    private async Task<FoodPanelDto?> CreatePanelCoreAsync(string name)
+    {
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.PostAsJsonAsync("/api/v1/cookbook/panels", new CreateFoodPanelDto { Name = name });
+            var created = response.IsSuccessStatusCode
+                ? await response.Content.ReadFromJsonAsync<FoodPanelDto>()
+                : null;
+            if (created == null)
+            {
+                Snackbar.Add(await ReadErrorAsync(response), Severity.Warning);
+                return null;
+            }
+
+            await LoadPanelsAsync();
+            return _panels.FirstOrDefault(p => p.Id == created.Id) ?? created;
+        }
+        catch (Exception)
+        {
+            Snackbar.Add("Could not create the panel", Severity.Error);
+            return null;
+        }
+    }
+
+    private async Task OpenRenameDialogAsync(FoodPanelDto panel)
+    {
+        var parameters = new DialogParameters<CookbookPanelDialog>
+        {
+            { x => x.InitialName, panel.Name },
+            { x => x.IsRename, true }
+        };
+        var dialog = await DialogService.ShowAsync<CookbookPanelDialog>("Rename panel", parameters,
+            new DialogOptions { MaxWidth = MaxWidth.ExtraSmall, FullWidth = true });
+        var result = await dialog.Result;
+        if (result is { Canceled: false, Data: string name } && name != panel.Name)
+        {
+            await UpdatePanelAsync(panel, new UpdateFoodPanelDto { Name = name });
+        }
+    }
+
+    private async Task ToggleShareAsync(FoodPanelDto panel)
+    {
+        var willShare = !panel.IsShared;
+        await UpdatePanelAsync(panel, new UpdateFoodPanelDto { IsShared = willShare });
+
+        var updated = _panels.FirstOrDefault(p => p.Id == panel.Id);
+        if (updated != null && updated.IsShared == willShare)
+        {
+            Snackbar.Add(willShare
+                    ? $"'{updated.Name}' is now shared with everyone in your tenant"
+                    : $"'{updated.Name}' is now private",
+                willShare ? Severity.Success : Severity.Info);
+        }
+    }
+
+    /// <summary>True when the panel already holds this food/variant.</summary>
+    private static bool PanelContains(FoodPanelDto panel, string foodName, string signature) =>
+        panel.Items.Any(i => i.FoodName == foodName && i.IngredientSignature == signature);
+
+    private async Task TogglePanelItemAsync(FoodPanelDto panel, string foodName, string signature)
+    {
+        var existing = panel.Items.FirstOrDefault(i => i.FoodName == foodName && i.IngredientSignature == signature);
+        if (existing != null)
+        {
+            await RemoveItemAsync(panel, existing);
+        }
+        else
+        {
+            await AddFoodToPanelAsync(panel, foodName, signature);
+        }
+    }
+
+    /// <summary>
+    /// Accent hue by panel position: hues are spread evenly around the color wheel,
+    /// so panels are always clearly distinct — never similar, never identical.
+    /// </summary>
+    private int PanelHueAt(int panelIndex)
+    {
+        var count = Math.Max(_panels.Count, 1);
+        return (210 + panelIndex * 360 / count) % 360;
+    }
+
+    /// <summary>Click-to-add dropdown used on food rows and variant rows.</summary>
+    private RenderFragment AddToPanelMenu((string FoodName, string Signature) target) =>
+        @<span class="add-menu" title="Add to panel..." @onclick:stopPropagation="true">
+            <MudMenu Icon="@Icons.Material.Filled.PlaylistAdd" Size="Size.Small" Dense="true"
+                     AnchorOrigin="Origin.BottomLeft" TransformOrigin="Origin.TopLeft">
+                <MudMenuItem Icon="@(IsFavorite(target.FoodName, target.Signature) ? Icons.Material.Filled.Check : Icons.Material.Filled.Star)"
+                             OnClick="() => ToggleFavoriteAsync(target.FoodName, target.Signature)">
+                    Favorites
+                </MudMenuItem>
+                @foreach (var ownPanel in _panels.Where(p => p.IsOwn && !p.IsFavorites))
+                {
+                    <MudMenuItem Icon="@(PanelContains(ownPanel, target.FoodName, target.Signature) ? Icons.Material.Filled.Check : Icons.Material.Filled.PlaylistAdd)"
+                                 OnClick="() => TogglePanelItemAsync(ownPanel, target.FoodName, target.Signature)">
+                        @ownPanel.Name@(ownPanel.IsShared ? " (shared)" : "")
+                    </MudMenuItem>
+                }
+                <MudDivider />
+                <MudMenuItem Icon="@Icons.Material.Filled.Add"
+                             OnClick="() => OpenCreatePanelDialogAsync(target.FoodName, target.Signature)">
+                    New panel with this...
+                </MudMenuItem>
+            </MudMenu>
+        </span>;
+
+    private async Task UpdatePanelAsync(FoodPanelDto panel, UpdateFoodPanelDto dto)
+    {
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.PutAsJsonAsync($"/api/v1/cookbook/panels/{panel.Id}", dto);
+            var updated = response.IsSuccessStatusCode
+                ? await response.Content.ReadFromJsonAsync<FoodPanelDto>()
+                : null;
+            if (updated != null)
+            {
+                updated.IsOwn = true;
+                UpsertPanel(updated);
+            }
+            else
+            {
+                Snackbar.Add(await ReadErrorAsync(response), Severity.Warning);
+            }
+        }
+        catch (Exception)
+        {
+            Snackbar.Add("Could not update the panel", Severity.Error);
+        }
+    }
+
+    private async Task DeletePanelAsync(FoodPanelDto panel)
+    {
+        var confirmed = await DialogService.ShowMessageBox(
+            "Delete panel",
+            $"Delete '{panel.Name}'{(panel.Items.Count > 0 ? $" and its {panel.Items.Count} foods" : "")}?",
+            yesText: "Delete", cancelText: "Cancel");
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.DeleteAsync($"/api/v1/cookbook/panels/{panel.Id}");
+            if (response.IsSuccessStatusCode)
+            {
+                _panels.RemoveAll(p => p.Id == panel.Id);
+                if (_activePanelId == panel.Id)
+                {
+                    ClearPanelFilter();
+                }
+
+                SyncFavorites();
+            }
+            else
+            {
+                Snackbar.Add(await ReadErrorAsync(response), Severity.Warning);
+            }
+        }
+        catch (Exception)
+        {
+            Snackbar.Add("Could not delete the panel", Severity.Error);
+        }
+    }
+
+    private async Task AddFoodToPanelAsync(FoodPanelDto panel, string foodName, string ingredientSignature)
+    {
+        if (PanelContains(panel, foodName, ingredientSignature))
+        {
+            Snackbar.Add($"{foodName} is already in {panel.Name}", Severity.Info);
+            return;
+        }
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.PostAsJsonAsync($"/api/v1/cookbook/panels/{panel.Id}/items",
+                new PanelItemRequestDto { FoodName = foodName, IngredientSignature = ingredientSignature });
+            var updated = response.IsSuccessStatusCode
+                ? await response.Content.ReadFromJsonAsync<FoodPanelDto>()
+                : null;
+            if (updated != null)
+            {
+                updated.IsOwn = true;
+                UpsertPanel(updated);
+                var what = ingredientSignature.Length > 0 ? $"{foodName} recipe" : foodName;
+                Snackbar.Add($"{what} added to {panel.Name}", Severity.Success);
+            }
+            else
+            {
+                Snackbar.Add(await ReadErrorAsync(response), Severity.Warning);
+            }
+        }
+        catch (Exception)
+        {
+            Snackbar.Add("Could not add the food", Severity.Error);
+        }
+    }
+
+    private async Task RemoveItemAsync(FoodPanelDto panel, FoodPanelItemDto item)
+    {
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.PostAsJsonAsync($"/api/v1/cookbook/panels/{panel.Id}/items/remove",
+                new PanelItemRemoveDto { ItemId = item.ItemId });
+            var updated = response.IsSuccessStatusCode
+                ? await response.Content.ReadFromJsonAsync<FoodPanelDto>()
+                : null;
+            if (updated != null)
+            {
+                updated.IsOwn = true;
+                UpsertPanel(updated);
+            }
+            else
+            {
+                Snackbar.Add(await ReadErrorAsync(response), Severity.Warning);
+            }
+        }
+        catch (Exception)
+        {
+            Snackbar.Add("Could not remove the food", Severity.Error);
+        }
+    }
+
+    private void StartFoodDrag(string foodName)
+    {
+        _draggingFood = foodName;
+        _draggingSignature = string.Empty;
+        _draggingChip = null;
+        BeginDragAffordance();
+    }
+
+    private void StartVariantDrag(string foodName, string ingredientSignature)
+    {
+        _draggingFood = foodName;
+        _draggingSignature = ingredientSignature;
+        _draggingChip = null;
+        BeginDragAffordance();
+    }
+
+    private void StartChipDrag(FoodPanelDto panel, FoodPanelItemDto item)
+    {
+        _draggingChip = (panel.Id, item.ItemId);
+        _draggingFood = null;
+        _draggingSignature = string.Empty;
+        _dragActive = true;
+    }
+
+    /// <summary>Make drop targets obvious: light up own panels and open the strip if collapsed.</summary>
+    private void BeginDragAffordance()
+    {
+        _dragActive = true;
+        if (!_panelsExpanded)
+        {
+            _panelsExpanded = true;
+        }
+    }
+
+    private void ClearDrag()
+    {
+        _draggingFood = null;
+        _draggingSignature = string.Empty;
+        _draggingChip = null;
+        _dragOverPanelId = null;
+        _dragActive = false;
+    }
+
+    private FoodPanelItemDto? FindDraggedChipItem()
+    {
+        if (_draggingChip is not { } chip)
+        {
+            return null;
+        }
+
+        return _panels.FirstOrDefault(p => p.Id == chip.PanelId)?
+            .Items.FirstOrDefault(i => i.ItemId == chip.ItemId);
+    }
+
+    private void OnPanelDragEnter(FoodPanelDto panel)
+    {
+        if (panel.IsOwn && (_draggingFood != null || (_draggingChip != null && _draggingChip.Value.PanelId != panel.Id)))
+        {
+            _dragOverPanelId = panel.Id;
+        }
+    }
+
+    private async Task HandleDropOnPanelAsync(FoodPanelDto panel)
+    {
+        var foodName = _draggingFood;
+        var signature = _draggingSignature;
+        if (foodName == null && FindDraggedChipItem() is { } chipItem && _draggingChip?.PanelId != panel.Id)
+        {
+            foodName = chipItem.FoodName;
+            signature = chipItem.IngredientSignature;
+        }
+
+        ClearDrag();
+
+        if (foodName == null || !panel.IsOwn)
+        {
+            return;
+        }
+
+        await AddFoodToPanelAsync(panel, foodName, signature);
+    }
+
+    private async Task HandleDropOnChipAsync(FoodPanelDto panel, FoodPanelItemDto targetItem)
+    {
+        // Reorder when dragging a chip within the same panel; otherwise treat as a panel drop.
+        if (_draggingChip is { } chip && chip.PanelId == panel.Id && panel.IsOwn && chip.ItemId != targetItem.ItemId)
+        {
+            ClearDrag();
+            var order = panel.Items.Select(i => i.ItemId).ToList();
+            order.Remove(chip.ItemId);
+            var targetIndex = order.IndexOf(targetItem.ItemId);
+            order.Insert(targetIndex < 0 ? order.Count : targetIndex, chip.ItemId);
+
+            try
+            {
+                var client = HttpClientFactory.CreateClient("API");
+                var response = await client.PutAsJsonAsync($"/api/v1/cookbook/panels/{panel.Id}/order",
+                    new PanelOrderDto { ItemIds = order });
+                var updated = response.IsSuccessStatusCode
+                    ? await response.Content.ReadFromJsonAsync<FoodPanelDto>()
+                    : null;
+                if (updated != null)
+                {
+                    updated.IsOwn = true;
+                    UpsertPanel(updated);
+                }
+            }
+            catch (Exception)
+            {
+                Snackbar.Add("Could not reorder the panel", Severity.Error);
+            }
+
+            return;
+        }
+
+        await HandleDropOnChipFallbackAsync(panel);
+    }
+
+    private Task HandleDropOnChipFallbackAsync(FoodPanelDto panel) => HandleDropOnPanelAsync(panel);
+
+    private void TogglePanelFilter(FoodPanelDto panel)
+    {
+        if (_activePanelId == panel.Id)
+        {
+            ClearPanelFilter();
+            return;
+        }
+
+        _activePanelId = panel.Id;
+        _activePanelNames = panel.Items.Select(i => i.FoodName).ToHashSet(StringComparer.Ordinal);
+    }
+
+    private void ClearPanelFilter()
+    {
+        _activePanelId = null;
+        _activePanelNames = null;
+    }
+
+    private static async Task<string> ReadErrorAsync(HttpResponseMessage response)
+    {
+        try
+        {
+            var body = await response.Content.ReadFromJsonAsync<Dictionary<string, string>>();
+            if (body != null && body.TryGetValue("error", out var error) && !string.IsNullOrWhiteSpace(error))
+            {
+                return error;
+            }
+        }
+        catch (Exception)
+        {
+            // fall through to the generic message
+        }
+
+        return $"Request failed (HTTP {(int)response.StatusCode})";
+    }
+}

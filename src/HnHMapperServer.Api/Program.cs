@@ -158,6 +158,10 @@ builder.Services.AddScoped<IPublicMapAnalysisService, PublicMapAnalysisService>(
 builder.Services.AddSingleton<IPublicMapGenerationService, PublicMapGenerationService>();
 builder.Services.AddScoped<IHmapSourceService, HmapSourceService>();  // HMap source library service
 
+// Cookbook food catalog + per-user food panels (tenant-scoped)
+builder.Services.AddScoped<IFoodCatalogService, FoodCatalogService>();
+builder.Services.AddScoped<IFoodPanelService, FoodPanelService>();
+
 // Register memory cache for preview URL signing service
 builder.Services.AddMemoryCache();
 
@@ -782,6 +786,7 @@ app.MapAuditEndpoints(); // Phase 6: Audit log viewer endpoints
 app.MapDatabaseEndpoints();
 app.MapPublicMapEndpoints(); // Public map viewing (no auth required)
 app.MapPublicContributionEndpoints(); // Public .hmap contributions (anonymous, rate limited)
+app.MapCookbookEndpoints(); // Cookbook food catalog (global) + superadmin import
 
 // Public version endpoint - returns build information (no authentication required)
 app.MapGet("/version", (IBuildInfoProvider buildInfo) => 

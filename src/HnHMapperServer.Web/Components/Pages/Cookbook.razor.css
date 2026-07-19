@@ -1,0 +1,987 @@
+/* Text-color tiers — contrast-checked against the page's white/glass cards.
+   ALWAYS use these for secondary/muted text instead of hand-picked grays:
+   ad-hoc values like #90a0ae (2.7:1) kept creeping in and were unreadable.
+   Minimums: normal text ≥4.5:1, icons/controls ≥3:1. */
+.cookbook-page {
+    --ck-text-muted: #5a6874;    /* ~5.7:1 — labels, captions, secondary lines */
+    --ck-text-faint: #67747f;    /* ~4.8:1 — smallest hints, qty chips (the readable floor) */
+    --ck-text-disabled: #8494a1; /* ~3.5:1 — deliberately-inactive rows ONLY */
+    --ck-amber-text: #8a6428;    /* ~5.3:1 — amber accents rendered as text */
+    --ck-purple-text: #6f51a1;   /* ~6.2:1 — contributor tag */
+    --ck-gold-icon: #b8860b;     /* ~3.3:1 — filled favorite star (icon minimum) */
+}
+
+/* Toolbar + panels travel together while scrolling the table (like the search) */
+.sticky-stack {
+    position: sticky;
+    top: 72px;
+    z-index: 10;
+}
+
+.cookbook-toolbar {
+    padding: 12px 16px 8px 16px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+}
+
+.active-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    padding-top: 4px;
+}
+
+/* FEP distribution overview: one chip per stat with the count of listed foods
+   feeding it; clicking filters + ranks by that stat */
+.stat-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    padding-top: 8px;
+}
+
+.stat-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 9px;
+    border-radius: 12px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    background: var(--chip-color);
+    color: #33322e;
+    font-size: 0.75rem;
+    font-weight: 700;
+    cursor: pointer;
+    opacity: 0.75;
+    transition: opacity 0.12s, transform 0.12s, box-shadow 0.12s;
+}
+
+.stat-chip:hover {
+    opacity: 1;
+    transform: translateY(-1px);
+}
+
+.stat-chip.selected {
+    opacity: 1;
+    border: 1px solid rgba(0, 0, 0, 0.45);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+}
+
+.stat-chip.empty {
+    opacity: 0.3;
+    cursor: default;
+    transform: none;
+}
+
+.stat-chip-count {
+    font-weight: 500;
+    font-size: 0.68rem;
+    background: rgba(255, 255, 255, 0.55);
+    border-radius: 8px;
+    padding: 0 6px;
+    line-height: 1.5;
+}
+
+/* Satiation chips: same behavior as FEP chips, uniform green tone */
+.stat-chip.satiation {
+    background: #bfe3c0;
+    font-weight: 600;
+}
+
+/* Preparation chips: warm amber; "Plain" (no preparation) in neutral gray */
+.stat-chip.prep {
+    background: #ecc9a3;
+    font-weight: 600;
+}
+
+.stat-chip.prep.plain {
+    background: #dfe3e6;
+}
+
+/* Small amber preparation badge next to the food name */
+.prep-badge {
+    display: inline-block;
+    margin-left: 7px;
+    padding: 0 7px;
+    border-radius: 9px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1.7;
+    background: #ecc9a3;
+    border: 1px solid rgba(150, 100, 30, 0.25);
+    color: #5d4420;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
+.prep-badge.plain {
+    background: #dfe3e6;
+    border-color: rgba(44, 62, 80, 0.15);
+    color: var(--ck-text-muted);
+}
+
+/* Preparation comparison table in the expansion */
+.prep-compare {
+    border-collapse: collapse;
+    min-width: 480px;
+}
+
+.prep-compare th {
+    text-align: left;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ck-text-faint);
+    padding: 2px 12px 4px 6px;
+}
+
+.prep-compare td {
+    padding: 3px 12px 3px 6px;
+    font-size: 0.83rem;
+    color: #424242;
+    border-top: 1px solid rgba(44, 62, 80, 0.07);
+}
+
+.prep-compare th.num,
+.prep-compare td.num {
+    text-align: right;
+}
+
+.prep-compare-current td {
+    background: rgba(100, 181, 246, 0.12);
+}
+
+.prep-compare-current td:first-child {
+    border-left: 3px solid #64B5F6;
+}
+
+.chips-label {
+    align-self: center;
+    min-width: 58px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ck-text-muted);
+}
+
+/* Highlighted per-stat value column shown when a stat chip is selected */
+.stat-value {
+    display: inline-block;
+    padding: 0 8px;
+    border-radius: 10px;
+    background: var(--chip-color);
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    color: #33322e;
+    font-weight: 700;
+    font-size: 0.8rem;
+}
+
+/* Food icons: tiny pixel-art sprites, keep them crisp */
+.food-icon {
+    width: 32px;
+    height: 32px;
+    image-rendering: pixelated;
+    vertical-align: middle;
+}
+
+.food-name {
+    font-weight: 600;
+    color: #2c3e50;
+}
+
+/* Rows expand on click */
+.cookbook-page ::deep .mud-table-row {
+    cursor: pointer;
+}
+
+/* Small muted group chips (lighter than MudChip for dense rows) */
+.category-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+}
+
+.category-chip {
+    display: inline-block;
+    padding: 0 8px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    line-height: 1.6;
+    background: rgba(44, 62, 80, 0.08);
+    border: 1px solid rgba(44, 62, 80, 0.12);
+    color: #46586a;
+    white-space: nowrap;
+}
+
+.satiation-chip {
+    background: rgba(129, 199, 132, 0.18);
+    border-color: rgba(129, 199, 132, 0.4);
+    color: #33691e;
+}
+
+/* Per-stat FEP pills */
+.fep-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+}
+
+.fep-pill {
+    display: inline-block;
+    padding: 0 7px;
+    border-radius: 10px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.7;
+    color: #33322e;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    white-space: nowrap;
+}
+
+/* +2 tier FEPs get a premium gold treatment */
+.fep-pill.tier2 {
+    border: 1px solid #c9971c;
+    box-shadow: inset 0 0 0 1px rgba(212, 160, 23, 0.55);
+    font-weight: 700;
+}
+
+/* Expanded row detail */
+.food-detail {
+    background: rgba(255, 255, 255, 0.45);
+    padding: 0;
+}
+
+.food-detail-inner {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    padding: 14px 18px 16px 60px;
+}
+
+.detail-block {
+    min-width: 200px;
+    flex: 1 1 200px;
+    max-width: 380px;
+}
+
+.detail-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ck-text-muted);
+    margin-bottom: 6px;
+}
+
+.detail-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 0.85rem;
+    color: #424242;
+}
+
+.detail-label {
+    color: var(--ck-text-muted);
+    font-size: 0.78rem;
+    min-width: 90px;
+}
+
+.detail-muted {
+    color: var(--ck-text-faint);
+    font-size: 0.82rem;
+}
+
+.detail-resource {
+    color: var(--ck-text-faint);
+    font-size: 0.72rem;
+    font-family: monospace;
+}
+
+.ingredient-list {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 0.85rem;
+    color: #424242;
+}
+
+.ingredient-list li {
+    margin-bottom: 2px;
+}
+
+.ingredient-pct {
+    color: var(--ck-text-faint);
+    font-size: 0.75rem;
+    margin-left: 4px;
+}
+
+/* "← Badger" inline chain: what a recipe entry is itself made from */
+.recipe-chain {
+    color: var(--ck-amber-text);
+    margin: 0 5px;
+    font-size: 0.78rem;
+    cursor: help;
+}
+
+/* Nested sub-recipe of a multi-ingredient intermediate ("Unbaked Meatpie") */
+.recipe-sub {
+    list-style: none;
+    margin: 3px 0 5px;
+    padding-left: 12px;
+    border-left: 2px solid rgba(176, 135, 63, 0.35);
+    font-size: 0.8rem;
+}
+
+.recipe-sub li {
+    margin-bottom: 1px;
+}
+
+/* "of Roast Beef" note when a prep-variant inherits its base food's recipe */
+.recipe-inherit {
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 600;
+    color: var(--ck-amber-text);
+    cursor: help;
+}
+
+/* "optional" badge on canonical recipe entries */
+.recipe-optional {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 5px;
+    border-radius: 7px;
+    border: 1px dashed rgba(90, 104, 116, 0.6);
+    color: var(--ck-text-faint);
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    vertical-align: 1px;
+}
+
+/* Cooking station under the recipe ("Frying Pan and Fire") */
+.recipe-station {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed rgba(144, 160, 174, 0.3);
+    color: var(--ck-text-muted);
+    font-size: 0.78rem;
+}
+
+::deep .recipe-station .mud-icon-root {
+    font-size: 1.05rem;
+    color: var(--ck-amber-text);
+}
+
+/* Proportional FEP composition bar */
+.fep-bar {
+    display: flex;
+    height: 10px;
+    border-radius: 5px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    margin-bottom: 8px;
+}
+
+.fep-bar-segment {
+    height: 100%;
+}
+
+.fep-detail-table {
+    border-collapse: collapse;
+}
+
+.fep-detail-table td {
+    padding: 1px 10px 1px 0;
+    font-size: 0.82rem;
+    color: #424242;
+}
+
+.fep-detail-value {
+    text-align: right;
+    font-weight: 600;
+}
+
+.no-results {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 32px 0;
+}
+
+/* ===== Food panels ===== */
+
+.panels-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+}
+
+.panels-bar-spacer {
+    flex: 1;
+}
+
+.panels-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #2c3e50;
+    padding: 6px 4px;
+}
+
+.panels-strip {
+    display: flex;
+    /* Cards size to their own content — a full panel grows tall while a
+       two-item one stays compact */
+    align-items: flex-start;
+    gap: 10px;
+    overflow-x: auto;
+    padding: 2px 2px 10px 2px;
+    margin-bottom: 8px;
+}
+
+/* Pinned over the table (ck-stuck set by cookbook-dnd.js): cards condense to
+   just their headers — still filter buttons and drop targets — so the strip
+   never blankets the rows. Full cards return when scrolled back to the top. */
+.sticky-stack.ck-stuck .panel-items {
+    display: none;
+}
+
+.sticky-stack.ck-stuck .panel-card {
+    min-width: 0;
+    padding: 3px 10px;
+}
+
+.sticky-stack.ck-stuck .panel-card-header {
+    margin-bottom: 0;
+    min-height: 26px;
+}
+
+.sticky-stack.ck-stuck .panels-divider span {
+    display: none;
+}
+
+.panel-card {
+    flex: 0 0 auto;
+    min-width: 220px;
+    max-width: 340px;
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.65);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    /* Subtle per-panel identity: each panel gets its own accent hue */
+    border-top: 3px solid var(--panel-accent, rgba(44, 62, 80, 0.2));
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.07);
+    transition: box-shadow 0.12s, border-color 0.12s, transform 0.12s;
+}
+
+.panel-card.shared-other {
+    background: rgba(240, 245, 250, 0.6);
+}
+
+/* Shared panels: the BORDER alone breathes between the panel's accent and the
+   share blue — background stays plain glass */
+.panel-card.is-shared {
+    border: 1px solid var(--panel-accent);
+    border-top-width: 3px;
+    animation: ck-shared-border 3.2s ease-in-out infinite;
+}
+
+@keyframes ck-shared-border {
+    0%, 100% { border-color: var(--panel-accent); }
+    50% { border-color: #64B5F6; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .panel-card.is-shared {
+        animation: none;
+    }
+}
+
+/* Visible share toggle in the card header */
+.cookbook-page ::deep .share-btn {
+    color: rgba(44, 62, 80, 0.35);
+}
+
+.cookbook-page ::deep .share-btn:hover {
+    color: #1c76c4;
+}
+
+.cookbook-page ::deep .share-btn.shared {
+    color: #1c76c4;
+}
+
+/* Add-to-panel dropdown trigger next to the drag grip */
+.cookbook-page ::deep .add-menu .mud-icon-button {
+    color: rgba(44, 62, 80, 0.35);
+    padding: 4px;
+}
+
+.cookbook-page ::deep .add-menu .mud-icon-button:hover {
+    color: #1c76c4;
+}
+
+/* While a drag is in flight, every valid target lights up */
+.panel-card.own.droppable {
+    border: 1px dashed rgba(100, 181, 246, 0.8);
+    animation: ck-droppable-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes ck-droppable-pulse {
+    0%, 100% { box-shadow: 0 0 0 2px rgba(100, 181, 246, 0.15); }
+    50% { box-shadow: 0 0 0 4px rgba(100, 181, 246, 0.35); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .panel-card.own.droppable {
+        animation: none;
+        box-shadow: 0 0 0 3px rgba(100, 181, 246, 0.3);
+    }
+}
+
+/* The card actually hovered gets the strongest highlight */
+.panel-card.drag-over {
+    border: 1px dashed #64B5F6;
+    box-shadow: 0 0 0 3px rgba(100, 181, 246, 0.35) !important;
+    transform: translateY(-1px);
+    animation: none;
+}
+
+.panel-card.active {
+    border: 1px solid #64B5F6;
+    box-shadow: 0 0 0 2px rgba(100, 181, 246, 0.35);
+}
+
+.panel-card.ghost {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--ck-text-muted);
+    font-size: 0.82rem;
+    border-style: dashed;
+    max-width: 420px;
+}
+
+.panel-card-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    min-height: 30px;
+}
+
+.panel-name-btn {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #2c3e50;
+    padding: 2px 2px;
+    text-align: left;
+    max-width: 170px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.panel-name-btn:hover {
+    color: #1c76c4;
+    text-decoration: underline;
+}
+
+.panel-count {
+    font-size: 0.68rem;
+    color: var(--ck-text-muted);
+    background: rgba(44, 62, 80, 0.08);
+    border-radius: 8px;
+    padding: 0 6px;
+    line-height: 1.6;
+}
+
+.panel-badge {
+    font-size: 0.64rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #1c76c4;
+    background: rgba(100, 181, 246, 0.18);
+    border: 1px solid rgba(100, 181, 246, 0.4);
+    border-radius: 8px;
+    padding: 0 6px;
+    line-height: 1.7;
+}
+
+/* Divider between your panels and panels shared with you */
+.panels-divider {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    padding: 0 2px;
+    border-left: 2px solid rgba(44, 62, 80, 0.15);
+}
+
+.panels-divider span {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    font-size: 0.62rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ck-text-faint);
+    white-space: nowrap;
+}
+
+/* Inline contributor tag on community-added foods */
+.contrib-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 7px;
+    font-size: 0.68rem;
+    color: var(--ck-purple-text);
+    white-space: nowrap;
+}
+
+/* Panel contents as a list — one food/recipe per row. The card grows with its
+   items; the viewport-relative cap is a safety valve only (the strip is sticky,
+   so a card must never get taller than the screen), not a design height. */
+.panel-items {
+    display: flex;
+    flex-direction: column;
+    max-height: 55vh;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
+.panel-item {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 3px 4px;
+    border-radius: 5px;
+    font-size: 0.78rem;
+    color: #34495e;
+    cursor: pointer;
+    min-width: 0;
+}
+
+.item-line1 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.item-right {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.item-total {
+    font-weight: 700;
+    font-size: 0.72rem;
+    color: #2c3e50;
+}
+
+.item-line2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding-left: 24px;
+}
+
+/* Micro FEP distribution bar per item — hover segments for exact values */
+.item-bar {
+    display: flex;
+    width: 64px;
+    min-width: 64px;
+    height: 6px;
+    border-radius: 3px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.item-bar-seg {
+    height: 100%;
+}
+
+.item-bar-seg.tier2 {
+    box-shadow: inset 0 0 0 1px #d4a017;
+}
+
+.item-eff {
+    font-size: 0.66rem;
+    color: var(--ck-text-muted);
+    white-space: nowrap;
+}
+
+.panel-item:nth-child(odd) {
+    background: rgba(255, 255, 255, 0.35);
+}
+
+.panel-item:hover {
+    background: rgba(100, 181, 246, 0.14);
+}
+
+.panel-item[draggable="true"] {
+    cursor: grab;
+}
+
+.panel-item.unknown {
+    opacity: 0.45;
+}
+
+.item-name {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 0 1 auto;
+}
+
+.item-sub {
+    color: var(--ck-text-faint);
+    font-size: 0.68rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.cookbook-page ::deep .item-missing-icon {
+    font-size: 1rem;
+    width: 1rem;
+    height: 1rem;
+    color: var(--ck-text-disabled);
+}
+
+.chip-icon {
+    width: 18px;
+    height: 18px;
+    image-rendering: pixelated;
+}
+
+.chip-x {
+    border: none;
+    background: transparent;
+    color: var(--ck-text-faint);
+    font-size: 0.9rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 1px;
+}
+
+.chip-x:hover {
+    color: #c0392b;
+}
+
+/* Star column + drag handle in the master table */
+.cookbook-page ::deep .star-cell {
+    padding-left: 4px;
+    padding-right: 0;
+}
+
+.cookbook-page ::deep .star-on {
+    color: var(--ck-gold-icon);
+}
+
+.cookbook-page ::deep .star-off {
+    color: rgba(44, 62, 80, 0.5);
+}
+
+.cookbook-page ::deep .star-off:hover {
+    color: var(--ck-gold-icon);
+}
+
+.drag-handle {
+    display: inline-flex;
+    align-items: center;
+    cursor: grab;
+}
+
+.drag-handle:active {
+    cursor: grabbing;
+}
+
+/* Visible drag affordance next to the star (master rows + variant rows) */
+.cookbook-page ::deep .drag-cell {
+    padding-left: 0;
+    padding-right: 0;
+}
+
+.drag-grip {
+    display: inline-flex;
+    align-items: center;
+    cursor: grab;
+    color: rgba(44, 62, 80, 0.35);
+    padding: 4px 2px;
+}
+
+.drag-grip:hover {
+    color: #1c76c4;
+}
+
+.drag-grip:active {
+    cursor: grabbing;
+}
+
+.cookbook-page ::deep .variant-actions {
+    white-space: nowrap;
+    padding-left: 4px;
+    padding-right: 0;
+}
+
+/* Row highlighted when a panel chip focused this specific variant */
+.cookbook-page ::deep .variant-table .variant-focused .mud-table-cell {
+    background: rgba(100, 181, 246, 0.16) !important;
+    box-shadow: inset 3px 0 0 #64B5F6;
+}
+
+
+.cookbook-page ::deep .contrib-name .mud-icon-root {
+    font-size: 0.85rem;
+    width: 0.85rem;
+    height: 0.85rem;
+}
+
+/* Name-cell hint that a food has recorded variations */
+.variant-hint {
+    margin-left: 8px;
+    font-size: 0.68rem;
+    color: var(--ck-text-faint);
+    white-space: nowrap;
+}
+
+/* Full-width variations panel below the detail columns */
+.variations-block {
+    flex-basis: 100%;
+    border-top: 1px dashed rgba(44, 62, 80, 0.15);
+    padding-top: 10px;
+}
+
+.variant-filter {
+    max-width: 320px;
+    margin-bottom: 6px;
+}
+
+.variant-seen {
+    margin-left: 6px;
+    font-size: 0.7rem;
+    color: var(--ck-text-faint);
+}
+
+/* Nested sortable variations table */
+.cookbook-page ::deep .variant-table .mud-table-cell {
+    font-size: 0.8rem;
+    padding: 3px 10px;
+}
+
+.cookbook-page ::deep .variant-table .mud-table-row {
+    cursor: default;
+}
+
+/* Per-variation FEP bar: always full width, colored segments = stat distribution */
+.variant-bar {
+    display: flex;
+    width: 220px;
+    max-width: 100%;
+    height: 12px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.variant-bar-segment {
+    height: 100%;
+}
+
+/* Premium gold marking for +2 FEP segments in both bars:
+   gold ring + diagonal shine stripes (distinguishable beyond color alone),
+   plus a periodic shimmer sweep */
+.variant-bar-segment.tier2,
+.fep-bar-segment.tier2 {
+    position: relative;
+    overflow: hidden;
+    background-image: repeating-linear-gradient(135deg,
+        rgba(255, 255, 255, 0.45) 0 3px,
+        rgba(255, 255, 255, 0) 3px 6px);
+    box-shadow: inset 0 0 0 2px #d4a017;
+}
+
+.variant-bar-segment.tier2::after,
+.fep-bar-segment.tier2::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(115deg,
+        transparent 25%,
+        rgba(255, 244, 200, 0.85) 50%,
+        transparent 75%);
+    transform: translateX(-120%);
+    animation: fep-t2-shine 2.6s ease-in-out infinite;
+    pointer-events: none;
+}
+
+@keyframes fep-t2-shine {
+    0% { transform: translateX(-120%); }
+    55%, 100% { transform: translateX(120%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .variant-bar-segment.tier2::after,
+    .fep-bar-segment.tier2::after {
+        animation: none;
+        display: none;
+    }
+}
+
+/* Written FEP distribution under the bar, e.g. "● CON 53% · ● PER+2 20%" */
+.fep-dist {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+    margin-top: 3px;
+    font-size: 0.68rem;
+    color: var(--ck-text-muted);
+}
+
+.fep-dist-item {
+    white-space: nowrap;
+}
+
+.fep-dist-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-right: 3px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    vertical-align: baseline;
+}
+
+.fep-full-name {
+    color: var(--ck-text-muted);
+    font-size: 0.8rem;
+    padding-right: 6px;
+}
