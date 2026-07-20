@@ -10,6 +10,7 @@ using HnHMapperServer.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.AspNetCore.Http.Features;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Png;
 
@@ -113,6 +114,10 @@ public static partial class ClientEndpoints
     // Security: cap client food upload batches (clients flush every ~10s; batches are small)
     private const int MaxFoodUploadBatch = 500;
 
+    // A full 500-record batch is well under 1 MB; the app-wide 1 GB request limit
+    // exists for hmap uploads and must not apply to this endpoint.
+    private const long MaxFoodUploadBodyBytes = 2 * 1024 * 1024;
+
     private static readonly JsonSerializerOptions FoodUploadJsonOpts = new()
     {
         PropertyNameCaseInsensitive = true
@@ -148,6 +153,13 @@ public static partial class ClientEndpoints
         var userId = context.Items["UserId"] as string;
         activityService.RecordActivity(tenantId);
 
+        // Tighten the request body limit before reading it (must happen pre-read).
+        var bodySizeFeature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+        if (bodySizeFeature is { IsReadOnly: false })
+        {
+            bodySizeFeature.MaxRequestBodySize = MaxFoodUploadBodyBytes;
+        }
+
         List<FoodUploadRecordDto> records;
         try
         {
@@ -157,6 +169,10 @@ public static partial class ClientEndpoints
         catch (JsonException)
         {
             return Results.BadRequest(new { error = "Invalid food upload payload" });
+        }
+        catch (BadHttpRequestException)
+        {
+            return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
         }
 
         if (records.Count == 0)
