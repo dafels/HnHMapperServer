@@ -24,6 +24,11 @@ public class FoodCatalogService : IFoodCatalogService
     private const string WikiCacheKey = "cookbook:wiki";
     private const string RecipeIndexCacheKey = "cookbook:recipeindex";
     private const int MaxErrors = 50;
+
+    // SQLite does not enforce the model's HasMaxLength — client uploads must be
+    // bounded here. Matches Foods.Name (200) / Foods.ResourceName (300).
+    private const int MaxUploadNameLength = 200;
+    private const int MaxUploadResourceLength = 300;
     private const int VariantBatchSize = 2000;
     private const int MaxSignatureLength = 1000;
 
@@ -401,6 +406,16 @@ public class FoodCatalogService : IFoodCatalogService
         foreach (var upload in records)
         {
             if (string.IsNullOrWhiteSpace(upload.ItemName) || string.IsNullOrWhiteSpace(upload.ResourceName))
+            {
+                result.Skipped++;
+                continue;
+            }
+
+            // Real names top out around 60 chars — anything beyond the schema
+            // lengths is garbage or abuse; reject rather than store it.
+            if (upload.ItemName.Length > MaxUploadNameLength
+                || upload.ResourceName.Length > MaxUploadResourceLength
+                || upload.Ingredients?.Any(i => i.Name != null && i.Name.Length > MaxUploadNameLength) == true)
             {
                 result.Skipped++;
                 continue;
