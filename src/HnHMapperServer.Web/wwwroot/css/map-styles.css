@@ -409,19 +409,14 @@
 /* Thingwall highlighting - glow effect when toggle is enabled */
 /* NOTE: We intentionally do NOT scale markers because it conflicts with Leaflet's positioning.
    The glow effect alone is sufficient to make highlighted markers stand out. */
+/* PERF: no `filter` here on purpose. The cyan glow is baked into the icon bitmap by
+   js/map/glow-icon.js instead. A CSS filter gives EVERY highlighted marker its own
+   compositing surface and re-runs both Gaussian blurs whenever that surface rasterizes
+   (every zoom, every cluster add/remove) - with ~130 thingwalls on screen that alone
+   makes the map crawl. This class now only carries stacking order.
+   If a pulse is ever wanted, animate `opacity` (compositor-only), never `filter`. */
 .thingwall-highlighted {
-    filter: drop-shadow(0 0 8px rgba(0, 207, 253, 1)) drop-shadow(0 0 16px rgba(0, 207, 253, 0.8)) !important;
-    animation: thingwall-pulse 2s ease-in-out infinite;
     z-index: 1000 !important;
-}
-
-@keyframes thingwall-pulse {
-    0%, 100% {
-        filter: drop-shadow(0 0 8px rgba(0, 207, 253, 1)) drop-shadow(0 0 16px rgba(0, 207, 253, 0.8));
-    }
-    50% {
-        filter: drop-shadow(0 0 14px rgba(0, 207, 253, 1)) drop-shadow(0 0 28px rgba(0, 207, 253, 0.9));
-    }
 }
 
 /* Thingwall permanent label styling */
@@ -432,7 +427,9 @@
     color: #00cffd !important;
     font-weight: bold !important;
     font-size: 11px !important;
-    text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 8px rgba(0, 207, 253, 0.8) !important;
+    /* PERF: hard 1px offsets only - a blurred shadow on a permanent label repaints on
+       every pan/zoom frame, once per visible thingwall. */
+    text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000 !important;
     white-space: nowrap !important;
 }
 
@@ -443,19 +440,9 @@
 /* Quest giver highlighting - green glow effect when toggle is enabled */
 /* NOTE: We intentionally do NOT scale markers because it conflicts with Leaflet's positioning.
    The glow effect alone is sufficient to make highlighted markers stand out. */
+/* PERF: glow is baked into the icon, not a filter - see the note on .thingwall-highlighted. */
 .questgiver-highlighted {
-    filter: drop-shadow(0 0 8px rgba(44, 219, 44, 1)) drop-shadow(0 0 16px rgba(44, 219, 44, 0.8)) !important;
-    animation: questgiver-pulse 2s ease-in-out infinite;
     z-index: 1000 !important;
-}
-
-@keyframes questgiver-pulse {
-    0%, 100% {
-        filter: drop-shadow(0 0 8px rgba(44, 219, 44, 1)) drop-shadow(0 0 16px rgba(44, 219, 44, 0.8));
-    }
-    50% {
-        filter: drop-shadow(0 0 14px rgba(44, 219, 44, 1)) drop-shadow(0 0 28px rgba(44, 219, 44, 0.9));
-    }
 }
 
 /* Quest giver permanent label styling */
@@ -466,7 +453,8 @@
     color: #2CDB2C !important;
     font-weight: bold !important;
     font-size: 11px !important;
-    text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 8px rgba(44, 219, 44, 0.8) !important;
+    /* PERF: hard 1px offsets only - see the note on .thingwall-label. */
+    text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000 !important;
     white-space: nowrap !important;
 }
 

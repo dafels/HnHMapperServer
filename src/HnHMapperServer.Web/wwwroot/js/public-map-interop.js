@@ -2,6 +2,11 @@
 // Simplified Leaflet map for public (unauthenticated) map viewing
 // Displays tiles and thingwall markers with highlighted styling
 
+import * as GlowIcon from './map/glow-icon.js';
+
+// Cyan glow baked into thingwall icons (matches the .thingwall-label text colour)
+const THINGWALL_GLOW_COLOR = '#00cffd';
+
 // Map constants - using 400x400 tiles for better performance (16x fewer HTTP requests)
 // Each 400x400 tile contains 4x4 = 16 original 100x100 grid cells
 const TileSize = 400;
@@ -293,7 +298,7 @@ export async function initializePublicMap(mapElement, slug, centerX, centerY, in
  * Load and display thingwall markers from data passed by Blazor
  * @param {Array} markersData - Array of marker objects with id, name, x, y, image
  */
-export function loadMarkersData(markersData) {
+export async function loadMarkersData(markersData) {
     if (!mapInstance || !markerLayer) {
         console.warn('[PublicMap] Map not initialized, cannot load markers');
         return;
@@ -304,19 +309,27 @@ export function loadMarkersData(markersData) {
     // Clear existing markers
     markerLayer.clearLayers();
 
+    // PERF: bake the cyan glow into the icon bitmap once per distinct icon, up front.
+    // These markers sit in a plain LayerGroup, so all of them stay in the DOM at every
+    // zoom - giving each one a CSS `filter` would mean a compositing surface and two
+    // Gaussian blurs per marker, which is what used to make this map crawl.
+    const iconUrls = [...new Set(markersData.map(m => `/${m.image}.png`))];
+    const glowIcons = new Map();
+    await Promise.all(iconUrls.map(async url => {
+        const glow = await GlowIcon.getGlowIcon(url, THINGWALL_GLOW_COLOR, 36);
+        glowIcons.set(url, glow ? L.icon({
+            iconUrl: glow.url,
+            iconSize: [glow.size, glow.size],
+            iconAnchor: [18 + glow.pad, 18 + glow.pad]
+        }) : L.icon({ iconUrl: url, iconSize: [36, 36], iconAnchor: [18, 18] }));
+    }));
+
     // Add each marker with highlighted thingwall styling
     markersData.forEach(markerData => {
         // Convert absolute pixel position to LatLng
         const position = mapInstance.unproject([markerData.x, markerData.y], HnHMaxZoom);
 
-        // Create icon from marker image path
-        const iconUrl = `/${markerData.image}.png`;
-        const icon = L.icon({
-            iconUrl: iconUrl,
-            iconSize: [36, 36],
-            iconAnchor: [18, 18]
-        });
-
+        const icon = glowIcons.get(`/${markerData.image}.png`);
         const marker = L.marker(position, { icon: icon });
 
         // Bind tooltip with thingwall label styling (always visible with cyan color)

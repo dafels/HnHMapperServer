@@ -3,6 +3,14 @@
 
 import { HnHMaxZoom } from './leaflet-config.js';
 import * as VoronoiAdjacency from './voronoi-adjacency.js';
+import * as GlowIcon from './glow-icon.js';
+
+// Glow colours for the two highlightable marker types. The glow is baked into the icon
+// bitmap rather than applied as a CSS filter - see glow-icon.js for why.
+const HIGHLIGHT_GLOW_COLORS = {
+    thingwall: '#00cffd',
+    questgiver: '#2CDB2C'
+};
 
 // Marker storage - visible markers with their Leaflet instances
 const markers = {};
@@ -244,8 +252,15 @@ export function addMarker(markerData, mapInstance, skipStorage = false) {
 
     markers[markerData.id] = {
         marker: marker,
-        data: markerData
+        data: markerData,
+        // Kept so highlighting can swap to a glow-baked icon and back again.
+        // Timer markers use a divIcon and are left alone.
+        plainIcon: markerData.timerText ? null : icon
     };
+
+    if (shouldHighlight) {
+        applyHighlightIcon(markers[markerData.id], true);
+    }
 
     // Track thingwalls separately for Voronoi adjacency computation
     if (isThingwall) {
@@ -455,35 +470,115 @@ export function jumpToMarker(markerId, mapInstance) {
 }
 
 /**
- * Update highlighting for thingwall and questgiver markers (fast CSS + tooltip toggle)
- * Avoids full marker rebuild - just toggles CSS classes and tooltip permanence
+ * Whether a marker's type is currently highlighted
+ * @param {object} data - Marker data
+ * @returns {boolean}
+ */
+function isMarkerHighlighted(data) {
+    return (data.type === "thingwall" && thingwallHighlightEnabled) ||
+           (data.type === "questgiver" && questGiverHighlightEnabled);
+}
+
+/**
+ * Swap a marker between its plain icon and a glow-baked copy of it.
+ *
+ * The glow is baked into the bitmap instead of being applied with `filter: drop-shadow()`,
+ * because a CSS filter gives every highlighted marker its own compositing surface and
+ * re-blurs it on every rasterization. See glow-icon.js.
+ *
+ * @param {object} mark - Entry from the `markers` registry
+ * @param {boolean} highlighted - Target state
+ */
+function applyHighlightIcon(mark, highlighted) {
+    const plain = mark.plainIcon;
+    if (!plain) {
+        return; // Timer markers use a divIcon; leave them as they are
+    }
+
+    if (!highlighted) {
+        mark.marker.setIcon(plain);
+        syncHighlightClass(mark);
+        return;
+    }
+
+    const color = HIGHLIGHT_GLOW_COLORS[mark.data.type];
+    if (!color) {
+        return;
+    }
+
+    const baseSize = plain.options.iconSize[0];
+    const baseAnchor = plain.options.iconAnchor;
+
+    GlowIcon.getGlowIcon(plain.options.iconUrl, color, baseSize).then(glow => {
+        if (!glow) {
+            return; // Baking failed - marker keeps its plain icon
+        }
+        // Baking is async: the marker may have been removed, rebuilt or unhighlighted
+        // while we waited.
+        if (markers[mark.data.id] !== mark || !isMarkerHighlighted(mark.data)) {
+            return;
+        }
+        mark.marker.setIcon(L.icon({
+            iconUrl: glow.url,
+            iconSize: [glow.size, glow.size],
+            iconAnchor: [baseAnchor[0] + glow.pad, baseAnchor[1] + glow.pad]
+        }));
+        syncHighlightClass(mark);
+    });
+}
+
+/**
+ * Re-apply the highlight CSS class to a marker's element.
+ * Must run after every setIcon(): Leaflet builds a fresh element there, dropping any
+ * classes we added by hand.
+ * @param {object} mark - Entry from the `markers` registry
+ */
+function syncHighlightClass(mark) {
+    const el = mark.marker.getElement();
+    if (!el) {
+        return;
+    }
+    const data = mark.data;
+    el.classList.toggle('thingwall-highlighted', data.type === "thingwall" && thingwallHighlightEnabled);
+    el.classList.toggle('questgiver-highlighted', data.type === "questgiver" && questGiverHighlightEnabled);
+}
+
+/**
+ * Update highlighting for thingwall and questgiver markers (icon swap + tooltip toggle)
+ * Avoids full marker rebuild
  */
 function updateMarkerHighlighting() {
     Object.values(markers).forEach(mark => {
         const data = mark.data;
         const isThingwall = data.type === "thingwall";
         const isQuestGiver = data.type === "questgiver";
+
+        // Only these two types can ever be highlighted. Rebinding the tooltip of every
+        // marker on the map is a long main-thread task on large maps, and it used to drop
+        // the ready-timer text from all the markers it touched needlessly.
+        if (!isThingwall && !isQuestGiver) {
+            return;
+        }
+
         const shouldHighlightThingwall = isThingwall && thingwallHighlightEnabled;
         const shouldHighlightQuestGiver = isQuestGiver && questGiverHighlightEnabled;
         const shouldHighlight = shouldHighlightThingwall || shouldHighlightQuestGiver;
 
-        const el = mark.marker.getElement();
-        if (el) {
-            // Toggle CSS highlight classes for glow effect (no scaling - it breaks positioning)
-            el.classList.toggle('thingwall-highlighted', shouldHighlightThingwall);
-            el.classList.toggle('questgiver-highlighted', shouldHighlightQuestGiver);
-        }
+        // The glow lives in the icon bitmap now; the CSS class only carries stacking order.
+        // applyHighlightIcon re-applies the class after it swaps the icon.
+        applyHighlightIcon(mark, shouldHighlight);
+        syncHighlightClass(mark);
 
         // Toggle tooltip permanence and visibility
         const tooltip = mark.marker.getTooltip();
         if (tooltip) {
-            tooltip.options.permanent = shouldHighlight;
             // Leaflet needs tooltip to be removed and re-added to change permanence
             mark.marker.unbindTooltip();
             const color = getMarkerColor(data.type);
+            const extra = getMarkerReadyText(data);
             const tooltipClass = shouldHighlightThingwall ? 'thingwall-label' :
                                  shouldHighlightQuestGiver ? 'questgiver-label' : '';
-            mark.marker.bindTooltip(`<div style='color:${color};'><b>${data.name}</b></div>`, {
+            mark.marker.bindTooltip(`<div style='color:${color};'><b>${data.name} ${extra}</b></div>`, {
                 permanent: shouldHighlight,
                 direction: 'top',
                 sticky: true,
