@@ -124,9 +124,66 @@ public class TenantStatisticsDto
     public int TileCount { get; set; }
     public int MarkerCount { get; set; }
     public int CustomMarkerCount { get; set; }
+    public int RoadCount { get; set; }
+    public int TimerCount { get; set; }
+    public int FoodCount { get; set; }
+    public int FoodVariantCount { get; set; }
     public int UserCount { get; set; }
     public int TokenCount { get; set; }
     public double StorageUsageMB { get; set; }
     public int StorageQuotaMB { get; set; }
     public double StorageUsagePercent => StorageQuotaMB > 0 ? (StorageUsageMB / StorageQuotaMB) * 100 : 0;
+}
+
+/// <summary>
+/// Request body for purging a tenant's content. <see cref="ConfirmTenantId"/> must match the
+/// route tenant id — a deliberate speed bump on an irreversible, destructive operation.
+/// </summary>
+public class PurgeTenantDataRequestDto
+{
+    public string ConfirmTenantId { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// What a tenant content purge actually removed. Every count is rows/files deleted,
+/// so a caller can show "freed X MB" without a second round trip.
+/// </summary>
+public class PurgeTenantDataResultDto
+{
+    public string TenantId { get; set; } = string.Empty;
+    public string TenantName { get; set; } = string.Empty;
+
+    // Map data
+    public int Maps { get; set; }
+    public int Grids { get; set; }
+    public int Tiles { get; set; }
+    public int Markers { get; set; }
+    public int CustomMarkers { get; set; }
+    public int Roads { get; set; }
+    public int Pings { get; set; }
+    public int Overlays { get; set; }
+    public int DirtyZoomTiles { get; set; }
+
+    // Activity data derived from the map
+    public int Timers { get; set; }
+    public int TimerHistory { get; set; }
+    public int Notifications { get; set; }
+
+    // Cookbook
+    public int Foods { get; set; }
+    public int FoodVariants { get; set; }
+
+    // Public map source references that pointed at the wiped maps
+    public int PublicMapSources { get; set; }
+
+    // Filesystem
+    public int FilesDeleted { get; set; }
+    public long BytesFreed { get; set; }
+    public double MegabytesFreed => Math.Round(BytesFreed / 1024.0 / 1024.0, 2);
+
+    /// <summary>Map ids that were removed, so the caller can invalidate caches / notify clients.</summary>
+    public List<int> DeletedMapIds { get; set; } = new();
+
+    /// <summary>Non-fatal problems (e.g. a locked file that could not be deleted).</summary>
+    public List<string> Warnings { get; set; } = new();
 }

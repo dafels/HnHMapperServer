@@ -1,6 +1,6 @@
 # HnH Mapper Server - Project Documentation for AI Assistants
 
-**Last Updated:** 2026-07-19
+**Last Updated:** 2026-08-10
 **Project Status:** Production-Ready (Core + Admin + Multi-Tenancy + Cookbook)
 **Tech Stack:** .NET 9, ASP.NET Core, Blazor Server, MudBlazor, SQLite, .NET Aspire, Docker
 **Current Branch:** `master`
@@ -624,6 +624,34 @@ See `deploy/SECURITY.md` for complete security checklist.
 ---
 
 ## Recent Changes
+
+### 2026-08-10: Superadmin tenant data purge
+
+**Reclaim disk from a tenant without losing the tenant:**
+- **Endpoint:** `POST /api/superadmin/tenants/{tenantId}/purge-data` (SuperadminOnly). Body must echo
+  `{ "confirmTenantId": "<tenantId>" }` — a deliberate speed bump. Returns a `PurgeTenantDataResultDto`
+  with per-table counts, `filesDeleted`, `bytesFreed`/`megabytesFreed`, `deletedMapIds` and any warnings.
+- **Deleted:** Maps, Grids, Tiles, Markers, CustomMarkers, Roads, Pings, OverlayData, OverlayOffsets,
+  DirtyZoomTiles, Timers (+ cascaded TimerWarnings), TimerHistory, Notifications, Foods/FoodVariants,
+  the `mainMapId` config key, and `PublicMapSources`/`PublicMapSourceAlignments` that pointed at the
+  wiped maps. On disk: all of `{GridStorage}/tenants/{tenantId}` and `{GridStorage}/previews/{tenantId}`.
+- **Kept:** the tenant row, TenantUsers, TenantPermissions, TenantInvitations, Tokens, remaining Config,
+  AuditLogs, Identity users, and cookbook FoodPanels/favorites (name-keyed, so they re-resolve after a
+  future import — same rationale as the existing cookbook clear).
+- **Service:** `ITenantDataPurgeService` / `TenantDataPurgeService`. Every query is `IgnoreQueryFilters()`
+  plus an explicit `TenantId` predicate, since the superadmin request's ambient tenant is a different one.
+  Deletes run child-before-parent inside one transaction; the cookbook clear runs first because
+  `FoodCatalogService.ClearAsync` opens its own transaction on the same DbContext. Files are removed after
+  the commit, then `RecalculateStorageUsageAsync` resets `CurrentStorageMB` and the directory skeleton is
+  recreated so clients can upload immediately.
+- **UI:** red "delete sweep" icon in SuperAdmin → Tenants row actions → `PurgeTenantDataDialog`, which
+  loads `/statistics` to show exact deleted/kept counts and requires typing the tenant id. It posts via the
+  `APIUpload` HttpClient — the default `API` client's resilience handler would time out and retry at 10s.
+  Row-action clicks now stop propagation so they no longer also trigger row navigation.
+- **Note:** SQLite does not shrink `grids.db` on delete (no VACUUM); the reclaimed space is the tile/grid
+  image tree, and freed DB pages are reused by later writes.
+- **Tests:** `TenantDataPurgeServiceTests` (10 tests) run against real SQLite — the in-memory provider
+  cannot execute `ExecuteDelete`, and only SQLite enforces the FK ordering the service depends on.
 
 ### 2026-07-19: Cookbook (cookbook-v2 branch)
 

@@ -107,34 +107,43 @@
                         }
                     </MudTd>
                     <MudTd DataLabel="Actions">
-                        <MudStack Row="true" Spacing="1">
-                            <MudIconButton Icon="@Icons.Material.Filled.Visibility"
-                                          Color="Color.Primary"
-                                          Size="Size.Small"
-                                          Title="View Details"
-                                          OnClick="@(() => NavigateToTenantDetails(context))" />
-                            <MudIconButton Icon="@Icons.Material.Filled.Edit"
-                                          Color="Color.Info"
-                                          Size="Size.Small"
-                                          Title="Edit Tenant"
-                                          OnClick="@(() => EditTenant(context))" />
-                            @if (context.IsActive)
-                            {
-                                <MudIconButton Icon="@Icons.Material.Filled.Block"
-                                              Color="Color.Warning"
+                        @* Row clicks navigate to the details page; keep the action buttons
+                           (especially the destructive one) from triggering that too. *@
+                        <div @onclick:stopPropagation="true">
+                            <MudStack Row="true" Spacing="1">
+                                <MudIconButton Icon="@Icons.Material.Filled.Visibility"
+                                              Color="Color.Primary"
                                               Size="Size.Small"
-                                              Title="Suspend Tenant"
-                                              OnClick="@(() => SuspendTenant(context))" />
-                            }
-                            else
-                            {
-                                <MudIconButton Icon="@Icons.Material.Filled.CheckCircle"
-                                              Color="Color.Success"
+                                              Title="View Details"
+                                              OnClick="@(() => NavigateToTenantDetails(context))" />
+                                <MudIconButton Icon="@Icons.Material.Filled.Edit"
+                                              Color="Color.Info"
                                               Size="Size.Small"
-                                              Title="Activate Tenant"
-                                              OnClick="@(() => ActivateTenant(context))" />
-                            }
-                        </MudStack>
+                                              Title="Edit Tenant"
+                                              OnClick="@(() => EditTenant(context))" />
+                                @if (context.IsActive)
+                                {
+                                    <MudIconButton Icon="@Icons.Material.Filled.Block"
+                                                  Color="Color.Warning"
+                                                  Size="Size.Small"
+                                                  Title="Suspend Tenant"
+                                                  OnClick="@(() => SuspendTenant(context))" />
+                                }
+                                else
+                                {
+                                    <MudIconButton Icon="@Icons.Material.Filled.CheckCircle"
+                                                  Color="Color.Success"
+                                                  Size="Size.Small"
+                                                  Title="Activate Tenant"
+                                                  OnClick="@(() => ActivateTenant(context))" />
+                                }
+                                <MudIconButton Icon="@Icons.Material.Filled.DeleteSweep"
+                                              Color="Color.Error"
+                                              Size="Size.Small"
+                                              Title="Delete all map data (keeps users)"
+                                              OnClick="@(() => PurgeTenantData(context))" />
+                            </MudStack>
+                        </div>
                     </MudTd>
                 </RowTemplate>
             </MudTable>
@@ -220,6 +229,33 @@
         if (!result.Canceled)
         {
             // Reload the tenant list to reflect changes
+            await LoadTenants();
+        }
+    }
+
+    private async Task PurgeTenantData(TenantListDto tenant)
+    {
+        var parameters = new DialogParameters<PurgeTenantDataDialog>
+        {
+            { x => x.Tenant, tenant }
+        };
+
+        var dialog = await DialogService.ShowAsync<PurgeTenantDataDialog>(
+            $"Delete all map data for '{tenant.Name}'",
+            parameters,
+            new DialogOptions
+            {
+                MaxWidth = MaxWidth.Small,
+                FullWidth = true,
+                CloseButton = true,
+                BackdropClick = false
+            });
+
+        var result = await dialog.Result;
+
+        if (result is { Canceled: false })
+        {
+            // Storage usage drops to ~0; reload so the list reflects it.
             await LoadTenants();
         }
     }

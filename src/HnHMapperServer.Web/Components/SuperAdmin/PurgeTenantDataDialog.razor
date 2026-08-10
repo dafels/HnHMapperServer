@@ -1,0 +1,197 @@
+@using HnHMapperServer.Core.DTOs
+@using MudBlazor
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject ILogger<PurgeTenantDataDialog> Logger
+
+<MudDialog>
+    <DialogContent>
+        <MudStack Spacing="3">
+            <MudAlert Severity="Severity.Error" Dense="true">
+                This permanently deletes everything <strong>@(Tenant?.Name ?? "this tenant")</strong> has
+                mapped and cooked. It cannot be undone and there is no backup step.
+            </MudAlert>
+
+            @if (_isLoadingStats)
+            {
+                <MudProgressLinear Indeterminate="true" />
+            }
+            else if (_stats != null)
+            {
+                <MudPaper Elevation="0" Class="pa-3 mud-background-gray">
+                    <MudText Typo="Typo.subtitle2" Color="Color.Error" Class="mb-2">
+                        <MudIcon Icon="@Icons.Material.Filled.DeleteForever" Size="Size.Small" Class="me-1" />
+                        Deleted
+                    </MudText>
+                    <MudSimpleTable Dense="true" Hover="false" Elevation="0" Style="background: transparent">
+                        <tbody>
+                            <tr><td>Maps</td><td><strong>@_stats.MapCount.ToString("N0")</strong></td></tr>
+                            <tr><td>Grids</td><td><strong>@_stats.GridCount.ToString("N0")</strong></td></tr>
+                            <tr><td>Tiles (rows + image files)</td><td><strong>@_stats.TileCount.ToString("N0")</strong></td></tr>
+                            <tr><td>Game markers</td><td><strong>@_stats.MarkerCount.ToString("N0")</strong></td></tr>
+                            <tr><td>Custom markers</td><td><strong>@_stats.CustomMarkerCount.ToString("N0")</strong></td></tr>
+                            <tr><td>Roads</td><td><strong>@_stats.RoadCount.ToString("N0")</strong></td></tr>
+                            <tr><td>Timers &amp; notifications</td><td><strong>@_stats.TimerCount.ToString("N0")</strong></td></tr>
+                            <tr>
+                                <td>Cookbook foods</td>
+                                <td><strong>@_stats.FoodCount.ToString("N0")</strong> (@_stats.FoodVariantCount.ToString("N0") variations)</td>
+                            </tr>
+                            <tr>
+                                <td>Disk in use</td>
+                                <td><strong>@FormatStorageSize(_stats.StorageUsageMB)</strong></td>
+                            </tr>
+                        </tbody>
+                    </MudSimpleTable>
+                </MudPaper>
+
+                <MudPaper Elevation="0" Class="pa-3 mud-background-gray">
+                    <MudText Typo="Typo.subtitle2" Color="Color.Success" Class="mb-2">
+                        <MudIcon Icon="@Icons.Material.Filled.Shield" Size="Size.Small" Class="me-1" />
+                        Kept
+                    </MudText>
+                    <MudText Typo="Typo.body2">
+                        The tenant itself, its <strong>@_stats.UserCount</strong> user(s) with their roles and
+                        permissions, <strong>@_stats.TokenCount</strong> API token(s), pending invitations,
+                        cookbook panels and favorites, audit history, and the storage quota
+                        (@FormatStorageSize(_stats.StorageQuotaMB)).
+                    </MudText>
+                </MudPaper>
+
+                <MudText Typo="Typo.body2">
+                    Clients can upload into the tenant again straight afterwards — they just start
+                    from an empty map.
+                </MudText>
+            }
+            else
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true">
+                    Could not load this tenant's statistics. You can still purge, but the counts above
+                    are unavailable.
+                </MudAlert>
+            }
+
+            <MudTextField @bind-Value="_confirmation"
+                          @bind-Value:event="oninput"
+                          Label="@($"Type {Tenant?.Id} to confirm")"
+                          Variant="Variant.Outlined"
+                          Immediate="true"
+                          Disabled="@_isPurging"
+                          HelperText="Exact match required" />
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel" Disabled="@_isPurging">Cancel</MudButton>
+        <MudButton Color="Color.Error"
+                   Variant="Variant.Filled"
+                   StartIcon="@Icons.Material.Filled.DeleteForever"
+                   OnClick="Purge"
+                   Disabled="@(!IsConfirmed || _isPurging)">
+            @if (_isPurging)
+            {
+                <MudProgressCircular Class="ms-n1" Size="Size.Small" Indeterminate="true" />
+                <MudText Class="ms-2">Deleting...</MudText>
+            }
+            else
+            {
+                <MudText>Delete all map data</MudText>
+            }
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] IMudDialogInstance? MudDialog { get; set; }
+    [Parameter] public TenantListDto? Tenant { get; set; }
+
+    private TenantStatisticsDto? _stats;
+    private string _confirmation = string.Empty;
+    private bool _isLoadingStats = true;
+    private bool _isPurging;
+
+    private bool IsConfirmed =>
+        Tenant != null && string.Equals(_confirmation.Trim(), Tenant.Id, StringComparison.Ordinal);
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Tenant == null)
+        {
+            _isLoadingStats = false;
+            return;
+        }
+
+        try
+        {
+            var httpClient = HttpClientFactory.CreateClient("API");
+            _stats = await httpClient.GetFromJsonAsync<TenantStatisticsDto>(
+                $"/api/superadmin/tenants/{Uri.EscapeDataString(Tenant.Id)}/statistics");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load statistics for tenant {TenantId}", Tenant.Id);
+        }
+        finally
+        {
+            _isLoadingStats = false;
+        }
+    }
+
+    private void Cancel() => MudDialog?.Cancel();
+
+    private async Task Purge()
+    {
+        if (Tenant == null || !IsConfirmed || _isPurging)
+        {
+            return;
+        }
+
+        _isPurging = true;
+        try
+        {
+            // Wiping a large tenant can take minutes of file I/O — use the long-timeout client
+            // without the standard resilience handler, which would time out and retry at 10s.
+            var httpClient = HttpClientFactory.CreateClient("APIUpload");
+            var response = await httpClient.PostAsJsonAsync(
+                $"/api/superadmin/tenants/{Uri.EscapeDataString(Tenant.Id)}/purge-data",
+                new PurgeTenantDataRequestDto { ConfirmTenantId = Tenant.Id });
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<PurgeTenantDataResultDto>();
+
+                Snackbar.Add(
+                    $"Purged '{Tenant.Name}': {result?.Maps ?? 0} maps, {result?.Tiles ?? 0:N0} tiles, " +
+                    $"{result?.Foods ?? 0:N0} foods — {result?.MegabytesFreed ?? 0:N2} MB freed",
+                    Severity.Success);
+
+                if (result?.Warnings.Count > 0)
+                {
+                    foreach (var warning in result.Warnings.Take(3))
+                    {
+                        Snackbar.Add(warning, Severity.Warning);
+                    }
+                }
+
+                MudDialog?.Close(DialogResult.Ok(true));
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to purge tenant {TenantId}: {StatusCode}, Body={Body}",
+                    Tenant.Id, response.StatusCode, errorBody);
+                Snackbar.Add($"Purge failed: HTTP {(int)response.StatusCode}", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error purging tenant {TenantId}", Tenant.Id);
+            Snackbar.Add($"Purge failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isPurging = false;
+        }
+    }
+
+    private static string FormatStorageSize(double mb) =>
+        mb >= 1024 ? $"{(mb / 1024):F2} GB" : $"{mb:F0} MB";
+}

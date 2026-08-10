@@ -119,6 +119,9 @@ public static class SuperadminEndpoints
         // DELETE /api/superadmin/tenants/{tenantId}/maps/{mapId} - Delete map for tenant
         group.MapDelete("/tenants/{tenantId}/maps/{mapId}", DeleteTenantMap);
 
+        // POST /api/superadmin/tenants/{tenantId}/purge-data - Wipe tenant content, keep users
+        group.MapPost("/tenants/{tenantId}/purge-data", PurgeTenantData);
+
         // === Cross-Tenant Map Viewing ===
 
         // GET /api/superadmin/tenants/{tenantId}/map-view-data - Get all map view data for tenant
@@ -1619,6 +1622,22 @@ public static class SuperadminEndpoints
                 .IgnoreQueryFilters()
                 .CountAsync(cm => cm.TenantId == tenantId);
 
+            var roadCount = await db.Roads
+                .IgnoreQueryFilters()
+                .CountAsync(r => r.TenantId == tenantId);
+
+            var timerCount = await db.Timers
+                .IgnoreQueryFilters()
+                .CountAsync(t => t.TenantId == tenantId);
+
+            var foodCount = await db.Foods
+                .IgnoreQueryFilters()
+                .CountAsync(f => f.TenantId == tenantId);
+
+            var foodVariantCount = await db.FoodVariants
+                .IgnoreQueryFilters()
+                .CountAsync(v => v.TenantId == tenantId);
+
             var userCount = await db.TenantUsers
                 .IgnoreQueryFilters()
                 .CountAsync(tu => tu.TenantId == tenantId);
@@ -1636,6 +1655,10 @@ public static class SuperadminEndpoints
                 TileCount = tileCount,
                 MarkerCount = markerCount,
                 CustomMarkerCount = customMarkerCount,
+                RoadCount = roadCount,
+                TimerCount = timerCount,
+                FoodCount = foodCount,
+                FoodVariantCount = foodVariantCount,
                 UserCount = userCount,
                 TokenCount = tokenCount,
                 StorageUsageMB = tenant.CurrentStorageMB,
@@ -1715,6 +1738,101 @@ public static class SuperadminEndpoints
         {
             logger.LogError(ex, "Error deleting map {MapId} for tenant {TenantId}", mapId, tenantId);
             return Results.Problem("Failed to delete map");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/tenants/{tenantId}/purge-data
+    /// Frees disk by wiping everything a tenant has *produced* — maps, grids, tiles (rows and
+    /// files), markers, roads, pings, overlays, timers, notifications and the cookbook catalog —
+    /// while leaving the tenant, its users, permissions, invitations and tokens in place.
+    /// Irreversible; the request body must echo the tenant id back.
+    /// </summary>
+    private static async Task<IResult> PurgeTenantData(
+        string tenantId,
+        PurgeTenantDataRequestDto dto,
+        ApplicationDbContext db,
+        ITenantDataPurgeService purgeService,
+        IUpdateNotificationService notificationService,
+        ICharacterService characterService,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        if (!string.Equals(dto?.ConfirmTenantId, tenantId, StringComparison.Ordinal))
+        {
+            return Results.BadRequest(new { error = "confirmTenantId must match the tenant being purged" });
+        }
+
+        var tenantExists = await db.Tenants
+            .IgnoreQueryFilters()
+            .AnyAsync(t => t.Id == tenantId);
+
+        if (!tenantExists)
+        {
+            return Results.NotFound(new { error = "Tenant not found" });
+        }
+
+        var adminUsername = context.User.Identity?.Name ?? "Unknown";
+
+        try
+        {
+            var result = await purgeService.PurgeAsync(tenantId);
+
+            // Drop live character pins for the tenant (in-memory, 10s TTL) so the wipe is
+            // immediately visible instead of lingering until the next cleanup pass.
+            characterService.CleanupStaleCharacters(TimeSpan.Zero, tenantId);
+
+            // Tell any open map view its maps are gone.
+            foreach (var mapId in result.DeletedMapIds)
+            {
+                notificationService.NotifyMapDeleted(mapId);
+            }
+
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = tenantId,
+                UserId = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? adminUsername,
+                Action = "SuperAdminPurgedTenantData",
+                EntityType = "Tenant",
+                EntityId = tenantId,
+                OldValue = JsonSerializer.Serialize(new
+                {
+                    result.Maps,
+                    result.Grids,
+                    result.Tiles,
+                    result.Markers,
+                    result.CustomMarkers,
+                    result.Roads,
+                    result.Pings,
+                    result.Overlays,
+                    result.Timers,
+                    result.Notifications,
+                    result.Foods,
+                    result.FoodVariants,
+                    result.PublicMapSources,
+                    result.FilesDeleted,
+                    result.BytesFreed
+                }),
+                NewValue = $"Tenant content purged by {adminUsername}; users, tokens and permissions retained"
+            });
+
+            logger.LogWarning(
+                "SuperAdmin {Username} purged all content for tenant {TenantId}: " +
+                "{Maps} maps, {Tiles} tiles, {Files} files, {MB:F2} MB freed",
+                adminUsername, tenantId, result.Maps, result.Tiles, result.FilesDeleted, result.MegabytesFreed);
+
+            return Results.Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            logger.LogWarning(ex, "Purge requested for unknown tenant {TenantId}", tenantId);
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error purging data for tenant {TenantId}", tenantId);
+            return Results.Problem("Failed to purge tenant data");
         }
     }
 

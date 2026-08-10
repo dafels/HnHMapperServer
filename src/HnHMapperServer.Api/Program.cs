@@ -140,6 +140,7 @@ builder.Services.AddScoped<IMapNameService, MapNameService>();
 builder.Services.AddScoped<ITenantContextAccessor, TenantContextAccessor>();
 builder.Services.AddScoped<IStorageQuotaService, StorageQuotaService>();
 builder.Services.AddScoped<ITenantFilePathService, TenantFilePathService>();
+builder.Services.AddScoped<ITenantDataPurgeService, TenantDataPurgeService>();  // Superadmin: wipe tenant content, keep users
 builder.Services.AddScoped<IAuditService, AuditService>();  // Phase 6: Audit logging service
 builder.Services.AddScoped<INotificationService, NotificationService>();  // Notification system
 builder.Services.AddScoped<ITimerService, TimerService>();  // Timer system
