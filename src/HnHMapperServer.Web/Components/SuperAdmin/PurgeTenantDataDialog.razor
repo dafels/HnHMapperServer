@@ -70,13 +70,15 @@
                 </MudAlert>
             }
 
+            @* Immediate="true" is MudBlazor's per-keystroke update. Do NOT add
+               @bind-Value:event="oninput" — on a component that is passed through as an
+               unknown parameter and ValueChanged never fires, leaving the button dead. *@
             <MudTextField @bind-Value="_confirmation"
-                          @bind-Value:event="oninput"
-                          Label="@($"Type {Tenant?.Id} to confirm")"
+                          Label="@($"Type {ConfirmationHint} to confirm")"
                           Variant="Variant.Outlined"
                           Immediate="true"
                           Disabled="@_isPurging"
-                          HelperText="Exact match required" />
+                          HelperText="@ConfirmationHelperText" />
         </MudStack>
     </DialogContent>
     <DialogActions>
@@ -108,8 +110,22 @@
     private bool _isLoadingStats = true;
     private bool _isPurging;
 
+    /// <summary>
+    /// Accept either identifier the superadmin sees for this tenant. For most tenants the name
+    /// and the id are identical anyway (a new tenant's name defaults to its id); requiring the
+    /// id specifically just traps anyone reading the dialog title.
+    /// </summary>
     private bool IsConfirmed =>
-        Tenant != null && string.Equals(_confirmation.Trim(), Tenant.Id, StringComparison.Ordinal);
+        Tenant != null
+        && (string.Equals(_confirmation.Trim(), Tenant.Id, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(_confirmation.Trim(), Tenant.Name, StringComparison.OrdinalIgnoreCase));
+
+    private string ConfirmationHint => Tenant?.Id ?? string.Empty;
+
+    private string ConfirmationHelperText =>
+        Tenant != null && !string.Equals(Tenant.Name, Tenant.Id, StringComparison.OrdinalIgnoreCase)
+            ? $"The tenant name '{Tenant.Name}' works too"
+            : "Exact match required";
 
     protected override async Task OnInitializedAsync()
     {

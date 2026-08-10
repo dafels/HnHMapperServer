@@ -645,9 +645,13 @@ See `deploy/SECURITY.md` for complete security checklist.
   the commit, then `RecalculateStorageUsageAsync` resets `CurrentStorageMB` and the directory skeleton is
   recreated so clients can upload immediately.
 - **UI:** red "delete sweep" icon in SuperAdmin → Tenants row actions → `PurgeTenantDataDialog`, which
-  loads `/statistics` to show exact deleted/kept counts and requires typing the tenant id. It posts via the
-  `APIUpload` HttpClient — the default `API` client's resilience handler would time out and retry at 10s.
-  Row-action clicks now stop propagation so they no longer also trigger row navigation.
+  loads `/statistics` to show exact deleted/kept counts and requires typing the tenant id (its name is
+  accepted too). It posts via the `APIUpload` HttpClient — the default `API` client's resilience handler
+  would time out and retry at 10s. Row-action clicks now stop propagation so they no longer also trigger
+  row navigation.
+- **MudBlazor gotcha:** for per-keystroke text fields use `Immediate="true"` only. Adding
+  `@bind-Value:event="oninput"` on a *component* compiles fine but emits the callback as a parameter
+  literally named `oninput`, so `ValueChanged` never binds and the field silently stays empty.
 - **Note:** SQLite does not shrink `grids.db` on delete (no VACUUM); the reclaimed space is the tile/grid
   image tree, and freed DB pages are reused by later writes.
 - **Tests:** `TenantDataPurgeServiceTests` (10 tests) run against real SQLite — the in-memory provider
