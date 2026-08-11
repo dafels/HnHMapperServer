@@ -942,3 +942,10 @@ h6 .mud-icon {
     color: #b9c4cd;
     font-size: 0.74rem;
 }
+
+/* Optional action hint (data-ft-hint) on clickable pills */
+.fep-tt-hint {
+    color: #9aa9b4;
+    font-size: 0.68rem;
+    margin-top: 3px;
+}

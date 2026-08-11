@@ -27,7 +27,7 @@ Complete .NET 9 implementation of the Haven & Hearth (HnH) Auto-Mapper Server wi
 |-------|-----------|
 | **Framework** | .NET 9.0 |
 | **Web** | ASP.NET Core (Minimal APIs), Blazor Server |
-| **UI** | MudBlazor 6.11.2 |
+| **UI** | MudBlazor 8.13.0 |
 | **Orchestration** | .NET Aspire |
 | **Database** | SQLite with Entity Framework Core |
 | **Auth** | ASP.NET Core Identity + Data Protection API |
@@ -631,9 +631,64 @@ See `deploy/SECURITY.md` for complete security checklist.
 - `StatColors` in `Cookbook.razor` maps each stat to a `(Tier1, Tier2)` pair — muted tier-1, brighter
   tier-2; `StatColor(attr, tier = 1)` is the single lookup (unknown keys still fall back to `#d8d8d8`).
 - Tier-aware sites (table/detail/prep-compare FEP pills, both bar types, panels-strip mini bars,
-  dist dots, hover-tooltip dot) pass `fep.Tier`; the per-stat FEP chip row uses tier-1.
+  dist dots, hover-tooltip dot) pass `fep.Tier`; tier-agnostic chips (FEP row, builder chips, tierless
+  threshold chips) use tier-1, while tier-specific threshold chips (`int2>15`) get the tier-2 hue.
 - The gold ring / diagonal-shine tier-2 marker was removed from `Cookbook.razor.css` (`.fep-pill.tier2`,
   `.item-bar-seg.tier2`, the shimmer block); the "+2" text labels remain the non-color tier signal.
+
+### 2026-08-11: Cookbook FEP threshold filters
+
+**Cediner-style threshold filtering on /cookbook** — expressions typed straight into the search box,
+mixed with free text (`meat str>50% int2>15`):
+- **Syntax:** `key[tier]op value[%]`. Keys: the 9 stats (`str agi int con per cha dex will psy`;
+  bare = tier1+tier2 combined, `int2`/`str1` = tier-specific) plus `total`, `hunger`, `energy`,
+  `eff` (FEP/hunger). Ops `> >= < <= =` (`==` alias). `%` (stat keys only) = share of the food's
+  total FEP, quality-invariant; absolute stat/`total`/`eff` values compare **quality-scaled** (WYSIWYG
+  with the table at the current Q input, rounded to 2 dp); `hunger`/`energy` unscaled. Conditions AND
+  together and with the residual text search.
+- **Parser:** `FepFilterParser` in `src/HnHMapperServer.Core/Cookbook/FepFilterParser.cs` — pure
+  regex extraction returning (conditions, residual text). Invalid tokens (`hunger>50%`, typos,
+  `straw`) stay in the residual text and degrade to a normal 0-result search; with zero conditions
+  the input passes through byte-identical. Unit-tested in `FepFilterParserTests` (Core is referenced
+  by the test project; Web is not — that's why the parser lives in Core).
+- **UI (cediner-inspired, modeled on github.com/Cediner/hnh-food-book):** filtering has one home,
+  a "Filter" row directly under the Prep chips — the expression input (`FilterText`; unparsed
+  remainder surfaces as an "Ignored: …" helper line, never an error) with the Quick preset toggle
+  chips beside it and a key-chip helper row beneath (9 stat chips + Total/Hunger/Energy/FEP-H
+  from `FilterKeyHelpers`): clicking a key chip appends `key>=` and focuses the input with the
+  caret at the end (`AppendKeyToFilterAsync` — the pending render flushes at its first await, so
+  the text lands before focus and MudBlazor's focused-text suppression never bites). Quarter
+  chips (≥25/50/75/100%, `QuarterPresets`) are context-aware: they complete a started stat
+  expression at the end of the input (`TrailingStatOpRegex`, e.g. `str>=` → `str>=50%`), else
+  apply to the selected FEP chip via `ApplyToolExpression(..., toggle: true)` (re-click removes,
+  different quarter replaces), else render `.empty` with an explanatory tooltip. Conditions
+  live as text in two inputs — that filter input plus the search box, which still parses mixed
+  syntax as a power path — each parsed once per change in its property setter
+  (`Search`/`FilterText`) with `_allConditions` as the union every consumer reads. Active chips:
+  body click sorts by exactly what the chip filters (`SortKeyOf` + shared `ConditionValue`, ▼/▲
+  indicator, self-clearing when the chip disappears), the nested ✕ button removes; clear-all chip
+  when several are active. A "⊞ Columns" chip at the end of the FEP toggle row expands one
+  sortable, display-only column per stat (quality-scaled `.stat-value` pills; the FEP-pills and
+  selected-stat columns hide meanwhile — every colspan derives from `VisibleColumnCount`). The
+  in-table header filter boxes were tried and **removed as too complex a UX**; tier-specific
+  conditions (`int2>15`) stay syntax/chip-only. There is no builder UI. Chip counts are
+  facet-aware via `CountBase(includeSatiation, includePrep, includeStat)`: each row's counts
+  reflect search + conditions + panel + the OTHER facet rows' selections, excluding the row's
+  own (so sibling chips show what selecting them would yield instead of zeroing out).
+- **One-click tools** (all funnel through `ApplyToolExpression`, which replaces same-shaped
+  conditions — same key/tier/%-ness — wherever they live and appends the new expression to the
+  filter input): master-row FEP pills (`str2>=8`, tier always explicit; their hover card gains a
+  `data-ft-hint` line via `FtAttrs(..., clickable: true)` + `fep-tooltip.js`), Total and
+  FEP/Hunger cell values (`total>=…` / `eff>=…`, "—" cells inert), and the "Quick" presets
+  (Efficient `eff>=3`, Light `hunger<=1`, Feast `total>=30`) that toggle: an identical existing
+  condition is removed, `.selected` marks active. Tool values are rounded to 2 dp and
+  invariant-formatted (display strings are culture-formatted — never reuse them), so a clicked
+  row always passes its own `>=` filter.
+- **Variations:** conditions also filter the per-food variations sub-table via the shared
+  `ConditionTarget` evaluator (`VariantRow` carries `StatTotals`/`StatTierTotals`; percent = share
+  of the variant's own total; skipped while a focused panel chip pins a variant).
+- **Data:** `FoodRow` gained `StatTierTotals` (keys `"STR1"`/`"STR2"`) since the existing
+  `StatTotals` merges tiers.
 
 ### 2026-08-10: Superadmin tenant data purge
 

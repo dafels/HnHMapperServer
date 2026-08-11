@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "src/HnHMapperServer.Api", "--no-launch-profile", "--no-build", "--", "--urls", "http://localhost:5279", "--environment", "Development"],
+      "port": 5279
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "src/HnHMapperServer.Web", "--no-launch-profile", "--no-build", "--", "--urls", "http://localhost:5189", "--environment", "Development", "--ApiBaseUrl", "http://localhost:5279"],
+      "port": 5189
+    }
+  ]
+}

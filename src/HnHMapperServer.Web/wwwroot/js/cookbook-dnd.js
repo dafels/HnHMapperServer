@@ -44,7 +44,14 @@
     // table: CSS collapses each card to just its header while .ck-stuck is on.
     // rAF-throttled; the MutationObserver re-applies the class after Blazor
     // re-renders replace the element (which would otherwise drop it).
+    //
+    // Crucial: condensing must NOT change the document height. On short pages
+    // (heavy filters → few rows) the height loss used to clamp the scroll
+    // position back up, which un-pinned the strip, which grew the page again —
+    // an oscillation that made scrolling down impossible. The condensed height
+    // difference is therefore given back as margin-bottom on the stack.
     var stuckScheduled = false;
+    var needsMeasure = true;
 
     function updateStuck() {
         stuckScheduled = false;
@@ -53,7 +60,21 @@
             return;
         }
         // position: sticky; top: 72px — pinned exactly when the rect reaches it
-        stack.classList.toggle('ck-stuck', stack.getBoundingClientRect().top <= 76);
+        var shouldStick = stack.getBoundingClientRect().top <= 76;
+        var wasStuck = stack.classList.contains('ck-stuck');
+
+        if (shouldStick) {
+            if (!wasStuck || needsMeasure) {
+                stack.classList.remove('ck-stuck');
+                var expanded = stack.offsetHeight;
+                stack.classList.add('ck-stuck');
+                stack.style.marginBottom = Math.max(0, expanded - stack.offsetHeight) + 'px';
+                needsMeasure = false;
+            }
+        } else if (wasStuck || stack.style.marginBottom) {
+            stack.classList.remove('ck-stuck');
+            stack.style.marginBottom = '';
+        }
     }
 
     function scheduleStuck() {
@@ -63,8 +84,13 @@
         }
     }
 
+    function scheduleRemeasure() {
+        needsMeasure = true;
+        scheduleStuck();
+    }
+
     window.addEventListener('scroll', scheduleStuck, { passive: true });
-    window.addEventListener('resize', scheduleStuck);
-    new MutationObserver(scheduleStuck).observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('resize', scheduleRemeasure);
+    new MutationObserver(scheduleRemeasure).observe(document.body, { childList: true, subtree: true });
     scheduleStuck();
 })();

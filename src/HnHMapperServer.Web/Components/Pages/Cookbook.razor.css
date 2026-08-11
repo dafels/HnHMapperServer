@@ -24,12 +24,64 @@
     margin-bottom: 12px;
 }
 
+/* Active threshold-condition chips: sits directly under the builder rows,
+   so composing (builder) and applied (chips) read as one group */
 .active-filters {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 4px;
-    padding-top: 4px;
+    gap: 5px;
+    padding-top: 6px;
+}
+
+/* Active threshold-condition chips read as "on" (no resting fade) */
+.stat-chip.filter-chip {
+    opacity: 1;
+}
+
+/* The ✕ inside an active-condition chip is its own button (chip body = sort) */
+.filter-chip .chip-x {
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+/* "⊞ Columns" toggle sits at the right end of the FEP chip row */
+.columns-toggle {
+    margin-left: auto;
+}
+
+/* The FILTER row below Prep: expression input + preset chips beside it,
+   key-helper chips on the row beneath */
+.filter-input-row {
+    align-items: center;
+}
+
+.cookbook-page ::deep .filter-input {
+    flex: 1 1 280px;
+    max-width: 520px;
+}
+
+.helper-gap {
+    width: 10px;
+}
+
+/* One-click filter tools: pills and Total/FEP-H cell values write ≥-filters into the filter input */
+.fep-pill.clickable {
+    cursor: pointer;
+}
+
+.cell-filter-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+}
+
+.cell-filter-btn:hover {
+    text-decoration: underline dotted;
 }
 
 /* FEP distribution overview: one chip per stat with the count of listed foods

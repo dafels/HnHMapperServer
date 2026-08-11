@@ -36,10 +36,14 @@
                 '<span class="fep-tt-name"></span>' +
                 (tier2 ? '<span class="fep-tt-t2">+2</span>' : '') +
             '</div>' +
-            '<div class="fep-tt-body"></div>';
+            '<div class="fep-tt-body"></div>' +
+            (d.ftHint ? '<div class="fep-tt-hint"></div>' : '');
         // Stat names/values come from our own catalog, but set them as text anyway.
         t.querySelector('.fep-tt-name').textContent = d.ftStat + (tier2 ? '' : ' +1');
         t.querySelector('.fep-tt-body').textContent = d.ftValue + ' FEP · ' + d.ftShare + ' of total';
+        if (d.ftHint) {
+            t.querySelector('.fep-tt-hint').textContent = d.ftHint;
+        }
 
         t.classList.add('fep-tt-show');
 
