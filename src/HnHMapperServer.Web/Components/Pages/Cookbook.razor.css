@@ -24,6 +24,40 @@
     margin-bottom: 12px;
 }
 
+/* Pinned: the table slides under the stack, and the two transparent strips —
+   the slit up to the appbar (stack top 72px vs appbar ~65px) and the toolbar's
+   12px bottom margin — showed raw row slices scrolling by ("a bar below the
+   banner"). Swap the toolbar's bottom margin for the same amount of padding so
+   its own glass paints the gap (outer height unchanged, nothing jumps), and
+   frost the slit with a ::before on the stack. The pseudo must sit on the
+   stack, not on a glass child: the children have backdrop-filter, which would
+   make them the pseudo's backdrop root and its blur would sample nothing.
+   Oversized upward on purpose — the surplus hides behind the fixed appbar. */
+.sticky-stack.ck-stuck::before {
+    content: '';
+    position: absolute;
+    top: -16px;
+    left: 0;
+    right: 0;
+    height: 17px;
+    z-index: -1;
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+}
+
+.sticky-stack.ck-stuck .cookbook-toolbar {
+    margin-bottom: 0;
+    padding-bottom: 20px;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+}
+
+.sticky-stack.ck-stuck .panels-bar {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+}
+
 /* Active threshold-condition chips: sits directly under the builder rows,
    so composing (builder) and applied (chips) read as one group */
 .active-filters {

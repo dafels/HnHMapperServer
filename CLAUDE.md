@@ -625,6 +625,43 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-11: Glassmorphism white-flash fix (app.css)
+
+**White band flashing below glass containers on hover** (cookbook toolbar, panels bar, appbar — anywhere
+`glass-morphism` sits) was a Chromium compositing artifact, not a DOM element: hover rules animate
+`transform` (and one toggled `backdrop-filter`) on MudBlazor buttons inside `backdrop-filter` containers,
+forcing the glass surface to re-rasterize; for those frames its blur-expanded margin composites against
+the near-white canvas instead of the background image. Fix in `wwwroot/app.css`:
+- `.glass-morphism` / `.glass-appbar` gained `transform: translateZ(0)` to pre-pin their compositor layer.
+- `backdrop-filter` removed from all hover-transformed controls (filled/outlined/icon/fab base rules and
+  the `.mud-button-text:hover` toggle). Their translucent white fills are unchanged — over the page's
+  already-blurred `body::before` background the button-level blur was visually a no-op.
+- **Rule going forward:** never combine `backdrop-filter` with a hover/transition `transform` on the same
+  element, and don't nest `backdrop-filter` elements inside glass containers.
+
+**Third mechanism — the intermittent "white bar at the toolbar's bottom edge" (2026-08-12):** Chromium's
+`backdrop-filter` can only sample pixels inside the filtered element's own bounds, so the last
+~blur-radius band at each edge is dominated by whatever single row of content sits at the boundary; as
+content moves even 1px the band swings (crbug 40040614 / 41471914 — Chrome 129's "mirror" edge mode only
+softened it, and residual flicker is machine/timing-dependent). Fix in app.css: `.glass-morphism` and
+`.glass-appbar` no longer carry `backdrop-filter` themselves — the blur lives on an **oversized `::before`
+(`inset: -60px`, `z-index: -1`) clipped by the element** (`position: relative; overflow: hidden`), which
+pushes the blur's sampling edge 60px outside the visible clip where its artifacts can't be seen. Verified
+frame-by-frame via CDP screencast during 1px-step scrolling (bottom-band luma spread ≤2/255, no layout
+regressions on cookbook/dashboard/login). **Do not put `backdrop-filter` back on glass elements directly,
+and don't add `overflow: visible` children that must poke outside a glass container** (the clip is
+load-bearing). The pseudo needs the element's stacking context (`transform: translateZ(0)`) to stay
+behind content.
+
+**Second mechanism, pixel-verified via puppeteer screenshots:** the cookbook's pinned `.sticky-stack` had
+two fully transparent strips — the slit between the appbar (~65px) and the stack (top: 72px), and the
+toolbar's 12px bottom margin — through which raw table-row slices showed while scrolling under the stack;
+that content strip was "the bar below the banner". Fix in `Cookbook.razor.css` (`.ck-stuck` state only, so
+the resting layout is untouched): the toolbar swaps its bottom margin for equal padding so its own glass
+paints the gap (flush with the panels bar, squared meeting corners), and a `::before` on the stack frosts
+the appbar slit. That pseudo must live on the stack itself — putting it on a glass child would trap its
+`backdrop-filter` inside the child's backdrop root and the blur would sample nothing.
+
 ### 2026-08-11: Cookbook FEP palette — Cediner two-tone
 
 **FEP stat colors on /cookbook now match Cediner's hnh-food-book** (palette from its `FEPBar.vue`):

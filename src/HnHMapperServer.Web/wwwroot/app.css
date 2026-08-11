@@ -56,21 +56,54 @@ body::before {
     z-index: -1;
 }
 
-/* Glassmorphism effect - modern frosted glass UI */
+/* Glassmorphism effect - modern frosted glass UI.
+   translateZ(0) pins the surface to its own compositor layer up front; without it, any
+   child hover that promotes a layer forces a backdrop re-raster and the edges flash.
+
+   The blur itself lives on an OVERSIZED ::before (inset: -60px) clipped by the element
+   (overflow: hidden), NOT on the element. Chromium's backdrop-filter can only sample
+   pixels inside the filtered element's own bounds, so on the element itself the last
+   ~blur-radius band at each edge is dominated by whatever single row of content sits at
+   the boundary — as content moves even 1px, that band swings ("white bar appearing and
+   disappearing at the bottom edge", crbug 40040614 / 41471914; Chrome 129's mirror
+   edge-mode only softened it). With the oversized pseudo the sampling edge sits 60px
+   outside the visible clip, where its artifacts can't be seen. */
 .glass-morphism {
     background: rgba(255, 255, 255, 0.55) !important;
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
     border: 1px solid rgba(255, 255, 255, 0.18);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+    transform: translateZ(0);
+    position: relative;
+    overflow: hidden;
+}
+
+.glass-morphism::before {
+    content: '';
+    position: absolute;
+    inset: -60px;
+    z-index: -1;
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    pointer-events: none;
 }
 
 .glass-appbar {
     background: rgba(255, 255, 255, 0.65) !important;
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
     border-bottom: 1px solid rgba(255, 255, 255, 0.2);
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+    transform: translateZ(0);
+    position: relative;
+    overflow: hidden;
+}
+
+.glass-appbar::before {
+    content: '';
+    position: absolute;
+    inset: -60px;
+    z-index: -1;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    pointer-events: none;
 }
 
 /* Global container styling - containers are transparent to show background */
@@ -436,6 +469,11 @@ div[class*="mud-tabs-toolbar"] {
 
 /* ============================================
    BUTTON GLASSMORPHISM - Enhanced Readability
+   No backdrop-filter on buttons: they animate transform on hover, and a
+   backdrop-filter element whose transform changes re-samples its backdrop
+   every frame — inside glass containers this renders as white flashes.
+   The translucent white fills alone read the same over the pre-blurred
+   page background.
    ============================================ */
 
 /* Filled Buttons - Primary, Secondary, Tertiary, etc. */
@@ -449,8 +487,6 @@ div[class*="mud-tabs-toolbar"] {
 .mud-button-filled.mud-button-filled-warning,
 .mud-button-filled.mud-button-filled-info {
     background-color: rgba(255, 255, 255, 0.85) !important;
-    backdrop-filter: blur(20px) !important;
-    -webkit-backdrop-filter: blur(20px) !important;
     border: 1px solid rgba(255, 255, 255, 0.4) !important;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
     color: #424242 !important; /* Dark text for readability */
@@ -476,8 +512,6 @@ div[class*="mud-tabs-toolbar"] {
 .mud-button-outlined.mud-button-outlined-info,
 .mud-button-outlined.mud-button-outlined-default {
     background-color: rgba(255, 255, 255, 0.75) !important;
-    backdrop-filter: blur(18px) !important;
-    -webkit-backdrop-filter: blur(18px) !important;
     border: 2px solid rgba(100, 181, 246, 0.6) !important; /* Thicker border for visibility */
     box-shadow: 0 3px 10px rgba(0, 0, 0, 0.12) !important;
     color: #424242 !important; /* Dark text */
@@ -520,8 +554,6 @@ div[class*="mud-tabs-toolbar"] {
 .mud-button-text:hover,
 .mud-button.mud-button-text:hover {
     background-color: rgba(255, 255, 255, 0.5) !important;
-    backdrop-filter: blur(15px) !important;
-    -webkit-backdrop-filter: blur(15px) !important;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
 }
 
@@ -529,8 +561,6 @@ div[class*="mud-tabs-toolbar"] {
 .mud-icon-button,
 .mud-button.mud-icon-button {
     background-color: rgba(255, 255, 255, 0.7) !important;
-    backdrop-filter: blur(15px) !important;
-    -webkit-backdrop-filter: blur(15px) !important;
     border: 1px solid rgba(255, 255, 255, 0.3) !important;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
     color: #424242 !important;
@@ -566,8 +596,6 @@ div[class*="mud-tabs-toolbar"] {
 .mud-fab,
 .mud-button.mud-fab {
     background-color: rgba(255, 255, 255, 0.85) !important;
-    backdrop-filter: blur(20px) !important;
-    -webkit-backdrop-filter: blur(20px) !important;
     border: 1px solid rgba(255, 255, 255, 0.4) !important;
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2) !important;
     color: #424242 !important;
