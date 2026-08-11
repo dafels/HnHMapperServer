@@ -60,7 +60,7 @@
                     var count = StatCount(stat);
                     <button type="button"
                             class="stat-chip @(_selectedStat == stat ? "selected" : "") @(count == 0 ? "empty" : "")"
-                            style="--chip-color: @StatColors[stat];"
+                            style="--chip-color: @StatColor(stat);"
                             title="@(StatFullNames[stat]): @count foods"
                             @onclick="() => ToggleStat(stat)">
                         @stat<span class="stat-chip-count">@count</span>
@@ -218,8 +218,8 @@
                                                 <div class="item-bar">
                                                     @foreach (var fep in item.Feps)
                                                     {
-                                                        <div class="item-bar-seg @(fep.Tier == 2 ? "tier2" : "")"
-                                                             style="width: @RatioWidth(fep.Value, ItemTotal(item)); background: @StatColor(fep.Attribute);"
+                                                        <div class="item-bar-seg"
+                                                             style="width: @RatioWidth(fep.Value, ItemTotal(item)); background: @StatColor(fep.Attribute, fep.Tier);"
                                                              @attributes="FtAttrs(fep, ItemTotal(item))"></div>
                                                     }
                                                 </div>
@@ -387,8 +387,8 @@
                             <div class="fep-pills">
                                 @foreach (var fep in context.Food.Feps)
                                 {
-                                    <span class="fep-pill @(fep.Tier == 2 ? "tier2" : "")"
-                                          style="background: @StatColor(fep.Attribute);"
+                                    <span class="fep-pill"
+                                          style="background: @StatColor(fep.Attribute, fep.Tier);"
                                           @attributes="FtAttrs(fep, context.TotalFep)">
                                         @fep.Attribute@(fep.Tier == 2 ? "+2" : "") @ScaledFep(fep.Value).ToString("0.##")
                                     </span>
@@ -398,7 +398,7 @@
                         @if (_selectedStat != null)
                         {
                             <MudTd Style="text-align: right;">
-                                <span class="stat-value" style="--chip-color: @StatColors[_selectedStat!];">
+                                <span class="stat-value" style="--chip-color: @StatColor(_selectedStat!);">
                                     @ScaledFep(context.StatTotals.GetValueOrDefault(_selectedStat!)).ToString("0.##")
                                 </span>
                             </MudTd>
@@ -484,8 +484,8 @@
                                                 <div class="fep-bar">
                                                     @foreach (var fep in context.Food.Feps)
                                                     {
-                                                        <div class="fep-bar-segment @(fep.Tier == 2 ? "tier2" : "")"
-                                                             style="width: @RatioWidth(fep.Value, context.TotalFep); background: @StatColor(fep.Attribute);"
+                                                        <div class="fep-bar-segment"
+                                                             style="width: @RatioWidth(fep.Value, context.TotalFep); background: @StatColor(fep.Attribute, fep.Tier);"
                                                              @attributes="FtAttrs(fep, context.TotalFep)"></div>
                                                     }
                                                 </div>
@@ -494,8 +494,8 @@
                                                     {
                                                         <tr>
                                                             <td>
-                                                                <span class="fep-pill @(fep.Tier == 2 ? "tier2" : "")"
-                                                                      style="background: @StatColor(fep.Attribute);"
+                                                                <span class="fep-pill"
+                                                                      style="background: @StatColor(fep.Attribute, fep.Tier);"
                                                                       @attributes="FtAttrs(fep, context.TotalFep)">
                                                                     @fep.Attribute@(fep.Tier == 2 ? "+2" : "")
                                                                 </span>
@@ -582,8 +582,8 @@
                                                                 <div class="fep-pills">
                                                                     @foreach (var fep in sibling.Food.Feps)
                                                                     {
-                                                                        <span class="fep-pill @(fep.Tier == 2 ? "tier2" : "")"
-                                                                              style="background: @StatColor(fep.Attribute);"
+                                                                        <span class="fep-pill"
+                                                                              style="background: @StatColor(fep.Attribute, fep.Tier);"
                                                                               @attributes="FtAttrs(fep, sibling.TotalFep)">
                                                                             @fep.Attribute@(fep.Tier == 2 ? "+2" : "") @ScaledFep(fep.Value).ToString("0.##")
                                                                         </span>
@@ -678,8 +678,8 @@
                                                                 <div class="variant-bar">
                                                                     @foreach (var fep in variantRow.Variant.Feps)
                                                                     {
-                                                                        <div class="variant-bar-segment @(fep.Tier == 2 ? "tier2" : "")"
-                                                                             style="width: @RatioWidth(fep.Value, variantRow.Total); background: @StatColor(fep.Attribute);"
+                                                                        <div class="variant-bar-segment"
+                                                                             style="width: @RatioWidth(fep.Value, variantRow.Total); background: @StatColor(fep.Attribute, fep.Tier);"
                                                                              @attributes="FtAttrs(fep, variantRow.Total)"></div>
                                                                     }
                                                                 </div>
@@ -689,7 +689,7 @@
                                                                         @foreach (var fep in variantRow.Variant.Feps)
                                                                         {
                                                                             <span class="fep-dist-item" @attributes="FtAttrs(fep, variantRow.Total)">
-                                                                                <span class="fep-dist-dot" style="background: @StatColor(fep.Attribute);"></span>@fep.Attribute@(fep.Tier == 2 ? "+2" : "") @((fep.Value / variantRow.Total).ToString("0%"))
+                                                                                <span class="fep-dist-dot" style="background: @StatColor(fep.Attribute, fep.Tier);"></span>@fep.Attribute@(fep.Tier == 2 ? "+2" : "") @((fep.Value / variantRow.Total).ToString("0%"))
                                                                             </span>
                                                                         }
                                                                     </div>
@@ -739,18 +739,18 @@
 </div>
 
 @code {
-    // Fresh per-stat palette: game-recognizable hues, tuned for dark text on the light glass theme.
-    private static readonly Dictionary<string, string> StatColors = new(StringComparer.OrdinalIgnoreCase)
+    // Cediner hnh-food-book palette (FEPBar.vue): muted tier-1, brighter tier-2 per stat.
+    private static readonly Dictionary<string, (string Tier1, string Tier2)> StatColors = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["STR"] = "#f2a9a3",
-        ["AGI"] = "#b3aef0",
-        ["INT"] = "#9fd8e8",
-        ["CON"] = "#f0a9d4",
-        ["PER"] = "#f7cd9c",
-        ["CHA"] = "#a8e8bb",
-        ["DEX"] = "#f7f3a3",
-        ["WILL"] = "#d6ee9d",
-        ["PSY"] = "#cfa9f5"
+        ["STR"] = ("#BF9794", "#DF958F"),
+        ["AGI"] = ("#9995B8", "#9991DC"),
+        ["INT"] = ("#9DB7B9", "#97D6DC"),
+        ["CON"] = ("#C29AB4", "#E193C5"),
+        ["PER"] = ("#E4BF98", "#F2C28D"),
+        ["CHA"] = ("#9BEEB1", "#8EF7AA"),
+        ["DEX"] = ("#FEFDCC", "#FFFEA6"),
+        ["WILL"] = ("#E4F38F", "#EEFF9E"),
+        ["PSY"] = ("#C48DFD", "#C286FE")
     };
 
     private static readonly Dictionary<string, string> StatFullNames = new(StringComparer.OrdinalIgnoreCase)
@@ -1148,8 +1148,8 @@
 
     private decimal ScaledFep(decimal baseValue) => baseValue * (decimal)QualityMultiplier;
 
-    private static string StatColor(string attribute) =>
-        StatColors.TryGetValue(attribute, out var color) ? color : "#d8d8d8";
+    private static string StatColor(string attribute, int tier = 1) =>
+        StatColors.TryGetValue(attribute, out var c) ? (tier >= 2 ? c.Tier2 : c.Tier1) : "#d8d8d8";
 
     private string FepTitle(FoodFepDto fep)
     {
@@ -1164,7 +1164,7 @@
         ["data-ft-tier"] = fep.Tier,
         ["data-ft-value"] = ScaledFep(fep.Value).ToString("0.##"),
         ["data-ft-share"] = total > 0 ? (fep.Value / total).ToString("0%") : "—",
-        ["data-ft-color"] = StatColor(fep.Attribute)
+        ["data-ft-color"] = StatColor(fep.Attribute, fep.Tier)
     };
 
     private static string LocalIconSrc(FoodDto food) => "/" + food.ResourceName + ".png";

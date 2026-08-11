@@ -241,13 +241,6 @@
     white-space: nowrap;
 }
 
-/* +2 tier FEPs get a premium gold treatment */
-.fep-pill.tier2 {
-    border: 1px solid #c9971c;
-    box-shadow: inset 0 0 0 1px rgba(212, 160, 23, 0.55);
-    font-weight: 700;
-}
-
 /* Expanded row detail */
 .food-detail {
     background: rgba(255, 255, 255, 0.45);
@@ -726,10 +719,6 @@
     height: 100%;
 }
 
-.item-bar-seg.tier2 {
-    box-shadow: inset 0 0 0 1px #d4a017;
-}
-
 .item-eff {
     font-size: 0.66rem;
     color: var(--ck-text-muted);
@@ -914,46 +903,6 @@
 
 .variant-bar-segment {
     height: 100%;
-}
-
-/* Premium gold marking for +2 FEP segments in both bars:
-   gold ring + diagonal shine stripes (distinguishable beyond color alone),
-   plus a periodic shimmer sweep */
-.variant-bar-segment.tier2,
-.fep-bar-segment.tier2 {
-    position: relative;
-    overflow: hidden;
-    background-image: repeating-linear-gradient(135deg,
-        rgba(255, 255, 255, 0.45) 0 3px,
-        rgba(255, 255, 255, 0) 3px 6px);
-    box-shadow: inset 0 0 0 2px #d4a017;
-}
-
-.variant-bar-segment.tier2::after,
-.fep-bar-segment.tier2::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(115deg,
-        transparent 25%,
-        rgba(255, 244, 200, 0.85) 50%,
-        transparent 75%);
-    transform: translateX(-120%);
-    animation: fep-t2-shine 2.6s ease-in-out infinite;
-    pointer-events: none;
-}
-
-@keyframes fep-t2-shine {
-    0% { transform: translateX(-120%); }
-    55%, 100% { transform: translateX(120%); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .variant-bar-segment.tier2::after,
-    .fep-bar-segment.tier2::after {
-        animation: none;
-        display: none;
-    }
 }
 
 /* Written FEP distribution under the bar, e.g. "● CON 53% · ● PER+2 20%" */

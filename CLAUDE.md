@@ -1,6 +1,6 @@
 # HnH Mapper Server - Project Documentation for AI Assistants
 
-**Last Updated:** 2026-08-10
+**Last Updated:** 2026-08-11
 **Project Status:** Production-Ready (Core + Admin + Multi-Tenancy + Cookbook)
 **Tech Stack:** .NET 9, ASP.NET Core, Blazor Server, MudBlazor, SQLite, .NET Aspire, Docker
 **Current Branch:** `master`
@@ -624,6 +624,16 @@ See `deploy/SECURITY.md` for complete security checklist.
 ---
 
 ## Recent Changes
+
+### 2026-08-11: Cookbook FEP palette — Cediner two-tone
+
+**FEP stat colors on /cookbook now match Cediner's hnh-food-book** (palette from its `FEPBar.vue`):
+- `StatColors` in `Cookbook.razor` maps each stat to a `(Tier1, Tier2)` pair — muted tier-1, brighter
+  tier-2; `StatColor(attr, tier = 1)` is the single lookup (unknown keys still fall back to `#d8d8d8`).
+- Tier-aware sites (table/detail/prep-compare FEP pills, both bar types, panels-strip mini bars,
+  dist dots, hover-tooltip dot) pass `fep.Tier`; the per-stat FEP chip row uses tier-1.
+- The gold ring / diagonal-shine tier-2 marker was removed from `Cookbook.razor.css` (`.fep-pill.tier2`,
+  `.item-bar-seg.tier2`, the shimmer block); the "+2" text labels remain the non-color tier signal.
 
 ### 2026-08-10: Superadmin tenant data purge
 
