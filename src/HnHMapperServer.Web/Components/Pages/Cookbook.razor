@@ -131,11 +131,12 @@
                               Class="filter-input" />
                 @foreach (var preset in QuickPresets)
                 {
+                    var presetExpr = preset.Expr(QualityMultiplier);
                     <button type="button"
-                            class="stat-chip @(PresetActive(preset.Expr) ? "selected" : "")"
+                            class="stat-chip @(PresetActive(presetExpr) ? "selected" : "")"
                             style="--chip-color: #dfe3e6;"
-                            title="@preset.Tooltip (@preset.Expr)"
-                            @onclick="() => ApplyToolExpression(preset.Expr, toggle: true)">
+                            title="@preset.Tooltip (@presetExpr)"
+                            @onclick="() => ApplyToolExpression(presetExpr, toggle: true)">
                         @preset.Label
                     </button>
                 }
@@ -1746,11 +1747,23 @@
 
     // ----- One-click tools: pills, cells and presets compose expressions into the filter input -----
 
-    private static readonly (string Label, string Expr, string Tooltip)[] QuickPresets =
+    // Preset thresholds are percentile-derived from the real catalog (928 foods, base q10):
+    // eff median is 5 and hunger median is 1, so the old eff>=3 / hunger<=1 matched ~3/4 of all
+    // foods; half of the high-eff foods are sub-5-FEP junk, hence the substance floors. Scaled
+    // keys (total/eff) multiply by the quality multiplier at click time so each preset keeps
+    // selecting the same foods (~top slice of the catalog) at any Q input.
+    private static string Sc(double baseValue, double multiplier) =>
+        Math.Round((decimal)(baseValue * multiplier), 2)
+            .ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static readonly (string Label, Func<double, string> Expr, string Tooltip)[] QuickPresets =
     {
-        ("Efficient", "eff>=3", "FEP per hunger at least 3"),
-        ("Light", "hunger<=1", "Hunger cost at most 1"),
-        ("Feast", "total>=30", "Total FEP at least 30 at the current quality")
+        ("Efficient", m => $"eff>={Sc(5, m)} total>={Sc(8, m)}",
+            "High FEP per hunger with real substance (~top 10% of the catalog)"),
+        ("Light", m => $"hunger<=0.5 total>={Sc(3, m)}",
+            "Barely any hunger but still feeds stats (~15% of the catalog)"),
+        ("Feast", m => $"total>={Sc(15, m)}",
+            "The biggest FEP totals in the catalog (~top 5%)")
     };
 
     private void FilterByPill(FoodFepDto fep) =>
@@ -1768,37 +1781,34 @@
             + Math.Round(ScaledFep(r.FepPerHunger), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
             toggle: false);
 
+    private static bool SameShape(FepFilterCondition a, FepFilterCondition b) =>
+        a.Key == b.Key && a.Tier == b.Tier && a.IsPercent == b.IsPercent
+        && string.Equals(a.Attribute, b.Attribute, StringComparison.OrdinalIgnoreCase);
+
     private bool PresetActive(string expr)
     {
         var (parsed, _) = FepFilterParser.Parse(expr);
-        if (parsed.Count != 1)
-        {
-            return false;
-        }
-        var p = parsed[0];
-        return _allConditions.Any(c => c.Key == p.Key && c.Tier == p.Tier && c.IsPercent == p.IsPercent
-            && c.Op == p.Op && c.Value == p.Value
-            && string.Equals(c.Attribute, p.Attribute, StringComparison.OrdinalIgnoreCase));
+        return parsed.Count > 0 && parsed.All(p =>
+            _allConditions.Any(c => SameShape(c, p) && c.Op == p.Op && c.Value == p.Value));
     }
 
     /// <summary>
     /// Shared funnel for the one-click tools: replaces same-shaped conditions (same key, tier and
-    /// %-ness) wherever they live and appends the new expression to the filter input. With
-    /// <paramref name="toggle"/>, an identical existing condition is removed instead (preset chips).
+    /// %-ness) wherever they live and appends the new expression(s) to the filter input. With
+    /// <paramref name="toggle"/>, an identical existing set is removed instead (preset chips).
+    /// Multi-condition expressions ("eff>=5 total>=8") are applied as one unit.
     /// </summary>
     private void ApplyToolExpression(string expr, bool toggle)
     {
         var (parsed, _) = FepFilterParser.Parse(expr);
-        if (parsed.Count != 1)
+        if (parsed.Count == 0)
         {
             return;
         }
-        var p = parsed[0];
 
-        var sameShape = _allConditions.Where(c => c.Key == p.Key && c.Tier == p.Tier
-            && c.IsPercent == p.IsPercent
-            && string.Equals(c.Attribute, p.Attribute, StringComparison.OrdinalIgnoreCase)).ToList();
-        var identicalExists = sameShape.Any(c => c.Op == p.Op && c.Value == p.Value);
+        var sameShape = _allConditions.Where(c => parsed.Any(p => SameShape(c, p))).ToList();
+        var identicalExists = parsed.All(p =>
+            _allConditions.Any(c => SameShape(c, p) && c.Op == p.Op && c.Value == p.Value));
 
         var s = _search;
         var f = _filterText;

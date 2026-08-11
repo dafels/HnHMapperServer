@@ -680,8 +680,15 @@ mixed with free text (`meat str>50% int2>15`):
   filter input): master-row FEP pills (`str2>=8`, tier always explicit; their hover card gains a
   `data-ft-hint` line via `FtAttrs(..., clickable: true)` + `fep-tooltip.js`), Total and
   FEP/Hunger cell values (`total>=…` / `eff>=…`, "—" cells inert), and the "Quick" presets
-  (Efficient `eff>=3`, Light `hunger<=1`, Feast `total>=30`) that toggle: an identical existing
-  condition is removed, `.selected` marks active. Tool values are rounded to 2 dp and
+  that toggle: an identical existing condition set is removed, `.selected` marks active. Preset
+  thresholds are **percentile-derived from the real catalog** (2026-08-11 analysis of 928 foods,
+  base q10: eff median 5, hunger median 1, total median 4 — the original guesses eff>=3 /
+  hunger<=1 matched ~3/4 of the catalog, and half the high-eff foods are sub-5-FEP junk):
+  Efficient `eff>=5 total>=8` (~10.7%), Light `hunger<=0.5 total>=3` (~14.9%), Feast `total>=15`
+  (~5.7%). Multi-condition presets apply/toggle as one unit via `ApplyToolExpression` (parses N
+  conditions, `SameShape` replacement). Scaled keys multiply by the quality multiplier at click
+  time (`Sc()` in `QuickPresets`), so each preset keeps selecting the same food slice at any Q;
+  hunger stays unscaled. Tool values are rounded to 2 dp and
   invariant-formatted (display strings are culture-formatted — never reuse them), so a clicked
   row always passes its own `>=` filter.
 - **Variations:** conditions also filter the per-food variations sub-table via the shared
