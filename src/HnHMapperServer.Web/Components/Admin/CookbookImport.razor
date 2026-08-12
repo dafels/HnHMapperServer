@@ -1,17 +1,21 @@
 @using HnHMapperServer.Core.DTOs
+@using Microsoft.JSInterop
 @inject IHttpClientFactory HttpClientFactory
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
 @inject ILogger<CookbookImport> Logger
 @inject TenantContextService TenantContext
+@inject IJSRuntime JS
 
 <MudStack Spacing="3">
     <MudAlert Severity="Severity.Info" Dense="true">
         <MudIcon Icon="@Icons.Material.Filled.Info" Size="Size.Small" Class="me-1" />
         Select <strong>food-info2.json</strong> to seed your organization's cookbook with all recipe
         variations (groups/satiations come from bundled wiki data; Ctrl-click a newer
-        <strong>wiki-food-data.json</strong> to override). Importing replaces the whole catalog —
-        game clients extend it afterwards.
+        <strong>wiki-food-data.json</strong> to override). Importing <strong>replaces the whole
+        catalog</strong> (you will be asked to confirm) — game clients extend it afterwards. The same
+        button also restores a previously <strong>exported cookbook JSON</strong>, including everything
+        players' clients contributed.
     </MudAlert>
 
     <MudPaper Elevation="0" Class="pa-3 mud-background-gray">
@@ -62,6 +66,22 @@
                 }
 
                 <MudSpacer />
+
+                <MudButton Variant="Variant.Outlined"
+                           Color="Color.Primary"
+                           StartIcon="@Icons.Material.Filled.Download"
+                           Disabled="@(_isExporting || _isImporting || _status == null || _status.FoodCount == 0)"
+                           OnClick="ExportCookbookAsync">
+                    @if (_isExporting)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                        <span>Exporting...</span>
+                    }
+                    else
+                    {
+                        <span>Export cookbook</span>
+                    }
+                </MudButton>
 
                 <MudButton Variant="Variant.Outlined"
                            Color="Color.Error"
@@ -119,6 +139,7 @@
     private CookbookStatusDto? _status;
     private bool _isImporting;
     private bool _isClearing;
+    private bool _isExporting;
     private CookbookImportResultDto? _lastResult;
 
     protected override async Task OnInitializedAsync()
@@ -171,6 +192,11 @@
             return;
         }
 
+        if (!await ConfirmReplaceAsync(foodsFile))
+        {
+            return;
+        }
+
         _isImporting = true;
         _lastResult = null;
 
@@ -203,6 +229,87 @@
         finally
         {
             _isImporting = false;
+        }
+    }
+
+    /// <summary>
+    /// Imports are wipe-and-replace — when the catalog holds anything, make the admin
+    /// acknowledge exactly what is about to be deleted before any upload starts.
+    /// Day-one seeding into an empty catalog destroys nothing and asks nothing.
+    /// </summary>
+    private async Task<bool> ConfirmReplaceAsync(IBrowserFile foodsFile)
+    {
+        if (_status == null || _status.FoodCount == 0)
+        {
+            return true;
+        }
+
+        // Filename heuristic only, to pick the right wording (the server detects the
+        // format authoritatively): our export downloads are named cookbook-{tenant}-{stamp}.json.
+        var looksLikeSnapshot = foodsFile.Name.StartsWith("cookbook-", StringComparison.OrdinalIgnoreCase);
+
+        var consequence = looksLikeSnapshot
+            ? "The selected file looks like a <strong>cookbook export</strong>: the catalog is restored " +
+              "exactly as it was when that file was exported — including the player contributions it " +
+              "carries. <strong>Anything contributed after that export is lost.</strong>"
+            : "<strong>Everything players' clients have contributed since the last import is lost</strong> — " +
+              "extra recipe variations, world tags and contributor credits cannot be restored from a game " +
+              "data dump. Use <em>Export cookbook</em> first if you want a backup.";
+
+        var confirmed = await DialogService.ShowMessageBox(
+            "Replace the entire cookbook?",
+            (MarkupString)($"Importing <strong>{System.Net.WebUtility.HtmlEncode(foodsFile.Name)}</strong> " +
+                           $"permanently deletes the current catalog — <strong>{_status.FoodCount} foods</strong> " +
+                           $"and <strong>{_status.VariantCount:N0} recipe variations</strong> — and replaces it " +
+                           $"with the file's contents.<br /><br />{consequence}<br /><br />" +
+                           "Panels and favorites are kept: their entries show as grayed out until matching " +
+                           "foods come back."),
+            yesText: "Replace catalog",
+            cancelText: "Cancel");
+
+        return confirmed == true;
+    }
+
+    /// <summary>Fetches the export server-side and hands it to the browser as a file download.</summary>
+    private async Task ExportCookbookAsync()
+    {
+        if (_isExporting || string.IsNullOrEmpty(_tenantId))
+        {
+            return;
+        }
+
+        _isExporting = true;
+        try
+        {
+            // APIUpload client: the default API client's resilience handler would time
+            // out and retry a multi-MB export at 10s (same reason the purge dialog uses it).
+            var client = HttpClientFactory.CreateClient("APIUpload");
+            using var response = await client.GetAsync(
+                $"/api/tenants/{Uri.EscapeDataString(_tenantId)}/cookbook/export",
+                HttpCompletionOption.ResponseHeadersRead);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Snackbar.Add($"Export failed: HTTP {(int)response.StatusCode}", Severity.Error);
+                return;
+            }
+
+            var fileName = response.Content.Headers.ContentDisposition?.FileNameStar
+                ?? response.Content.Headers.ContentDisposition?.FileName?.Trim('"')
+                ?? $"cookbook-{_tenantId}.json";
+
+            await using var stream = await response.Content.ReadAsStreamAsync();
+            using var streamRef = new DotNetStreamReference(stream);
+            await JS.InvokeVoidAsync("downloadFileFromStream", fileName, streamRef);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Cookbook export failed");
+            Snackbar.Add($"Export failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isExporting = false;
         }
     }
 

@@ -47,12 +47,22 @@ public interface IFoodCatalogService
     Task<List<RecipeIndexEntryDto>> GetRecipeIndexAsync(CancellationToken ct = default);
 
     /// <summary>
-    /// Wipe-and-replace import for one tenant from the raw source files.
+    /// Full portable snapshot of one tenant's catalog — every food with every recorded
+    /// recipe variation, world tags, per-world values, and contributor usernames — in
+    /// the re-importable cookbook export format.
+    /// </summary>
+    Task<CookbookExportDto> ExportAsync(string tenantId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Wipe-and-replace import for one tenant. Accepts either the raw game dump or a
+    /// cookbook export snapshot (auto-detected: the dump is a JSON array, an export is
+    /// an object carrying the CookbookExportDto format marker).
     /// </summary>
     /// <param name="foodInfoJson">
     /// food-info2.json: array of per-eat records
-    /// {itemName, resourceName, hunger, energy, feps:[{name, value}], ingredients:[{name, percentage}]}.
-    /// Deduped here by volume-normalized name ("0.5 l of X" → "X").
+    /// {itemName, resourceName, hunger, energy, feps:[{name, value}], ingredients:[{name, percentage}]},
+    /// deduped here by volume-normalized name ("0.5 l of X" → "X") — or a cookbook
+    /// export file, restored verbatim (wiki data is not consulted for those).
     /// </param>
     /// <param name="wikiJson">
     /// Optional wiki-food-data.json (object keyed by page title). When null, the wiki dump

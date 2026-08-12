@@ -1,4 +1,4 @@
-// File upload helper for Blazor Server
+// File transfer helpers for Blazor Server
 // Reads file as base64 on the client side to bypass SignalR stream issues
 
 window.readFileAsBase64 = function (inputElement) {
@@ -27,4 +27,18 @@ window.readFileAsBase64 = function (inputElement) {
 
         reader.readAsDataURL(file);
     });
+};
+
+// Streams a server-side byte stream (DotNetStreamReference) to the browser as a
+// file download. Used by admin exports (e.g. the cookbook JSON snapshot).
+window.downloadFileFromStream = async function (fileName, contentStreamReference) {
+    const arrayBuffer = await contentStreamReference.arrayBuffer();
+    const blob = new Blob([arrayBuffer]);
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName || 'download';
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
 };

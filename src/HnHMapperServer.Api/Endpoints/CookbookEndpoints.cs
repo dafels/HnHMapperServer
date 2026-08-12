@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using HnHMapperServer.Core.Constants;
 using HnHMapperServer.Core.DTOs;
 using HnHMapperServer.Infrastructure.Data;
@@ -15,6 +16,9 @@ namespace HnHMapperServer.Api.Endpoints;
 /// </summary>
 public static class CookbookEndpoints
 {
+    /// <summary>camelCase like every other API payload, compact (an export can be tens of MB).</summary>
+    private static readonly JsonSerializerOptions ExportJsonOptions = new(JsonSerializerDefaults.Web);
+
     public static void MapCookbookEndpoints(this IEndpointRouteBuilder app)
     {
         var catalog = app.MapGroup("/api/v1/cookbook")
@@ -42,6 +46,7 @@ public static class CookbookEndpoints
             .RequireAuthorization("TenantAdmin");
 
         admin.MapGet("/status", GetStatus);
+        admin.MapGet("/export", ExportCookbook);
         admin.MapPost("/import", ImportCookbook);
         admin.MapDelete("", ClearCookbook);
     }
@@ -291,9 +296,43 @@ public static class CookbookEndpoints
     }
 
     /// <summary>
+    /// GET /api/tenants/{tenantId}/cookbook/export
+    /// Downloads the tenant's catalog as a portable JSON snapshot — every food and
+    /// recorded variation with world tags and contributor usernames. The import
+    /// endpoint accepts the file back (wipe-and-replace restore).
+    /// </summary>
+    private static async Task<IResult> ExportCookbook(
+        string tenantId,
+        ClaimsPrincipal user,
+        IFoodCatalogService foodCatalogService,
+        ILogger<Program> logger)
+    {
+        if (!CanManageTenant(user, tenantId))
+        {
+            return Results.Forbid();
+        }
+
+        try
+        {
+            var export = await foodCatalogService.ExportAsync(tenantId);
+            var fileName = $"cookbook-{tenantId}-{export.ExportedAt:yyyyMMdd-HHmmss}.json";
+            return Results.File(
+                JsonSerializer.SerializeToUtf8Bytes(export, ExportJsonOptions),
+                "application/json",
+                fileName);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error exporting cookbook for tenant {TenantId}", tenantId);
+            return Results.Problem("Failed to export cookbook data");
+        }
+    }
+
+    /// <summary>
     /// POST /api/tenants/{tenantId}/cookbook/import
-    /// Multipart upload: file "foods" (food-info2.json, required) and file "wiki"
-    /// (wiki-food-data.json, optional — the bundled dump is used otherwise).
+    /// Multipart upload: file "foods" (food-info2.json OR a cookbook export snapshot,
+    /// required — auto-detected) and file "wiki" (wiki-food-data.json, optional — the
+    /// bundled dump is used otherwise; ignored for export snapshots).
     /// Replaces the tenant's entire catalog.
     /// </summary>
     private static async Task<IResult> ImportCookbook(

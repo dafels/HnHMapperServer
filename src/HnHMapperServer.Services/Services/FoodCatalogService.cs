@@ -382,6 +382,94 @@ public class FoodCatalogService : IFoodCatalogService
             .ToList();
     }
 
+    public async Task<CookbookExportDto> ExportAsync(string tenantId, CancellationToken ct = default)
+    {
+        // Explicit tenant id (admin operation) — same pattern as GetStatusAsync/ClearAsync.
+        var foods = await _dbContext.Foods.IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(f => f.TenantId == tenantId)
+            .ToListAsync(ct);
+        var variantsByFood = (await _dbContext.FoodVariants.IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(v => v.TenantId == tenantId)
+                .ToListAsync(ct))
+            .ToLookup(v => v.FoodId);
+
+        // Contributors travel as usernames, not internal user ids, so the file stays
+        // portable; import re-resolves the names against local accounts. Ids whose
+        // account is gone are dropped (they would only ever render as "unknown").
+        var contributorIds = foods
+            .Where(f => f.ContributedBy != null)
+            .Select(f => f.ContributedBy!)
+            .Concat(variantsByFood.SelectMany(g => g).SelectMany(v => v.Contributors))
+            .Distinct()
+            .ToList();
+        var contributorNames = contributorIds.Count == 0
+            ? new Dictionary<string, string>()
+            : await _dbContext.Users
+                .AsNoTracking()
+                .Where(u => contributorIds.Contains(u.Id))
+                .ToDictionaryAsync(u => u.Id, u => u.UserName ?? string.Empty, ct);
+
+        string? NameOf(string? id) =>
+            id != null && contributorNames.TryGetValue(id, out var name) && name.Length > 0 ? name : null;
+
+        var export = new CookbookExportDto
+        {
+            Format = CookbookExportDto.FormatMarker,
+            Version = CookbookExportDto.CurrentVersion,
+            ExportedAt = DateTime.UtcNow,
+            Foods = foods
+                .OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(f => new CookbookExportFoodDto
+                {
+                    Name = f.Name,
+                    ResourceName = f.ResourceName,
+                    Energy = f.Energy,
+                    Hunger = f.Hunger,
+                    WikiUrl = f.WikiUrl,
+                    RecipeText = f.RecipeText,
+                    CookingStation = f.CookingStation,
+                    AddedAt = f.ImportedAt,
+                    ContributedBy = NameOf(f.ContributedBy),
+                    Categories = f.Categories.ToList(),
+                    SatiationGroups = f.SatiationGroups.ToList(),
+                    Worlds = f.Worlds.ToList(),
+                    Feps = MapFepDtos(f.Feps),
+                    Ingredients = MapIngredientDtos(f.Ingredients),
+                    Variants = variantsByFood[f.Id]
+                        .OrderBy(v => v.IngredientSignature, StringComparer.Ordinal)
+                        .Select(v => new CookbookExportVariantDto
+                        {
+                            IngredientSignature = v.IngredientSignature,
+                            Energy = v.Energy,
+                            Hunger = v.Hunger,
+                            TimesSeen = v.TimesSeen,
+                            Contributors = v.Contributors
+                                .Select(NameOf)
+                                .Where(n => n != null)
+                                .Select(n => n!)
+                                .ToList(),
+                            Worlds = v.Worlds.ToList(),
+                            WorldValues = v.WorldValues.Select(MapWorldValueDto).ToList(),
+                            Feps = MapFepDtos(v.Feps),
+                            Ingredients = MapIngredientDtos(v.Ingredients)
+                        })
+                        .ToList()
+                })
+                .ToList()
+        };
+
+        export.FoodCount = export.Foods.Count;
+        export.VariantCount = export.Foods.Sum(f => f.Variants.Count);
+
+        _logger.LogInformation(
+            "Cookbook export for tenant {TenantId}: {Foods} foods, {Variants} variants",
+            tenantId, export.FoodCount, export.VariantCount);
+
+        return export;
+    }
+
     public async Task<CookbookImportResultDto> ImportAsync(
         Stream foodInfoJson, Stream? wikiJson, string tenantId, CancellationToken ct = default)
     {
@@ -390,7 +478,17 @@ public class FoodCatalogService : IFoodCatalogService
         List<SourceFoodRecord>? records;
         try
         {
-            records = await JsonSerializer.DeserializeAsync<List<SourceFoodRecord>>(foodInfoJson, JsonOpts, ct);
+            using var doc = await JsonDocument.ParseAsync(foodInfoJson, cancellationToken: ct);
+
+            // A cookbook export snapshot (object with a format marker) restores verbatim;
+            // the raw game dump (array of per-eat records) goes through the wiki join below.
+            if (doc.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                var snapshot = TryReadExportSnapshot(doc.RootElement, result);
+                return snapshot == null ? result : await ImportSnapshotAsync(snapshot, tenantId, result, ct);
+            }
+
+            records = doc.RootElement.Deserialize<List<SourceFoodRecord>>(JsonOpts);
         }
         catch (JsonException ex)
         {
@@ -529,6 +627,309 @@ public class FoodCatalogService : IFoodCatalogService
 
         return result;
     }
+
+    /// <summary>
+    /// Reads an object-rooted foods file as a cookbook export snapshot. Returns null
+    /// (with result errors) when the object is not one — e.g. wiki-food-data.json
+    /// uploaded as the foods file — or a newer version than this server writes.
+    /// </summary>
+    private static CookbookExportDto? TryReadExportSnapshot(JsonElement root, CookbookImportResultDto result)
+    {
+        CookbookExportDto? snapshot = null;
+        try
+        {
+            snapshot = root.Deserialize<CookbookExportDto>(JsonOpts);
+        }
+        catch (JsonException)
+        {
+            // Not export-shaped; falls through to the marker check below.
+        }
+
+        if (snapshot == null
+            || !string.Equals(snapshot.Format, CookbookExportDto.FormatMarker, StringComparison.OrdinalIgnoreCase))
+        {
+            result.Errors.Add(
+                "Unrecognized food data file: expected the game data dump (a JSON array) or a cookbook export "
+                + $"(\"format\": \"{CookbookExportDto.FormatMarker}\"). The wiki file alone cannot be imported.");
+            return null;
+        }
+
+        if (snapshot.Version > CookbookExportDto.CurrentVersion)
+        {
+            result.Errors.Add(
+                $"This cookbook export is version {snapshot.Version}, newer than this server supports "
+                + $"(version {CookbookExportDto.CurrentVersion}). Update the server before importing it.");
+            return null;
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Wipe-and-replace restore of a cookbook export snapshot: foods and variations land
+    /// verbatim (world tags, per-world values, TimesSeen, discovery dates, signatures),
+    /// contributor usernames are re-resolved to local accounts (unknown names drop).
+    /// </summary>
+    private async Task<CookbookImportResultDto> ImportSnapshotAsync(
+        CookbookExportDto snapshot, string tenantId, CookbookImportResultDto result, CancellationToken ct)
+    {
+        if (snapshot.Foods.Count == 0)
+        {
+            result.Errors.Add("The cookbook export contains no foods.");
+            return result;
+        }
+
+        var resolveUser = await BuildUsernameResolverAsync(snapshot, ct);
+        var importedAt = DateTime.UtcNow;
+        var seenNames = new HashSet<string>(StringComparer.Ordinal);
+        var entities = new List<(FoodEntity Food, List<FoodVariantEntity> Variants)>();
+
+        foreach (var food in snapshot.Foods)
+        {
+            var name = string.IsNullOrWhiteSpace(food.Name) ? string.Empty : NormalizeName(food.Name);
+            var resource = food.ResourceName?.Trim() ?? string.Empty;
+            if (name.Length is 0 or > MaxUploadNameLength
+                || resource.Length is 0 or > MaxUploadResourceLength)
+            {
+                result.Skipped++;
+                AddError(result, $"'{food.Name}': missing or oversized name/resource");
+                continue;
+            }
+
+            if (!seenNames.Add(name))
+            {
+                result.Skipped++;
+                AddError(result, $"'{name}': duplicate food name in the export");
+                continue;
+            }
+
+            var entity = new FoodEntity
+            {
+                TenantId = tenantId,
+                Name = name,
+                ResourceName = resource,
+                Energy = food.Energy,
+                Hunger = food.Hunger,
+                WikiUrl = TrimToNull(food.WikiUrl, 500),
+                RecipeText = TrimToNull(food.RecipeText, 500),
+                CookingStation = TrimToNull(food.CookingStation, 300),
+                ImportedAt = food.AddedAt == default ? importedAt : food.AddedAt,
+                ContributedBy = resolveUser(food.ContributedBy),
+                Categories = CleanStrings(food.Categories),
+                SatiationGroups = CleanStrings(food.SatiationGroups),
+                Worlds = CleanWorlds(food.Worlds),
+                Feps = MapSnapshotFeps(food.Feps),
+                Ingredients = MapSnapshotIngredients(food.Ingredients)
+            };
+
+            // Wiki-matched foods are recognizable by their page URL surviving the roundtrip.
+            if (entity.WikiUrl != null)
+            {
+                result.WikiMatched++;
+            }
+            else
+            {
+                result.Fallback++;
+            }
+
+            var variants = new List<FoodVariantEntity>();
+            var seenSignatures = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var variant in food.Variants)
+            {
+                var ingredients = MapSnapshotIngredients(variant.Ingredients);
+                // Exported signatures are kept verbatim (panels pin variants by them);
+                // recompute only when a hand-edited file lacks or overflows one.
+                var signature = variant.IngredientSignature is { Length: > 0 and <= MaxSignatureLength }
+                    ? variant.IngredientSignature
+                    : ComputeSignature(ingredients
+                        .Select(i => new SourceIngredient { Name = i.Name, Percentage = i.Percentage })
+                        .ToList());
+                if (!seenSignatures.Add(signature))
+                {
+                    continue;
+                }
+
+                variants.Add(new FoodVariantEntity
+                {
+                    TenantId = tenantId,
+                    IngredientSignature = signature,
+                    Energy = variant.Energy,
+                    Hunger = variant.Hunger,
+                    TimesSeen = Math.Max(1, variant.TimesSeen),
+                    Contributors = variant.Contributors
+                        .Select(resolveUser)
+                        .Where(id => id != null)
+                        .Select(id => id!)
+                        .Distinct()
+                        .ToList(),
+                    Worlds = CleanWorlds(variant.Worlds),
+                    WorldValues = MapSnapshotWorldValues(variant.WorldValues),
+                    Feps = MapSnapshotFeps(variant.Feps),
+                    Ingredients = ingredients
+                });
+            }
+
+            entities.Add((entity, variants));
+        }
+
+        if (entities.Count == 0)
+        {
+            result.Errors.Add("No importable foods found in the cookbook export.");
+            return result;
+        }
+
+        await using (var transaction = await _dbContext.Database.BeginTransactionAsync(ct))
+        {
+            // ExecuteDelete bypasses query filters — scope explicitly to the target tenant.
+            await _dbContext.FoodVariants.IgnoreQueryFilters()
+                .Where(v => v.TenantId == tenantId)
+                .ExecuteDeleteAsync(ct);
+            await _dbContext.Foods.IgnoreQueryFilters()
+                .Where(f => f.TenantId == tenantId)
+                .ExecuteDeleteAsync(ct);
+
+            _dbContext.Foods.AddRange(entities.Select(e => e.Food));
+            await _dbContext.SaveChangesAsync(ct);
+
+            // Variants reference the now-assigned food ids; insert in batches to keep
+            // the change tracker small (~49k rows).
+            var batch = new List<FoodVariantEntity>(VariantBatchSize);
+            foreach (var (food, variants) in entities)
+            {
+                foreach (var variant in variants)
+                {
+                    variant.FoodId = food.Id;
+                    batch.Add(variant);
+                    result.Variants++;
+
+                    if (batch.Count >= VariantBatchSize)
+                    {
+                        await FlushVariantBatchAsync(batch, ct);
+                    }
+                }
+            }
+
+            await FlushVariantBatchAsync(batch, ct);
+            await transaction.CommitAsync(ct);
+        }
+
+        _cache.Remove(CatalogCacheKey(tenantId));
+        _cache.Remove(ConditionStatsCacheKey(tenantId));
+        result.Imported = entities.Count;
+
+        _logger.LogInformation(
+            "Cookbook export restored for tenant {TenantId}: {Imported} foods, {Variants} variants ({Skipped} skipped) from a snapshot of {ExportedAt:u}",
+            tenantId, result.Imported, result.Variants, result.Skipped, snapshot.ExportedAt);
+
+        return result;
+    }
+
+    /// <summary>Maps exported contributor usernames back to local account ids (unknown names drop).</summary>
+    private async Task<Func<string?, string?>> BuildUsernameResolverAsync(CookbookExportDto snapshot, CancellationToken ct)
+    {
+        var names = snapshot.Foods
+            .Select(f => f.ContributedBy)
+            .Concat(snapshot.Foods.SelectMany(f => f.Variants).SelectMany(v => v.Contributors))
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n!.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (names.Count == 0)
+        {
+            return _ => null;
+        }
+
+        var users = await _dbContext.Users
+            .AsNoTracking()
+            .Where(u => u.NormalizedUserName != null && names.Contains(u.NormalizedUserName))
+            .Select(u => new { u.Id, u.NormalizedUserName })
+            .ToListAsync(ct);
+
+        var idByName = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var user in users)
+        {
+            idByName.TryAdd(user.NormalizedUserName!, user.Id);
+        }
+
+        return name => !string.IsNullOrWhiteSpace(name)
+                       && idByName.TryGetValue(name.Trim().ToUpperInvariant(), out var id)
+            ? id
+            : null;
+    }
+
+    private static string? TrimToNull(string? value, int maxLength)
+    {
+        var trimmed = value?.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            return null;
+        }
+
+        return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength];
+    }
+
+    private static List<string> CleanStrings(List<string>? values) =>
+        (values ?? new List<string>())
+            .Select(v => v?.Trim())
+            .Where(v => !string.IsNullOrEmpty(v))
+            .Select(v => v!)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+    /// <summary>Genus hashes filtered through the same normalization as client uploads.</summary>
+    private static List<string> CleanWorlds(List<string>? worlds) =>
+        (worlds ?? new List<string>())
+            .Select(GameWorlds.Normalize)
+            .Where(w => w != null)
+            .Select(w => w!)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+    private static List<FoodFep> MapSnapshotFeps(List<FoodFepDto>? feps) =>
+        (feps ?? new List<FoodFepDto>())
+            .Where(f => !string.IsNullOrWhiteSpace(f.Attribute)
+                        && StatOrder.ContainsKey(f.Attribute.Trim())
+                        && f.Tier is 1 or 2)
+            .Select(f => new FoodFep { Attribute = f.Attribute.Trim().ToUpperInvariant(), Tier = f.Tier, Value = f.Value })
+            .OrderBy(f => StatOrder[f.Attribute])
+            .ThenBy(f => f.Tier)
+            .ToList();
+
+    private static List<FoodIngredient> MapSnapshotIngredients(List<FoodIngredientDto>? ingredients) =>
+        (ingredients ?? new List<FoodIngredientDto>())
+            .Where(i => !string.IsNullOrWhiteSpace(i.Name) && i.Name.Length <= MaxUploadNameLength)
+            .Select(i => new FoodIngredient { Name = i.Name.Trim(), Percentage = i.Percentage })
+            .ToList();
+
+    private static List<FoodVariantWorldValue> MapSnapshotWorldValues(List<FoodWorldValueDto>? values)
+    {
+        var result = new List<FoodVariantWorldValue>();
+        foreach (var value in values ?? new List<FoodWorldValueDto>())
+        {
+            var genus = GameWorlds.Normalize(value.Genus);
+            if (genus == null || result.Any(w => w.Genus == genus))
+            {
+                continue;
+            }
+
+            result.Add(new FoodVariantWorldValue
+            {
+                Genus = genus,
+                Energy = value.Energy,
+                Hunger = value.Hunger,
+                Feps = MapWorldFeps(MapSnapshotFeps(value.Feps))
+            });
+        }
+
+        return result;
+    }
+
+    private static List<FoodFepDto> MapFepDtos(List<FoodFep> feps) =>
+        feps.Select(f => new FoodFepDto { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value }).ToList();
+
+    private static List<FoodIngredientDto> MapIngredientDtos(List<FoodIngredient> ingredients) =>
+        ingredients.Select(i => new FoodIngredientDto { Name = i.Name, Percentage = i.Percentage }).ToList();
 
     public async Task<FoodUploadResultDto> IngestClientRecordsAsync(
         string tenantId, string? contributedByUserId, List<FoodUploadRecordDto> records, CancellationToken ct = default)

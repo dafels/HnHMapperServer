@@ -625,6 +625,37 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-12: Cookbook export/import (tenant-admin)
+
+**The cookbook can be exported as a re-importable JSON snapshot** — the piece a food-info2 re-import
+can never restore is the player-contributed data (variants, world tags, TimesSeen), and this preserves it.
+- **Format:** `CookbookExportDto` in `src/HnHMapperServer.Core/DTOs/CookbookExportDtos.cs` — object with
+  `"format": "hnh-cookbook-export"` + `version` (currently 1), then `foods[]` each carrying all food fields
+  (incl. `addedAt` = discovery date, worlds, categories/satiations, wiki fields) and nested `variants[]`
+  (signature, TimesSeen, worlds, per-world values, feps, ingredients). **Contributors travel as usernames,
+  not user ids** (portable per the data-files rule); import re-resolves them by `NormalizedUserName`,
+  unknown names drop. `Format` is deliberately NOT defaulted to the marker in the DTO — detection
+  deserializes arbitrary object files into it and a default would misdetect (e.g. wiki-food-data.json).
+- **Endpoints:** `GET /api/tenants/{tenantId}/cookbook/export` (TenantAdmin policy + own-tenant guard,
+  same as status/import/clear) returns the file download. Import is **the existing**
+  `POST .../cookbook/import` — `FoodCatalogService.ImportAsync` sniffs the root: JSON array = game dump
+  (legacy path unchanged), object = export snapshot (`TryReadExportSnapshot` → `ImportSnapshotAsync`,
+  wipe-and-replace like the legacy path, wiki file ignored, signatures kept verbatim so panel/favorite
+  pins survive, `ImportedAt` restored from `addedAt`). Newer `version` than the server knows → error, no wipe.
+- **UI:** Admin → Cookbook tab gained an "Export cookbook" button (disabled while empty); the import
+  file-picker accepts an export file through the same button (auto-detected). Download goes server-side
+  via the `APIUpload` HttpClient (default `API` client would 10s-timeout) then to the browser through
+  `DotNetStreamReference` + `window.downloadFileFromStream` (added to `wwwroot/js/file-upload-helper.js`).
+  **Import stays wipe-and-replace by design** (restore/reseed semantics; merge would need conflict rules),
+  but any import into a non-empty catalog now requires a confirmation dialog (`ConfirmReplaceAsync`)
+  stating the exact food/variation counts being deleted — dump-flavored wording ("contributions cannot
+  be restored, export first") vs snapshot-flavored ("restored as of that export") picked by filename
+  heuristic (`cookbook-*.json`); the server still detects the format authoritatively. Empty catalog
+  (day-one seed) imports without a prompt.
+- **Tests:** `FoodCatalogServiceExportImportTests` (real SQLite — ExecuteDelete + unique indexes):
+  roundtrip fidelity, tenant scoping, contributor username resolution/drop, wiki-like-object rejection
+  without touching the catalog, newer-version rejection, legacy array path still working.
+
 ### 2026-08-12: Cookbook world (genus) filter
 
 **Foods are tagged with the game worlds they were uploaded from, and /cookbook can filter by world.**
