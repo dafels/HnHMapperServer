@@ -625,6 +625,53 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-12: Cookbook world (genus) filter
+
+**Foods are tagged with the game worlds they were uploaded from, and /cookbook can filter by world.**
+Both clients send a `genus` world hash per food record (Hurricane from `GameUI.genus`, KamiClient from
+`ui.sess.user.genus`); the server used to drop it.
+- **Registry:** `GameWorlds` in `src/HnHMapperServer.Core/Cookbook/GameWorlds.cs` — code-constant list of
+  known worlds (`c646473983afec09` = W16, `b7c199a4557503a8` = W16.1). **When W16.2 launches, add its
+  genus hash + next Order there (one line) and deploy** — until then its uploads still tag/filter, shown
+  as a shortened hash. `Normalize()` (trim, reject >64 chars), `DisplayName()`, `OrderOf()` (-1 unknown).
+- **Data:** `Foods.Worlds` AND `FoodVariants.Worlds` — JSON string-list columns like `SatiationGroups`
+  (migrations `AddFoodWorlds`, `AddVariantWorlds`), appended (deduped) in `IngestClientRecordsAsync`
+  from `upload.Genus` on both the food and the exact variation (new + re-upload paths).
+  `SourceFoodRecord` deliberately unchanged (import files have no genus). Empty list = untagged
+  (admin imports + all pre-feature data; the user chose no backfill). Admin re-import wipes foods, so
+  world tags reset and re-accumulate from uploads.
+- **Per-world values:** `FoodVariants.WorldValues` (migration `AddVariantWorldValues`) — owned-JSON list
+  `FoodVariantWorldValue {Genus, Energy, Hunger, Feps[]}` holding each world's representative snapshot
+  (lowest FEP total within that world, the same closest-to-base heuristic; a higher re-upload never
+  overwrites it). The plain variant columns stay the all-worlds merge. Food-level per-world values are
+  NOT stored — `GetCatalogAsync` derives them (min-total across the food's variant snapshots) and ships
+  them as `FoodDto.WorldValues`, plus `WorldVariantCounts`/`UntaggedVariantCount` (the catalog build now
+  fetches variants whole instead of a GroupBy count — cached per tenant as before). With a world chip
+  selected the UI shows world-effective values everywhere (master cells/pills/sort, FEP breakdown,
+  prep-compare, variations table, threshold conditions via `TargetOf`): `RebuildRows()` re-derives every
+  `FoodRow`/`VariantRow` from raw DTOs on world change (`SetWorld` is the only mutation path), with the
+  canonical values as fallback where a world has no snapshot. `GET /api/v1/cookbook/filter-matches`
+  gained `&world=` (genus or `untagged`, see `GameWorlds.UntaggedSentinel`) so the variant-aware match
+  counts evaluate world-effective values and count only the selected bucket; the "N recipes" hint and
+  the variations title show the bucket count (`WorldVariantCount`).
+- **UI:** "World" chip row on /cookbook after Prep (chips = worlds present in the catalog, newest known
+  first, then unknown hashes, + an "Untagged" chip). Single-select facet composing with search, FEP
+  threshold conditions, satiation/prep/stat chips and panel filter via `Filtered`/`CountBase` (new
+  `includeWorld` flag; world chip counts ignore their own row's selection like every facet). Selected
+  world appears in the active-filters row and is cleared by Clear-all/ClearFilters. **Default selection =
+  newest known world that has data** (`??=` in `LoadCatalogAsync`; null → no filter before any tagged
+  uploads exist, so the page isn't empty on day one). Chip colors: `.stat-chip.world` #cfd9ec,
+  `.untagged` #dfe3e6. All known-world chips render even at 0 foods (disabled + `.empty`; a selected
+  chip stays enabled so it can be deselected). The variations sub-table follows the selected world with
+  the same bucket semantics (`FilteredVariants`, skipped while a focus chip pins a variant), and tagged
+  variant rows show a `world-tag` ("🌐 W16.1 +N", full hashes in the tooltip).
+- **Deliberately NOT world-scoped:** variant identity (one row per `FoodId`+signature across worlds —
+  per-world identity would break signature-keyed favorites/panels); panels/focus (name-keyed, bypass
+  all filters — a panel chip can surface a food from another bucket); wiki-derived data (canonical,
+  world-agnostic); the food's stored headline columns (creation-time wiki/first-upload values — the
+  world view overrides them via the derived `WorldValues` instead).
+- Tests: `GameWorldsTests` (Core). Ingestion/UI verified against the dev DB.
+
 ### 2026-08-11: Glassmorphism white-flash fix (app.css)
 
 **White band flashing below glass containers on hover** (cookbook toolbar, panels bar, appbar — anywhere

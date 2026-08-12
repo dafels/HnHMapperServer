@@ -3,16 +3,19 @@ using System;
 using HnHMapperServer.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace HnHMapperServer.Infrastructure.Migrations
+namespace HnHMapperServer.Infrastructure.Data.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260812181606_AddVariantWorlds")]
+    partial class AddVariantWorlds
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.10");
@@ -2046,72 +2049,9 @@ namespace HnHMapperServer.Infrastructure.Migrations
                                 .HasForeignKey("FoodVariantEntityId");
                         });
 
-                    b.OwnsMany("HnHMapperServer.Infrastructure.Data.FoodVariantWorldValue", "WorldValues", b1 =>
-                        {
-                            b1.Property<int>("FoodVariantEntityId")
-                                .HasColumnType("INTEGER");
-
-                            b1.Property<int>("__synthesizedOrdinal")
-                                .ValueGeneratedOnAddOrUpdate()
-                                .HasColumnType("INTEGER");
-
-                            b1.Property<int>("Energy")
-                                .HasColumnType("INTEGER");
-
-                            b1.Property<string>("Genus")
-                                .IsRequired()
-                                .HasColumnType("TEXT");
-
-                            b1.Property<decimal>("Hunger")
-                                .HasColumnType("TEXT");
-
-                            b1.HasKey("FoodVariantEntityId", "__synthesizedOrdinal");
-
-                            b1.ToTable("FoodVariants");
-
-                            b1.ToJson("WorldValues");
-
-                            b1.WithOwner()
-                                .HasForeignKey("FoodVariantEntityId");
-
-                            b1.OwnsMany("HnHMapperServer.Infrastructure.Data.FoodWorldFep", "Feps", b2 =>
-                                {
-                                    b2.Property<int>("FoodVariantWorldValueFoodVariantEntityId")
-                                        .HasColumnType("INTEGER");
-
-                                    b2.Property<int>("FoodVariantWorldValue__synthesizedOrdinal")
-                                        .HasColumnType("INTEGER");
-
-                                    b2.Property<int>("__synthesizedOrdinal")
-                                        .ValueGeneratedOnAddOrUpdate()
-                                        .HasColumnType("INTEGER");
-
-                                    b2.Property<string>("Attribute")
-                                        .IsRequired()
-                                        .HasColumnType("TEXT");
-
-                                    b2.Property<int>("Tier")
-                                        .HasColumnType("INTEGER");
-
-                                    b2.Property<decimal>("Value")
-                                        .HasColumnType("TEXT");
-
-                                    b2.HasKey("FoodVariantWorldValueFoodVariantEntityId", "FoodVariantWorldValue__synthesizedOrdinal", "__synthesizedOrdinal");
-
-                                    b2.ToTable("FoodVariants");
-
-                                    b2.WithOwner()
-                                        .HasForeignKey("FoodVariantWorldValueFoodVariantEntityId", "FoodVariantWorldValue__synthesizedOrdinal");
-                                });
-
-                            b1.Navigation("Feps");
-                        });
-
                     b.Navigation("Feps");
 
                     b.Navigation("Ingredients");
-
-                    b.Navigation("WorldValues");
                 });
 
             modelBuilder.Entity("HnHMapperServer.Infrastructure.Data.GridDataEntity", b =>

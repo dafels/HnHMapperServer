@@ -37,7 +37,7 @@ public interface IFoodCatalogService
     /// quality, with per-food matching-variation counts. Empty when the expression
     /// contains no valid conditions.
     /// </summary>
-    Task<List<FoodConditionMatchDto>> GetConditionMatchesAsync(string expression, int quality, CancellationToken ct = default);
+    Task<List<FoodConditionMatchDto>> GetConditionMatchesAsync(string expression, int quality, string? world = null, CancellationToken ct = default);
 
     /// <summary>
     /// Returns the wiki recipe line for every known craftable — including intermediates

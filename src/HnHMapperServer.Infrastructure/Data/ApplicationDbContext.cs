@@ -952,7 +952,7 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
             entity.HasIndex(e => new { e.TenantId, e.Name }).IsUnique();
 
             // Feps/Ingredients are owned collections stored as JSON columns;
-            // Categories/SatiationGroups are primitive collections (JSON TEXT).
+            // Categories/SatiationGroups/Worlds are primitive collections (JSON TEXT).
             entity.OwnsMany(e => e.Feps, b => b.ToJson());
             entity.OwnsMany(e => e.Ingredients, b => b.ToJson());
 
@@ -981,6 +981,12 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
 
             entity.OwnsMany(e => e.Feps, b => b.ToJson());
             entity.OwnsMany(e => e.Ingredients, b => b.ToJson());
+            // Per-world representative values: JSON column with nested FEP lists.
+            entity.OwnsMany(e => e.WorldValues, b =>
+            {
+                b.ToJson();
+                b.OwnsMany(w => w.Feps);
+            });
 
             entity.HasOne<FoodEntity>()
                 .WithMany()
@@ -2235,6 +2241,12 @@ public sealed class FoodEntity
     /// <summary>In-game satiation groups this food drains, e.g. ["Meat", "Mushrooms"].</summary>
     public List<string> SatiationGroups { get; set; } = new();
 
+    /// <summary>
+    /// Genus hashes of the game worlds this food was uploaded from (e.g. "b7c199a4557503a8" = W16.1).
+    /// Empty = untagged: admin-imported or uploaded before world tagging existed.
+    /// </summary>
+    public List<string> Worlds { get; set; } = new();
+
     public List<FoodFep> Feps { get; set; } = new();
 
     public List<FoodIngredient> Ingredients { get; set; } = new();
@@ -2344,7 +2356,43 @@ public sealed class FoodVariantEntity
     /// </summary>
     public List<string> Contributors { get; set; } = new();
 
+    /// <summary>
+    /// Genus hashes of the game worlds this exact variation was uploaded from
+    /// (see GameWorlds). Empty = untagged (imports and pre-tagging uploads).
+    /// </summary>
+    public List<string> Worlds { get; set; } = new();
+
+    /// <summary>
+    /// Per-world representative values (lowest observed FEP total within that world —
+    /// the same closest-to-base heuristic as the merged columns, world-scoped).
+    /// The plain Feps/Hunger/Energy columns remain the all-worlds merge.
+    /// </summary>
+    public List<FoodVariantWorldValue> WorldValues { get; set; } = new();
+
     public List<FoodFep> Feps { get; set; } = new();
 
     public List<FoodIngredient> Ingredients { get; set; } = new();
+}
+
+/// <summary>One world's representative values of a variation, owned by <see cref="FoodVariantEntity"/> (stored as JSON).</summary>
+public sealed class FoodVariantWorldValue
+{
+    /// <summary>Genus hash of the world (see GameWorlds in Core).</summary>
+    public string Genus { get; set; } = string.Empty;
+
+    public int Energy { get; set; }
+
+    public decimal Hunger { get; set; }
+
+    public List<FoodWorldFep> Feps { get; set; } = new();
+}
+
+/// <summary>One FEP line inside <see cref="FoodVariantWorldValue"/> (nested JSON).</summary>
+public sealed class FoodWorldFep
+{
+    public string Attribute { get; set; } = string.Empty;
+
+    public int Tier { get; set; }
+
+    public decimal Value { get; set; }
 }

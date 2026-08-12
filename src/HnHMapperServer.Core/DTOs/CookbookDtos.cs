@@ -38,12 +38,31 @@ public class FoodDto
     /// <summary>In-game satiation groups the food drains, e.g. ["Meat", "Mushrooms"].</summary>
     public List<string> SatiationGroups { get; set; } = new();
 
+    /// <summary>
+    /// Genus hashes of the game worlds this food was uploaded from (see GameWorlds).
+    /// Empty = untagged: admin-imported or uploaded before world tagging existed.
+    /// </summary>
+    public List<string> Worlds { get; set; } = new();
+
+    /// <summary>
+    /// Per-world representative values of this food, derived from its variations'
+    /// world snapshots (lowest FEP total within each world). The UI shows these
+    /// instead of the canonical Feps/Hunger/Energy while that world is selected.
+    /// </summary>
+    public List<FoodWorldValueDto> WorldValues { get; set; } = new();
+
     public List<FoodFepDto> Feps { get; set; } = new();
 
     public List<FoodIngredientDto> Ingredients { get; set; } = new();
 
     /// <summary>Number of distinct recorded recipe variations (1 = only the headline recipe).</summary>
     public int VariantCount { get; set; }
+
+    /// <summary>Distinct variations recorded per world (genus hash → count).</summary>
+    public Dictionary<string, int> WorldVariantCounts { get; set; } = new();
+
+    /// <summary>Distinct variations with no world tag (imports and pre-tagging uploads).</summary>
+    public int UntaggedVariantCount { get; set; }
 
     /// <summary>Username of the player whose client upload added this food; NULL for imports.</summary>
     public string? ContributedByName { get; set; }
@@ -179,9 +198,34 @@ public class FoodVariantDto
     /// <summary>Usernames of everyone who uploaded this variation (empty for imported data).</summary>
     public List<string> ContributorNames { get; set; } = new();
 
+    /// <summary>
+    /// Genus hashes of the game worlds this exact variation was uploaded from
+    /// (see GameWorlds). Empty = untagged (imports and pre-tagging uploads).
+    /// </summary>
+    public List<string> Worlds { get; set; } = new();
+
+    /// <summary>
+    /// Per-world representative values (lowest observed FEP total within that world).
+    /// The plain Feps/Hunger/Energy stay the all-worlds merge.
+    /// </summary>
+    public List<FoodWorldValueDto> WorldValues { get; set; } = new();
+
     public List<FoodFepDto> Feps { get; set; } = new();
 
     public List<FoodIngredientDto> Ingredients { get; set; } = new();
+}
+
+/// <summary>Representative values of a food or variation within one game world.</summary>
+public class FoodWorldValueDto
+{
+    /// <summary>Genus hash of the world (see GameWorlds).</summary>
+    public string Genus { get; set; } = string.Empty;
+
+    public int Energy { get; set; }
+
+    public decimal Hunger { get; set; }
+
+    public List<FoodFepDto> Feps { get; set; } = new();
 }
 
 /// <summary>
@@ -266,7 +310,7 @@ public class FoodUploadRecordDto
     /// <summary>Sent by KamiClient only; currently stored as-recorded (not used for normalization).</summary>
     public decimal? Quality { get; set; }
 
-    /// <summary>Game world identifier some clients send; ignored.</summary>
+    /// <summary>Game world identifier some clients send; recorded on the food (see GameWorlds).</summary>
     public string? Genus { get; set; }
 
     public List<FoodUploadIngredientDto>? Ingredients { get; set; }

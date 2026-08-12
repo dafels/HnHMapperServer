@@ -114,6 +114,31 @@
                     </button>
                 </div>
             }
+            @if (_allWorlds.Count > 0)
+            {
+                <div class="stat-chips">
+                    <span class="chips-label">World</span>
+                    @foreach (var world in _allWorlds)
+                    {
+                        var count = WorldCount(world);
+                        <button type="button"
+                                class="stat-chip world @(_selectedWorld == world ? "selected" : "") @(count == 0 ? "empty" : "")"
+                                disabled="@(count == 0 && _selectedWorld != world)"
+                                title="@($"{WorldLabel(world)} ({world}): {count} foods")"
+                                @onclick="() => ToggleWorld(world)">
+                            @WorldLabel(world)<span class="stat-chip-count">@count</span>
+                        </button>
+                    }
+                    @{ var untaggedCount = WorldCount(UntaggedWorldKey); }
+                    <button type="button"
+                            class="stat-chip world untagged @(_selectedWorld == UntaggedWorldKey ? "selected" : "") @(untaggedCount == 0 ? "empty" : "")"
+                            disabled="@(untaggedCount == 0 && _selectedWorld != UntaggedWorldKey)"
+                            title="Foods without world data (imports and pre-tagging uploads): @untaggedCount"
+                            @onclick="() => ToggleWorld(UntaggedWorldKey)">
+                        @UntaggedWorldKey<span class="stat-chip-count">@untaggedCount</span>
+                    </button>
+                </div>
+            }
             <div class="stat-chips filter-input-row">
                 <span class="chips-label">Filter</span>
                 <MudTextField T="string"
@@ -194,6 +219,15 @@
                               title="Selected preparation: @_selectedPrep — click to clear"
                               @onclick="() => _selectedPrep = null">
                             @_selectedPrep<span class="stat-chip-count">&times;</span>
+                        </span>
+                    }
+                    @if (_selectedWorld != null)
+                    {
+                        <span class="stat-chip filter-chip"
+                              style="--chip-color: @(_selectedWorld == UntaggedWorldKey ? "#dfe3e6" : "#cfd9ec");"
+                              title="Selected world: @WorldLabel(_selectedWorld) — click to clear"
+                              @onclick="() => SetWorld(null)">
+                            @WorldLabel(_selectedWorld)<span class="stat-chip-count">&times;</span>
                         </span>
                     }
                     @foreach (var condition in _allConditions)
@@ -417,10 +451,10 @@
                         </MudTh>
                         <MudTh>Satiations</MudTh>
                         <MudTh Style="text-align: right;">
-                            <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.Food.Energy)">Energy</MudTableSortLabel>
+                            <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.EffectiveEnergy)">Energy</MudTableSortLabel>
                         </MudTh>
                         <MudTh Style="text-align: right;">
-                            <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.Food.Hunger)">Hunger</MudTableSortLabel>
+                            <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.EffectiveHunger)">Hunger</MudTableSortLabel>
                         </MudTh>
                         @if (_showStatColumns)
                         {
@@ -482,7 +516,8 @@
                                 {
                                     <span class="prep-badge">@context.Prep</span>
                                 }
-                                @if (context.Food.VariantCount > 1)
+                                @{ var shownVariantCount = WorldVariantCount(context); }
+                                @if (shownVariantCount > 1)
                                 {
                                     var conditionMatch = _allConditions.Count > 0 && _serverMatches != null
                                         ? _serverMatches.GetValueOrDefault(context.Food.Id)
@@ -491,12 +526,12 @@
                                     {
                                         <span class="variant-hint"
                                               title="Recipe variations matching the active filters">
-                                            @conditionMatch.MatchingVariants of @context.Food.VariantCount recipes
+                                            @conditionMatch.MatchingVariants of @shownVariantCount recipes
                                         </span>
                                     }
                                     else
                                     {
-                                        <span class="variant-hint">@context.Food.VariantCount recipes</span>
+                                        <span class="variant-hint">@shownVariantCount recipes</span>
                                     }
                                 }
                                 @if (context.Food.ContributedByName != null)
@@ -522,8 +557,8 @@
                                 <span class="detail-muted">—</span>
                             }
                         </MudTd>
-                        <MudTd Style="text-align: right;">@context.Food.Energy</MudTd>
-                        <MudTd Style="text-align: right;">@context.Food.Hunger.ToString("0.##")</MudTd>
+                        <MudTd Style="text-align: right;">@context.EffectiveEnergy</MudTd>
+                        <MudTd Style="text-align: right;">@context.EffectiveHunger.ToString("0.##")</MudTd>
                         @if (_showStatColumns)
                         {
                             foreach (var stat in StatOrderList)
@@ -543,7 +578,7 @@
                         {
                             <MudTd>
                                 <div class="fep-pills">
-                                    @foreach (var fep in context.Food.Feps)
+                                    @foreach (var fep in context.EffectiveFeps)
                                     {
                                         <span class="fep-pill clickable"
                                               style="background: @StatColor(fep.Attribute, fep.Tier);"
@@ -572,7 +607,7 @@
                             </button>
                         </MudTd>
                         <MudTd Style="text-align: right;">
-                            @if (context.Food.Hunger > 0)
+                            @if (context.EffectiveHunger > 0)
                             {
                                 <button type="button" class="cell-filter-btn" title="Filter: FEP/hunger ≥ this"
                                         @onclick="() => FilterByEff(context)"
@@ -658,7 +693,7 @@
                                             @if (context.TotalFep > 0)
                                             {
                                                 <div class="fep-bar">
-                                                    @foreach (var fep in context.Food.Feps)
+                                                    @foreach (var fep in context.EffectiveFeps)
                                                     {
                                                         <div class="fep-bar-segment"
                                                              style="width: @RatioWidth(fep.Value, context.TotalFep); background: @StatColor(fep.Attribute, fep.Tier);"
@@ -666,7 +701,7 @@
                                                     }
                                                 </div>
                                                 <table class="fep-detail-table">
-                                                    @foreach (var fep in context.Food.Feps)
+                                                    @foreach (var fep in context.EffectiveFeps)
                                                     {
                                                         <tr>
                                                             <td>
@@ -706,7 +741,7 @@
                                             }
                                             <div class="detail-row">
                                                 <span class="detail-label">Energy per hunger</span>
-                                                <span>@(context.Food.Hunger > 0 ? (context.Food.Energy / context.Food.Hunger).ToString("0.#") : "—")</span>
+                                                <span>@(context.EffectiveHunger > 0 ? (context.EffectiveEnergy / context.EffectiveHunger).ToString("0.#") : "—")</span>
                                             </div>
                                             @if (context.Food.WikiUrl != null)
                                             {
@@ -756,7 +791,7 @@
                                                             </td>
                                                             <td>
                                                                 <div class="fep-pills">
-                                                                    @foreach (var fep in sibling.Food.Feps)
+                                                                    @foreach (var fep in sibling.EffectiveFeps)
                                                                     {
                                                                         <span class="fep-pill"
                                                                               style="background: @StatColor(fep.Attribute, fep.Tier);"
@@ -767,9 +802,9 @@
                                                                 </div>
                                                             </td>
                                                             <td class="num"><strong>@ScaledFep(sibling.TotalFep).ToString("0.#")</strong></td>
-                                                            <td class="num">@sibling.Food.Hunger.ToString("0.##")</td>
-                                                            <td class="num">@sibling.Food.Energy</td>
-                                                            <td class="num">@(sibling.Food.Hunger > 0 ? ScaledFep(sibling.FepPerHunger).ToString("0.0#") : "—")</td>
+                                                            <td class="num">@sibling.EffectiveHunger.ToString("0.##")</td>
+                                                            <td class="num">@sibling.EffectiveEnergy</td>
+                                                            <td class="num">@(sibling.EffectiveHunger > 0 ? ScaledFep(sibling.FepPerHunger).ToString("0.0#") : "—")</td>
                                                         </tr>
                                                     }
                                                 </table>
@@ -778,7 +813,7 @@
                                         @if (context.Food.VariantCount > 1 || (_focusFoodName == context.Food.Name && _focusVariantKey != null))
                                         {
                                             <div class="variations-block">
-                                                <div class="detail-title">Recorded variations (@context.Food.VariantCount)</div>
+                                                <div class="detail-title">Recorded variations (@WorldVariantCount(context))</div>
                                                 @if (!_variations.ContainsKey(context.Food.Id))
                                                 {
                                                     <MudProgressLinear Indeterminate="true" Class="my-2" />
@@ -820,10 +855,10 @@
                                                                 <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.Total)">Total</MudTableSortLabel>
                                                             </MudTh>
                                                             <MudTh Style="text-align: right;">
-                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.Variant.Hunger)">Hunger</MudTableSortLabel>
+                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.EffectiveHunger)">Hunger</MudTableSortLabel>
                                                             </MudTh>
                                                             <MudTh Style="text-align: right;">
-                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.Variant.Energy)">Energy</MudTableSortLabel>
+                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.EffectiveEnergy)">Energy</MudTableSortLabel>
                                                             </MudTh>
                                                             <MudTh Style="text-align: right;">
                                                                 <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.PerHunger)">FEP/Hunger</MudTableSortLabel>
@@ -856,10 +891,17 @@
                                                                         <MudIcon Icon="@Icons.Material.Filled.PersonAddAlt1" Size="Size.Small" />@variantRow.Variant.ContributorNames[0]@(variantRow.Variant.ContributorNames.Count > 1 ? $" +{variantRow.Variant.ContributorNames.Count - 1}" : "")
                                                                     </span>
                                                                 }
+                                                                @if (variantRow.Variant.Worlds.Count > 0)
+                                                                {
+                                                                    <span class="world-tag"
+                                                                          title="Seen in: @string.Join(", ", variantRow.Variant.Worlds.Select(w => $"{WorldLabel(w)} ({w})"))">
+                                                                        <MudIcon Icon="@Icons.Material.Filled.Public" Size="Size.Small" />@WorldLabel(variantRow.Variant.Worlds[0])@(variantRow.Variant.Worlds.Count > 1 ? $" +{variantRow.Variant.Worlds.Count - 1}" : "")
+                                                                    </span>
+                                                                }
                                                             </MudTd>
                                                             <MudTd Class="py-1">
                                                                 <div class="variant-bar">
-                                                                    @foreach (var fep in variantRow.Variant.Feps)
+                                                                    @foreach (var fep in variantRow.EffectiveFeps)
                                                                     {
                                                                         <div class="variant-bar-segment"
                                                                              style="width: @RatioWidth(fep.Value, variantRow.Total); background: @StatColor(fep.Attribute, fep.Tier);"
@@ -869,7 +911,7 @@
                                                                 @if (variantRow.Total > 0)
                                                                 {
                                                                     <div class="fep-dist">
-                                                                        @foreach (var fep in variantRow.Variant.Feps)
+                                                                        @foreach (var fep in variantRow.EffectiveFeps)
                                                                         {
                                                                             <span class="fep-dist-item" @attributes="FtAttrs(fep, variantRow.Total)">
                                                                                 <span class="fep-dist-dot" style="background: @StatColor(fep.Attribute, fep.Tier);"></span>@fep.Attribute@(fep.Tier == 2 ? "+2" : "") @((fep.Value / variantRow.Total).ToString("0%"))
@@ -881,10 +923,10 @@
                                                             <MudTd Style="text-align: right;">
                                                                 <strong>@ScaledFep(variantRow.Total).ToString("0.#")</strong>
                                                             </MudTd>
-                                                            <MudTd Style="text-align: right;">@variantRow.Variant.Hunger.ToString("0.##")</MudTd>
-                                                            <MudTd Style="text-align: right;">@variantRow.Variant.Energy</MudTd>
+                                                            <MudTd Style="text-align: right;">@variantRow.EffectiveHunger.ToString("0.##")</MudTd>
+                                                            <MudTd Style="text-align: right;">@variantRow.EffectiveEnergy</MudTd>
                                                             <MudTd Style="text-align: right;">
-                                                                @(variantRow.Variant.Hunger > 0 ? ScaledFep(variantRow.PerHunger).ToString("0.0#") : "—")
+                                                                @(variantRow.EffectiveHunger > 0 ? ScaledFep(variantRow.PerHunger).ToString("0.0#") : "—")
                                                             </MudTd>
                                                         </RowTemplate>
                                                         <NoRecordsContent>
@@ -949,6 +991,12 @@
         ["PSY"] = "Psyche"
     };
 
+    /// <summary>
+    /// One master-table row. The Effective* fields (and every derived number: totals,
+    /// per-hunger, stat maps) hold the values for the currently selected world — the
+    /// per-world snapshot when one exists, the canonical food values otherwise. Rows
+    /// are rebuilt by <see cref="RebuildRows"/> whenever the world selection changes.
+    /// </summary>
     private sealed record FoodRow(
         FoodDto Food,
         string SearchBlob,
@@ -957,7 +1005,10 @@
         Dictionary<string, decimal> StatTotals,
         Dictionary<string, decimal> StatTierTotals,
         string? Prep,
-        string BaseName);
+        string BaseName,
+        List<FoodFepDto> EffectiveFeps,
+        decimal EffectiveHunger,
+        int EffectiveEnergy);
 
     /// <summary>Preparation-type name prefixes ("Smoked Beef" → prep Smoked, base Beef).</summary>
     private static readonly string[] PrepPrefixes =
@@ -968,6 +1019,10 @@
 
     private const string PlainPrepKey = "Plain";
 
+    /// <summary>World-chip key for foods with no world tags (label-as-key, like PlainPrepKey).</summary>
+    private const string UntaggedWorldKey = "Untagged";
+
+    /// <summary>One variations-table row; Effective* mirrors <see cref="FoodRow"/>'s world logic.</summary>
     private sealed record VariantRow(
         FoodVariantDto Variant,
         string RecipeText,
@@ -975,7 +1030,10 @@
         decimal Total,
         decimal PerHunger,
         Dictionary<string, decimal> StatTotals,
-        Dictionary<string, decimal> StatTierTotals);
+        Dictionary<string, decimal> StatTierTotals,
+        List<FoodFepDto> EffectiveFeps,
+        decimal EffectiveHunger,
+        int EffectiveEnergy);
 
     /// <summary>One entry of a wiki canonical recipe: "Edible Mushroom x2" → ("Edible Mushroom", "x2").</summary>
     private sealed record RecipePart(string Name, string? Qty, bool Optional);
@@ -1124,8 +1182,10 @@
     private static readonly string[] StatOrderList = { "STR", "AGI", "INT", "CON", "PER", "CHA", "DEX", "WILL", "PSY" };
 
     private List<FoodRow> _rows = new();
+    private List<FoodDto> _foods = new();
     private List<string> _allSatiations = new();
     private List<string> _allPreps = new();
+    private List<string> _allWorlds = new();
     private Dictionary<string, List<FoodRow>> _prepSiblings = new(StringComparer.Ordinal);
     private readonly HashSet<int> _expanded = new();
     private readonly Dictionary<int, List<VariantRow>> _variations = new();
@@ -1133,6 +1193,7 @@
     private string? _selectedStat;
     private string? _selectedSatiation;
     private string? _selectedPrep;
+    private string? _selectedWorld;
 
     // Panels & favorites
     private List<FoodPanelDto> _panels = new();
@@ -1229,18 +1290,26 @@
         }
 
         var expr = string.Join(" ", _allConditions.Select(c => c.RawText));
+        // The server mirrors the world facet: world-effective values, bucket-scoped variant counts.
+        var world = _selectedWorld == null ? null
+            : _selectedWorld == UntaggedWorldKey ? GameWorlds.UntaggedSentinel
+            : _selectedWorld;
         var cts = new CancellationTokenSource();
         _matchCts = cts;
-        _ = RefreshServerMatchesAsync(expr, _quality, cts.Token);
+        _ = RefreshServerMatchesAsync(expr, _quality, world, cts.Token);
     }
 
-    private async Task RefreshServerMatchesAsync(string expr, int quality, CancellationToken ct)
+    private async Task RefreshServerMatchesAsync(string expr, int quality, string? world, CancellationToken ct)
     {
         try
         {
             var client = HttpClientFactory.CreateClient("API");
-            var matches = await client.GetFromJsonAsync<List<FoodConditionMatchDto>>(
-                $"/api/v1/cookbook/filter-matches?expression={Uri.EscapeDataString(expr)}&quality={quality}", ct);
+            var url = $"/api/v1/cookbook/filter-matches?expression={Uri.EscapeDataString(expr)}&quality={quality}";
+            if (world != null)
+            {
+                url += $"&world={Uri.EscapeDataString(world)}";
+            }
+            var matches = await client.GetFromJsonAsync<List<FoodConditionMatchDto>>(url, ct);
             if (!ct.IsCancellationRequested)
             {
                 _serverMatches = matches?.ToDictionary(m => m.FoodId);
@@ -1284,27 +1353,30 @@
             var foods = await client.GetFromJsonAsync<List<FoodDto>>("/api/v1/cookbook/foods") ?? new List<FoodDto>();
             await recipeIndexTask;
 
-            _rows = foods.Select(food =>
-            {
-                var blob = (food.Name + "\n"
-                            + string.Join("\n", food.Ingredients.Select(i => i.Name)) + "\n"
-                            + food.RecipeText)
-                    .ToLowerInvariant();
-                var total = food.Feps.Sum(f => f.Value);
-                var perHunger = food.Hunger > 0 ? total / food.Hunger : 0m;
-                var statTotals = food.Feps
-                    .GroupBy(f => f.Attribute, StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
-                var statTierTotals = food.Feps
-                    .GroupBy(f => f.Attribute.ToUpperInvariant() + f.Tier)
-                    .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
-                var prep = PrepPrefixes.FirstOrDefault(p =>
-                    food.Name.StartsWith(p + " ", StringComparison.Ordinal));
-                var baseName = prep != null ? food.Name[(prep.Length + 1)..] : food.Name;
-                return new FoodRow(food, blob, total, perHunger, statTotals, statTierTotals, prep, baseName);
-            }).ToList();
+            _foods = foods;
 
-            _rowsByName = _rows.ToDictionary(r => r.Food.Name, StringComparer.Ordinal);
+            // Known worlds always render (newest first, 0-count chips disabled);
+            // unknown genus hashes present in the data follow, shown shortened.
+            _allWorlds = GameWorlds.Known
+                .OrderByDescending(w => w.Order)
+                .Select(w => w.Genus)
+                .Concat(_foods
+                    .SelectMany(f => f.Worlds)
+                    .Where(g => GameWorlds.OrderOf(g) < 0)
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(g => g, StringComparer.Ordinal))
+                .ToList();
+
+            // Default to the newest known world that actually has data; null (no world
+            // filter) otherwise, so the page isn't empty before tagged uploads exist.
+            // ??= keeps a user's selection across the Retry path.
+            _selectedWorld ??= GameWorlds.Known
+                .OrderByDescending(w => w.Order)
+                .Select(w => w.Genus)
+                .FirstOrDefault(g => _foods.Any(f => f.Worlds.Contains(g)));
+
+            _variations.Clear();
+            RebuildRows();
 
             _allPreps = _rows
                 .Where(r => r.Prep != null)
@@ -1312,16 +1384,6 @@
                 .OrderByDescending(g => g.Count())
                 .Select(g => g.Key)
                 .ToList();
-
-            _prepSiblings = _rows
-                .GroupBy(r => r.BaseName, StringComparer.Ordinal)
-                .Where(g => g.Count() > 1)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.OrderByDescending(r => r.TotalFep).ToList(),
-                    StringComparer.Ordinal);
-
-            _variations.Clear();
 
             _allSatiations = _rows
                 .SelectMany(r => r.Food.SatiationGroups)
@@ -1358,6 +1420,89 @@
         {
             // Recursive recipe expansion is progressive enhancement — the page works without it.
         }
+    }
+
+    /// <summary>
+    /// (Re)derives every row from the raw DTOs using world-effective values — called on load
+    /// and whenever the selected world changes, because the per-world snapshots swap the
+    /// displayed numbers (and everything derived from them: totals, per-hunger, stat maps).
+    /// </summary>
+    private void RebuildRows()
+    {
+        _rows = _foods.Select(BuildRow).ToList();
+        _rowsByName = _rows.ToDictionary(r => r.Food.Name, StringComparer.Ordinal);
+
+        _prepSiblings = _rows
+            .GroupBy(r => r.BaseName, StringComparer.Ordinal)
+            .Where(g => g.Count() > 1)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(r => r.TotalFep).ToList(),
+                StringComparer.Ordinal);
+
+        foreach (var foodId in _variations.Keys.ToList())
+        {
+            _variations[foodId] = _variations[foodId].Select(r => BuildVariantRow(r.Variant)).ToList();
+        }
+    }
+
+    private FoodRow BuildRow(FoodDto food)
+    {
+        var worldValue = _selectedWorld != null && _selectedWorld != UntaggedWorldKey
+            ? food.WorldValues.FirstOrDefault(w => w.Genus == _selectedWorld)
+            : null;
+        var feps = worldValue?.Feps ?? food.Feps;
+        var hunger = worldValue?.Hunger ?? food.Hunger;
+        var energy = worldValue?.Energy ?? food.Energy;
+
+        var blob = (food.Name + "\n"
+                    + string.Join("\n", food.Ingredients.Select(i => i.Name)) + "\n"
+                    + food.RecipeText)
+            .ToLowerInvariant();
+        var total = feps.Sum(f => f.Value);
+        var perHunger = hunger > 0 ? total / hunger : 0m;
+        var statTotals = feps
+            .GroupBy(f => f.Attribute, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
+        var statTierTotals = feps
+            .GroupBy(f => f.Attribute.ToUpperInvariant() + f.Tier)
+            .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
+        var prep = PrepPrefixes.FirstOrDefault(p =>
+            food.Name.StartsWith(p + " ", StringComparison.Ordinal));
+        var baseName = prep != null ? food.Name[(prep.Length + 1)..] : food.Name;
+        return new FoodRow(food, blob, total, perHunger, statTotals, statTierTotals, prep, baseName,
+            feps, hunger, energy);
+    }
+
+    private VariantRow BuildVariantRow(FoodVariantDto variant)
+    {
+        var worldValue = _selectedWorld != null && _selectedWorld != UntaggedWorldKey
+            ? variant.WorldValues.FirstOrDefault(w => w.Genus == _selectedWorld)
+            : null;
+        var feps = worldValue?.Feps ?? variant.Feps;
+        var hunger = worldValue?.Hunger ?? variant.Hunger;
+        var energy = worldValue?.Energy ?? variant.Energy;
+
+        var text = string.Join(", ", variant.Ingredients.Select(i =>
+            i.Percentage != 100 ? $"{i.Name} {i.Percentage:0.#}%" : i.Name));
+        var total = feps.Sum(f => f.Value);
+        var statTotals = feps
+            .GroupBy(f => f.Attribute, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
+        var statTierTotals = feps
+            .GroupBy(f => f.Attribute.ToUpperInvariant() + f.Tier)
+            .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
+        return new VariantRow(
+            variant,
+            text,
+            text.ToLowerInvariant(),
+            total,
+            hunger > 0 ? total / hunger : 0m,
+            statTotals,
+            statTierTotals,
+            feps,
+            hunger,
+            energy);
     }
 
     /// <summary>Text search + FEP threshold conditions — the common base for Filtered and CountBase.</summary>
@@ -1412,6 +1557,11 @@
                     : rows.Where(r => r.Prep == _selectedPrep);
             }
 
+            if (_selectedWorld != null)
+            {
+                rows = rows.Where(MatchesWorld);
+            }
+
             if (_activePanelNames != null)
             {
                 rows = rows.Where(r => _activePanelNames.Contains(r.Food.Name));
@@ -1447,7 +1597,7 @@
     /// panel, other facet rows) EXCEPT the chip's own row — so sibling chips show what selecting
     /// them would yield instead of zeroing out under their row's current selection.
     /// </summary>
-    private IEnumerable<FoodRow> CountBase(bool includeSatiation, bool includePrep, bool includeStat)
+    private IEnumerable<FoodRow> CountBase(bool includeSatiation, bool includePrep, bool includeStat, bool includeWorld = true)
     {
         var rows = BaseFiltered;
 
@@ -1471,6 +1621,11 @@
         if (includeStat && _selectedStat != null)
         {
             rows = rows.Where(r => r.StatTotals.ContainsKey(_selectedStat));
+        }
+
+        if (includeWorld && _selectedWorld != null)
+        {
+            rows = rows.Where(MatchesWorld);
         }
 
         return rows;
@@ -1503,6 +1658,45 @@
     {
         _selectedPrep = _selectedPrep == prep ? null : prep;
     }
+
+    private int WorldCount(string world) =>
+        CountBase(includeSatiation: true, includePrep: true, includeStat: true, includeWorld: false)
+            .Count(r => WorldMatches(r, world));
+
+    private void ToggleWorld(string world) => SetWorld(_selectedWorld == world ? null : world);
+
+    /// <summary>
+    /// The one place the world selection changes: rows must be rebuilt (world-effective
+    /// values) and the variant-aware server match set recomputed for the new world.
+    /// </summary>
+    private void SetWorld(string? world)
+    {
+        if (_selectedWorld == world)
+        {
+            return;
+        }
+
+        _selectedWorld = world;
+        RebuildRows();
+        QueueServerMatchRefresh();
+    }
+
+    /// <summary>Recorded-variation count of a food within the selected world bucket.</summary>
+    private int WorldVariantCount(FoodRow r) =>
+        _selectedWorld == null ? r.Food.VariantCount
+        : _selectedWorld == UntaggedWorldKey ? r.Food.UntaggedVariantCount
+        : r.Food.WorldVariantCounts.GetValueOrDefault(_selectedWorld);
+
+    /// <summary>Chip text: known-world name, shortened hash for unknown worlds, or the Untagged label.</summary>
+    private static string WorldLabel(string key) =>
+        key == UntaggedWorldKey ? key : GameWorlds.DisplayName(key);
+
+    private bool MatchesWorld(FoodRow r) => WorldMatches(r.Food.Worlds, _selectedWorld!);
+
+    private static bool WorldMatches(FoodRow r, string world) => WorldMatches(r.Food.Worlds, world);
+
+    private static bool WorldMatches(List<string> worlds, string world) =>
+        world == UntaggedWorldKey ? worlds.Count == 0 : worlds.Contains(world);
 
     private decimal ScaledFep(decimal baseValue) => baseValue * (decimal)QualityMultiplier;
 
@@ -1578,26 +1772,7 @@
             Snackbar.Add("Failed to load recipe variations", Severity.Error);
         }
 
-        _variations[foodId] = variants.Select(v =>
-        {
-            var text = string.Join(", ", v.Ingredients.Select(i =>
-                i.Percentage != 100 ? $"{i.Name} {i.Percentage:0.#}%" : i.Name));
-            var total = v.Feps.Sum(f => f.Value);
-            var statTotals = v.Feps
-                .GroupBy(f => f.Attribute, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
-            var statTierTotals = v.Feps
-                .GroupBy(f => f.Attribute.ToUpperInvariant() + f.Tier)
-                .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
-            return new VariantRow(
-                v,
-                text,
-                text.ToLowerInvariant(),
-                total,
-                v.Hunger > 0 ? total / v.Hunger : 0m,
-                statTotals,
-                statTierTotals);
-        }).ToList();
+        _variations[foodId] = variants.Select(BuildVariantRow).ToList();
     }
 
     private IEnumerable<VariantRow> FilteredVariants(int foodId, string foodName)
@@ -1626,6 +1801,13 @@
         if (!focusedHere && _allConditions.Count > 0)
         {
             result = result.Where(r => MatchesConditions(TargetOf(r)));
+        }
+
+        // The world facet applies per variation with the same bucket semantics
+        // as the master table (untagged variants show under Untagged / no selection).
+        if (!focusedHere && _selectedWorld != null)
+        {
+            result = result.Where(r => WorldMatches(r.Variant.Worlds, _selectedWorld));
         }
 
         if (focusedHere)
@@ -1657,6 +1839,7 @@
         _selectedStat = null;
         _selectedSatiation = null;
         _selectedPrep = null;
+        SetWorld(null);
         _conditionSortKey = null;
         ClearFocus();
         ClearPanelFilter();
@@ -1665,10 +1848,10 @@
     // ----- FEP threshold filters (search-box expressions like "str>50%", "int2>15") -----
 
     private static FepConditionTarget TargetOf(FoodRow r) =>
-        new(r.TotalFep, r.FepPerHunger, r.Food.Hunger, r.Food.Energy, r.StatTotals, r.StatTierTotals);
+        new(r.TotalFep, r.FepPerHunger, r.EffectiveHunger, r.EffectiveEnergy, r.StatTotals, r.StatTierTotals);
 
     private static FepConditionTarget TargetOf(VariantRow v) =>
-        new(v.Total, v.PerHunger, v.Variant.Hunger, v.Variant.Energy, v.StatTotals, v.StatTierTotals);
+        new(v.Total, v.PerHunger, v.EffectiveHunger, v.EffectiveEnergy, v.StatTotals, v.StatTierTotals);
 
     /// <summary>AND-evaluates all active conditions against one row (shared Core semantics).</summary>
     private bool MatchesConditions(FepConditionTarget t) =>
@@ -1745,7 +1928,8 @@
         _allConditions.Count
         + (_selectedStat != null ? 1 : 0)
         + (_selectedSatiation != null ? 1 : 0)
-        + (_selectedPrep != null ? 1 : 0);
+        + (_selectedPrep != null ? 1 : 0)
+        + (_selectedWorld != null ? 1 : 0);
 
     /// <summary>The Filters row's Clear chip: drops facet selections and conditions, keeps text search.</summary>
     private void ClearActiveFilters()
@@ -1753,6 +1937,7 @@
         _selectedStat = null;
         _selectedSatiation = null;
         _selectedPrep = null;
+        SetWorld(null);
         ClearConditions();
     }
 

@@ -131,7 +131,17 @@ public class FoodCatalogService : IFoodCatalogService
     private static string ConditionStatsCacheKey(string tenantId) => $"cookbook:conditionstats:{tenantId}";
 
     /// <summary>Compact per-food targets (base + every variation) for variant-aware filtering.</summary>
-    private sealed record FoodConditionStats(int FoodId, FepConditionTarget Base, List<FepConditionTarget> Variants);
+    private sealed record FoodConditionStats(
+        int FoodId,
+        FepConditionTarget Base,
+        Dictionary<string, FepConditionTarget> BaseByWorld,
+        List<VariantConditionStats> Variants);
+
+    /// <summary>One variation's targets: the all-worlds merge plus per-world snapshots.</summary>
+    private sealed record VariantConditionStats(
+        FepConditionTarget Target,
+        List<string> Worlds,
+        Dictionary<string, FepConditionTarget> ByWorld);
 
     public async Task<List<FoodDto>> GetCatalogAsync(CancellationToken ct = default)
     {
@@ -143,15 +153,17 @@ public class FoodCatalogService : IFoodCatalogService
 
         var catalog = await _cache.GetOrCreateAsync(CatalogCacheKey(tenantId), async _ =>
         {
-            // Query filters scope both sets to the current tenant.
+            // Query filters scope both sets to the current tenant. Variants are fetched
+            // whole: counts, per-world counts, and per-world representative values are
+            // aggregated in one pass (this runs only on cache rebuild).
             var foods = await _dbContext.Foods
                 .AsNoTracking()
                 .ToListAsync(ct);
 
-            var variantCounts = await _dbContext.FoodVariants
-                .GroupBy(v => v.FoodId)
-                .Select(g => new { FoodId = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(g => g.FoodId, g => g.Count, ct);
+            var variantsByFood = (await _dbContext.FoodVariants
+                    .AsNoTracking()
+                    .ToListAsync(ct))
+                .ToLookup(v => v.FoodId);
 
             var contributorIds = foods
                 .Where(f => f.ContributedBy != null)
@@ -170,7 +182,21 @@ public class FoodCatalogService : IFoodCatalogService
                 .Select(f =>
                 {
                     var dto = MapToDto(f);
-                    dto.VariantCount = variantCounts.GetValueOrDefault(f.Id);
+                    var own = variantsByFood[f.Id].ToList();
+                    dto.VariantCount = own.Count;
+                    dto.UntaggedVariantCount = own.Count(v => v.Worlds.Count == 0);
+                    dto.WorldVariantCounts = own
+                        .SelectMany(v => v.Worlds)
+                        .GroupBy(g => g, StringComparer.Ordinal)
+                        .ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
+                    // Food-level per-world representative = the lowest-total world snapshot
+                    // across the food's variations (same closest-to-base heuristic).
+                    dto.WorldValues = own
+                        .SelectMany(v => v.WorldValues)
+                        .GroupBy(w => w.Genus, StringComparer.Ordinal)
+                        .Select(g => g.OrderBy(w => w.Feps.Sum(x => x.Value)).First())
+                        .Select(MapWorldValueDto)
+                        .ToList();
                     dto.ContributedByName = f.ContributedBy != null
                         ? contributorNames.GetValueOrDefault(f.ContributedBy, "unknown")
                         : null;
@@ -229,7 +255,7 @@ public class FoodCatalogService : IFoodCatalogService
         return result;
     }
 
-    public async Task<List<FoodConditionMatchDto>> GetConditionMatchesAsync(string expression, int quality, CancellationToken ct = default)
+    public async Task<List<FoodConditionMatchDto>> GetConditionMatchesAsync(string expression, int quality, string? world = null, CancellationToken ct = default)
     {
         var tenantId = _tenantContext.GetCurrentTenantId();
         if (string.IsNullOrEmpty(tenantId))
@@ -251,26 +277,64 @@ public class FoodCatalogService : IFoodCatalogService
             var variantsByFood = variants.ToLookup(v => v.FoodId);
 
             return foods
-                .Select(f => new FoodConditionStats(
-                    f.Id,
-                    FepConditionEvaluator.BuildTarget(f.Energy, f.Hunger,
-                        f.Feps.Select(x => (x.Attribute, x.Tier, x.Value))),
-                    variantsByFood[f.Id]
-                        .Select(v => FepConditionEvaluator.BuildTarget(v.Energy, v.Hunger,
-                            v.Feps.Select(x => (x.Attribute, x.Tier, x.Value))))
-                        .ToList()))
+                .Select(f =>
+                {
+                    var own = variantsByFood[f.Id].ToList();
+                    return new FoodConditionStats(
+                        f.Id,
+                        FepConditionEvaluator.BuildTarget(f.Energy, f.Hunger,
+                            f.Feps.Select(x => (x.Attribute, x.Tier, x.Value))),
+                        own
+                            .SelectMany(v => v.WorldValues)
+                            .GroupBy(w => w.Genus, StringComparer.Ordinal)
+                            .ToDictionary(
+                                g => g.Key,
+                                g =>
+                                {
+                                    var best = g.OrderBy(w => w.Feps.Sum(x => x.Value)).First();
+                                    return FepConditionEvaluator.BuildTarget(best.Energy, best.Hunger,
+                                        best.Feps.Select(x => (x.Attribute, x.Tier, x.Value)));
+                                },
+                                StringComparer.Ordinal),
+                        own
+                            .Select(v => new VariantConditionStats(
+                                FepConditionEvaluator.BuildTarget(v.Energy, v.Hunger,
+                                    v.Feps.Select(x => (x.Attribute, x.Tier, x.Value))),
+                                v.Worlds.ToList(),
+                                v.WorldValues.ToDictionary(
+                                    w => w.Genus,
+                                    w => FepConditionEvaluator.BuildTarget(w.Energy, w.Hunger,
+                                        w.Feps.Select(x => (x.Attribute, x.Tier, x.Value))),
+                                    StringComparer.Ordinal)))
+                            .ToList());
+                })
                 .ToList();
         }) ?? new List<FoodConditionStats>();
 
         // Same quality math as the cookbook UI's QualityMultiplier.
         var multiplier = Math.Sqrt(Math.Max(1, quality) / 10.0);
 
+        // World scoping mirrors the UI: a selected world evaluates world-effective values
+        // (per-world snapshot, canonical fallback) and counts only that bucket's variants.
+        var worldKey = string.IsNullOrWhiteSpace(world) ? null : world.Trim();
+        var untaggedOnly = worldKey == GameWorlds.UntaggedSentinel;
+
+        bool InBucket(List<string> worlds) =>
+            worldKey == null || (untaggedOnly ? worlds.Count == 0 : worlds.Contains(worldKey));
+
+        FepConditionTarget BaseTarget(FoodConditionStats s) =>
+            worldKey != null && !untaggedOnly && s.BaseByWorld.TryGetValue(worldKey, out var t) ? t : s.Base;
+
+        FepConditionTarget VariantTarget(VariantConditionStats v) =>
+            worldKey != null && !untaggedOnly && v.ByWorld.TryGetValue(worldKey, out var t) ? t : v.Target;
+
         return stats
             .Select(s => new FoodConditionMatchDto
             {
                 FoodId = s.FoodId,
-                BaseMatches = FepConditionEvaluator.Matches(s.Base, conditions, multiplier),
-                MatchingVariants = s.Variants.Count(v => FepConditionEvaluator.Matches(v, conditions, multiplier))
+                BaseMatches = FepConditionEvaluator.Matches(BaseTarget(s), conditions, multiplier),
+                MatchingVariants = s.Variants.Count(v =>
+                    InBucket(v.Worlds) && FepConditionEvaluator.Matches(VariantTarget(v), conditions, multiplier))
             })
             .Where(m => m.BaseMatches || m.MatchingVariants > 0)
             .ToList();
@@ -305,6 +369,8 @@ public class FoodCatalogService : IFoodCatalogService
                 ContributorNames = v.Contributors
                     .Select(id => contributorNames.GetValueOrDefault(id, "unknown"))
                     .ToList(),
+                Worlds = v.Worlds.ToList(),
+                WorldValues = v.WorldValues.Select(MapWorldValueDto).ToList(),
                 Feps = v.Feps
                     .Select(f => new FoodFepDto { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value })
                     .ToList(),
@@ -493,6 +559,7 @@ public class FoodCatalogService : IFoodCatalogService
             var source = ToSourceRecord(upload);
             var name = NormalizeName(source.ItemName!);
             var signature = ComputeSignature(source.Ingredients);
+            var genus = GameWorlds.Normalize(upload.Genus);
 
             var food = await _dbContext.Foods.IgnoreQueryFilters()
                 .FirstOrDefaultAsync(f => f.TenantId == tenantId && f.Name == name, ct);
@@ -504,6 +571,12 @@ public class FoodCatalogService : IFoodCatalogService
                 await _dbContext.SaveChangesAsync(ct);
                 result.NewFoods++;
                 result.NewFoodNames.Add(name);
+                changed = true;
+            }
+
+            if (genus != null && !food.Worlds.Contains(genus))
+            {
+                food.Worlds.Add(genus);
                 changed = true;
             }
 
@@ -522,6 +595,12 @@ public class FoodCatalogService : IFoodCatalogService
                     Contributors = contributedByUserId != null
                         ? new List<string> { contributedByUserId }
                         : new List<string>(),
+                    Worlds = genus != null
+                        ? new List<string> { genus }
+                        : new List<string>(),
+                    WorldValues = genus != null
+                        ? new List<FoodVariantWorldValue> { BuildWorldValue(genus, source, name) }
+                        : new List<FoodVariantWorldValue>(),
                     Feps = ParseDumpFeps(source.Feps, name),
                     Ingredients = MapIngredients(source.Ingredients)
                 });
@@ -535,6 +614,10 @@ public class FoodCatalogService : IFoodCatalogService
                 {
                     variant.Contributors.Add(contributedByUserId);
                 }
+                if (genus != null && !variant.Worlds.Contains(genus))
+                {
+                    variant.Worlds.Add(genus);
+                }
                 // Keep the lowest observed FEP total as the representative record
                 // (closest to base quality — same heuristic as the import).
                 var newTotal = source.Feps?.Sum(f => f.Value) ?? 0m;
@@ -544,6 +627,26 @@ public class FoodCatalogService : IFoodCatalogService
                     variant.Feps = ParseDumpFeps(source.Feps, name);
                     variant.Hunger = source.Hunger;
                     variant.Energy = (int)Math.Round(source.Energy);
+                }
+
+                // Same heuristic per world: each world keeps its own representative snapshot.
+                if (genus != null)
+                {
+                    var worldValue = variant.WorldValues.FirstOrDefault(w => w.Genus == genus);
+                    if (worldValue == null)
+                    {
+                        variant.WorldValues.Add(BuildWorldValue(genus, source, name));
+                    }
+                    else
+                    {
+                        var oldWorldTotal = worldValue.Feps.Sum(f => f.Value);
+                        if (newTotal > 0 && (oldWorldTotal == 0 || newTotal < oldWorldTotal))
+                        {
+                            worldValue.Energy = (int)Math.Round(source.Energy);
+                            worldValue.Hunger = source.Hunger;
+                            worldValue.Feps = MapWorldFeps(ParseDumpFeps(source.Feps, name));
+                        }
+                    }
                 }
 
                 result.Duplicates++;
@@ -746,6 +849,28 @@ public class FoodCatalogService : IFoodCatalogService
             .Select(i => new FoodIngredient { Name = i.Name!.Trim(), Percentage = i.Percentage })
             .ToList();
 
+    /// <summary>One world's representative snapshot of an upload record.</summary>
+    private FoodVariantWorldValue BuildWorldValue(string genus, SourceFoodRecord source, string name) => new()
+    {
+        Genus = genus,
+        Energy = (int)Math.Round(source.Energy),
+        Hunger = source.Hunger,
+        Feps = MapWorldFeps(ParseDumpFeps(source.Feps, name))
+    };
+
+    private static List<FoodWorldFep> MapWorldFeps(List<FoodFep> feps) =>
+        feps.Select(f => new FoodWorldFep { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value }).ToList();
+
+    private static FoodWorldValueDto MapWorldValueDto(FoodVariantWorldValue value) => new()
+    {
+        Genus = value.Genus,
+        Energy = value.Energy,
+        Hunger = value.Hunger,
+        Feps = value.Feps
+            .Select(f => new FoodFepDto { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value })
+            .ToList()
+    };
+
     private static SourceFoodRecord ToSourceRecord(FoodUploadRecordDto upload) => new()
     {
         ItemName = upload.ItemName,
@@ -946,6 +1071,7 @@ public class FoodCatalogService : IFoodCatalogService
         ImportedAt = entity.ImportedAt,
         Categories = entity.Categories.ToList(),
         SatiationGroups = entity.SatiationGroups.ToList(),
+        Worlds = entity.Worlds.ToList(),
         Feps = entity.Feps
             .Select(f => new FoodFepDto { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value })
             .ToList(),

@@ -185,6 +185,16 @@
     background: #dfe3e6;
 }
 
+/* World chips: cool blue-gray; "Untagged" (no world data) in neutral gray */
+.stat-chip.world {
+    background: #cfd9ec;
+    font-weight: 600;
+}
+
+.stat-chip.world.untagged {
+    background: #dfe3e6;
+}
+
 /* Small amber preparation badge next to the food name */
 .prep-badge {
     display: inline-block;
@@ -739,6 +749,17 @@
     white-space: nowrap;
 }
 
+/* Variant-row tag: game worlds this variation was recorded in */
+.world-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 7px;
+    font-size: 0.68rem;
+    color: var(--ck-text-muted);
+    white-space: nowrap;
+}
+
 /* Panel contents as a list — one food/recipe per row. The card grows with its
    items; the viewport-relative cap is a safety valve only (the strip is sticky,
    so a card must never get taller than the screen), not a design height. */
@@ -934,7 +955,8 @@
 }
 
 
-.cookbook-page ::deep .contrib-name .mud-icon-root {
+.cookbook-page ::deep .contrib-name .mud-icon-root,
+.cookbook-page ::deep .world-tag .mud-icon-root {
     font-size: 0.85rem;
     width: 0.85rem;
     height: 0.85rem;

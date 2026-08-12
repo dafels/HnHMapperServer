@@ -88,20 +88,23 @@ public static class CookbookEndpoints
     }
 
     /// <summary>
-    /// GET /api/v1/cookbook/filter-matches?expression=str>50%25&amp;quality=10
+    /// GET /api/v1/cookbook/filter-matches?expression=str>50%25&amp;quality=10&amp;world=b7c199a4557503a8
     /// Ids of foods whose base values OR any recipe variation satisfy every threshold
     /// condition in the expression (same FepFilterParser grammar as the UI), so the
     /// cookbook table can match foods by their best variations, not just the base.
+    /// Optional world (genus hash, or "untagged") scopes variation counts to that world's
+    /// bucket and evaluates world-effective values, mirroring the UI's world facet.
     /// </summary>
     private static async Task<IResult> GetFilterMatches(
         string expression,
         int quality,
+        string? world,
         IFoodCatalogService foodCatalogService,
         ILogger<Program> logger)
     {
         try
         {
-            var ids = await foodCatalogService.GetConditionMatchesAsync(expression ?? string.Empty, quality);
+            var ids = await foodCatalogService.GetConditionMatchesAsync(expression ?? string.Empty, quality, world);
             return Results.Ok(ids);
         }
         catch (Exception ex)
