@@ -690,9 +690,8 @@ mixed with free text (`meat str>50% int2>15`):
   by the test project; Web is not — that's why the parser lives in Core).
 - **UI (cediner-inspired, modeled on github.com/Cediner/hnh-food-book):** filtering has one home,
   a "Filter" row directly under the Prep chips — the expression input (`FilterText`; unparsed
-  remainder surfaces as an "Ignored: …" helper line, never an error) with the Quick preset toggle
-  chips beside it and a key-chip helper row beneath (9 stat chips + Total/Hunger/Energy/FEP-H
-  from `FilterKeyHelpers`): clicking a key chip appends `key>=` and focuses the input with the
+  remainder surfaces as an "Ignored: …" helper line, never an error) with a key-chip helper row
+  beneath (9 stat chips + Total/Hunger/Energy/FEP-H from `FilterKeyHelpers`): clicking a key chip appends `key>=` and focuses the input with the
   caret at the end (`AppendKeyToFilterAsync` — the pending render flushes at its first await, so
   the text lands before focus and MudBlazor's focused-text suppression never bites). Quarter
   chips (≥25/50/75/100%, `QuarterPresets`) are context-aware: they complete a started stat
@@ -703,8 +702,10 @@ mixed with free text (`meat str>50% int2>15`):
   syntax as a power path — each parsed once per change in its property setter
   (`Search`/`FilterText`) with `_allConditions` as the union every consumer reads. Active chips:
   body click sorts by exactly what the chip filters (`SortKeyOf` + shared `ConditionValue`, ▼/▲
-  indicator, self-clearing when the chip disappears), the nested ✕ button removes; clear-all chip
-  when several are active. A "⊞ Columns" chip at the end of the FEP toggle row expands one
+  indicator, self-clearing when the chip disappears), the nested ✕ button removes; the row also
+  shows the selected FEP/satiation/prep facet as removable chips (colored like their source rows,
+  whole chip = clear), and the clear-all chip (shown when several chips are active,
+  `ActiveFilterChipCount`) drops facets + conditions while keeping the text search. A "⊞ Columns" chip at the end of the FEP toggle row expands one
   sortable, display-only column per stat (quality-scaled `.stat-value` pills; the FEP-pills and
   selected-stat columns hide meanwhile — every colspan derives from `VisibleColumnCount`). The
   in-table header filter boxes were tried and **removed as too complex a UX**; tier-specific
@@ -714,20 +715,24 @@ mixed with free text (`meat str>50% int2>15`):
   own (so sibling chips show what selecting them would yield instead of zeroing out).
 - **One-click tools** (all funnel through `ApplyToolExpression`, which replaces same-shaped
   conditions — same key/tier/%-ness — wherever they live and appends the new expression to the
-  filter input): master-row FEP pills (`str2>=8`, tier always explicit; their hover card gains a
-  `data-ft-hint` line via `FtAttrs(..., clickable: true)` + `fep-tooltip.js`), Total and
-  FEP/Hunger cell values (`total>=…` / `eff>=…`, "—" cells inert), and the "Quick" presets
-  that toggle: an identical existing condition set is removed, `.selected` marks active. Preset
-  thresholds are **percentile-derived from the real catalog** (2026-08-11 analysis of 928 foods,
-  base q10: eff median 5, hunger median 1, total median 4 — the original guesses eff>=3 /
-  hunger<=1 matched ~3/4 of the catalog, and half the high-eff foods are sub-5-FEP junk):
-  Efficient `eff>=5 total>=8` (~10.7%), Light `hunger<=0.5 total>=3` (~14.9%), Feast `total>=15`
-  (~5.7%). Multi-condition presets apply/toggle as one unit via `ApplyToolExpression` (parses N
-  conditions, `SameShape` replacement). Scaled keys multiply by the quality multiplier at click
-  time (`Sc()` in `QuickPresets`), so each preset keeps selecting the same food slice at any Q;
-  hunger stays unscaled. Tool values are rounded to 2 dp and
-  invariant-formatted (display strings are culture-formatted — never reuse them), so a clicked
-  row always passes its own `>=` filter.
+  filter input; multi-condition expressions apply/toggle as one unit): master-row FEP pills
+  (`str2>=8`, tier always explicit; their hover card gains a `data-ft-hint` line via
+  `FtAttrs(..., clickable: true)` + `fep-tooltip.js`) and Total / FEP-Hunger cell values
+  (`total>=…` / `eff>=…`, "—" cells inert). The Efficient/Light/Feast preset chips were tried
+  and removed as not useful. Tool values are rounded to 2 dp and invariant-formatted (display
+  strings are culture-formatted — never reuse them), so a clicked row always passes its own
+  `>=` filter.
+- **Variant-aware matching:** condition evaluation lives in Core
+  (`FepConditionEvaluator`/`FepConditionTarget` in `src/HnHMapperServer.Core/Cookbook/`, unit
+  tested) and is shared by the client and `GET /api/v1/cookbook/filter-matches?expression=&quality=`.
+  The endpoint returns `FoodConditionMatchDto`s (food id, whether the base passes, how many
+  variations pass) for foods whose **base OR any recipe variation** passes all conditions
+  (so Nut Jerky shows for `str>50%` when only some variations exceed 50%), evaluated over a
+  per-tenant cached compact structure (`cookbook:conditionstats:{tenantId}`, invalidated wherever
+  the catalog cache is). The client fires a cancellable fetch per conditions/quality change
+  (`QueueServerMatchRefresh`), filters master rows by the result, and shows per-food matching
+  counts in the row hint ("12 of 4992 recipes"); base-only evaluation is the fallback while
+  pending/on error, and the expanded variations sub-table shows exactly the passing variations.
 - **Variations:** conditions also filter the per-food variations sub-table via the shared
   `ConditionTarget` evaluator (`VariantRow` carries `StatTotals`/`StatTierTotals`; percent = share
   of the variant's own total; skipped while a focused panel chip pins a variant).

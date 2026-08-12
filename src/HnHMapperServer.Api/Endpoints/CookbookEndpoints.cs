@@ -23,6 +23,7 @@ public static class CookbookEndpoints
         catalog.MapGet("/foods", GetFoods);
         catalog.MapGet("/foods/{id:int}/variations", GetVariations);
         catalog.MapGet("/recipe-index", GetRecipeIndex);
+        catalog.MapGet("/filter-matches", GetFilterMatches);
 
         // Per-user food panels (Favorites + custom, optionally tenant-shared)
         catalog.MapGet("/panels", GetPanels);
@@ -83,6 +84,30 @@ public static class CookbookEndpoints
         {
             logger.LogError(ex, "Error loading cookbook variations for food {FoodId}", id);
             return Results.Problem("Failed to load recipe variations");
+        }
+    }
+
+    /// <summary>
+    /// GET /api/v1/cookbook/filter-matches?expression=str>50%25&amp;quality=10
+    /// Ids of foods whose base values OR any recipe variation satisfy every threshold
+    /// condition in the expression (same FepFilterParser grammar as the UI), so the
+    /// cookbook table can match foods by their best variations, not just the base.
+    /// </summary>
+    private static async Task<IResult> GetFilterMatches(
+        string expression,
+        int quality,
+        IFoodCatalogService foodCatalogService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var ids = await foodCatalogService.GetConditionMatchesAsync(expression ?? string.Empty, quality);
+            return Results.Ok(ids);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error computing cookbook filter matches");
+            return Results.Problem("Failed to compute filter matches");
         }
     }
 

@@ -43,7 +43,7 @@
                 </MudItem>
                 <MudItem xs="12" sm="6" md="4">
                     <MudNumericField T="int"
-                                     @bind-Value="_quality"
+                                     @bind-Value="Quality"
                                      Immediate="true"
                                      Min="1" Max="999"
                                      Label="Quality"
@@ -129,17 +129,6 @@
                               Variant="Variant.Outlined"
                               Margin="Margin.Dense"
                               Class="filter-input" />
-                @foreach (var preset in QuickPresets)
-                {
-                    var presetExpr = preset.Expr(QualityMultiplier);
-                    <button type="button"
-                            class="stat-chip @(PresetActive(presetExpr) ? "selected" : "")"
-                            style="--chip-color: #dfe3e6;"
-                            title="@preset.Tooltip (@presetExpr)"
-                            @onclick="() => ApplyToolExpression(presetExpr, toggle: true)">
-                        @preset.Label
-                    </button>
-                }
             </div>
             <div class="stat-chips">
                 <span class="chips-label"></span>
@@ -147,7 +136,7 @@
                 {
                     <button type="button"
                             class="stat-chip"
-                            style="--chip-color: @StatColors[stat];"
+                            style="--chip-color: @StatColor(stat);"
                             title="@StatFullNames[stat] — adds @(stat.ToLowerInvariant())>= to the filter"
                             @onclick="() => AppendKeyToFilterAsync(stat.ToLowerInvariant())">
                         @stat
@@ -176,10 +165,37 @@
                     </button>
                 }
             </div>
-            @if (_allConditions.Count > 0)
+            @if (ActiveFilterChipCount > 0)
             {
                 <div class="active-filters">
                     <span class="chips-label">Filters</span>
+                    @if (_selectedStat != null)
+                    {
+                        <span class="stat-chip filter-chip"
+                              style="--chip-color: @StatColor(_selectedStat);"
+                              title="Selected FEP: @StatFullNames[_selectedStat] — click to clear"
+                              @onclick="() => _selectedStat = null">
+                            @_selectedStat<span class="stat-chip-count">&times;</span>
+                        </span>
+                    }
+                    @if (_selectedSatiation != null)
+                    {
+                        <span class="stat-chip filter-chip"
+                              style="--chip-color: #bfe3c0;"
+                              title="Selected satiation: @_selectedSatiation — click to clear"
+                              @onclick="() => _selectedSatiation = null">
+                            @_selectedSatiation<span class="stat-chip-count">&times;</span>
+                        </span>
+                    }
+                    @if (_selectedPrep != null)
+                    {
+                        <span class="stat-chip filter-chip"
+                              style="--chip-color: @(_selectedPrep == PlainPrepKey ? "#dfe3e6" : "#ecc9a3");"
+                              title="Selected preparation: @_selectedPrep — click to clear"
+                              @onclick="() => _selectedPrep = null">
+                            @_selectedPrep<span class="stat-chip-count">&times;</span>
+                        </span>
+                    }
                     @foreach (var condition in _allConditions)
                     {
                         var isSorted = _conditionSortKey == SortKeyOf(condition);
@@ -194,13 +210,13 @@
                                     @onclick:stopPropagation="true">&times;</button>
                         </span>
                     }
-                    @if (_allConditions.Count > 1)
+                    @if (ActiveFilterChipCount > 1)
                     {
                         <button type="button"
                                 class="stat-chip filter-chip clear-conditions"
                                 style="--chip-color: #dfe3e6;"
-                                title="Remove all threshold filters (keeps the text search)"
-                                @onclick="ClearConditions">
+                                title="Clear all active filters (keeps the text search)"
+                                @onclick="ClearActiveFilters">
                             Clear<span class="stat-chip-count">&times;</span>
                         </button>
                     }
@@ -468,7 +484,20 @@
                                 }
                                 @if (context.Food.VariantCount > 1)
                                 {
-                                    <span class="variant-hint">@context.Food.VariantCount recipes</span>
+                                    var conditionMatch = _allConditions.Count > 0 && _serverMatches != null
+                                        ? _serverMatches.GetValueOrDefault(context.Food.Id)
+                                        : null;
+                                    if (conditionMatch != null)
+                                    {
+                                        <span class="variant-hint"
+                                              title="Recipe variations matching the active filters">
+                                            @conditionMatch.MatchingVariants of @context.Food.VariantCount recipes
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="variant-hint">@context.Food.VariantCount recipes</span>
+                                    }
                                 }
                                 @if (context.Food.ContributedByName != null)
                                 {
@@ -1124,6 +1153,18 @@
     private string _search = string.Empty;
     private int _quality = 10;
 
+    private int Quality
+    {
+        get => _quality;
+        set
+        {
+            _quality = value;
+            // Absolute thresholds compare quality-scaled values, so the variant-aware
+            // match set has to be recomputed for the new multiplier.
+            QueueServerMatchRefresh();
+        }
+    }
+
     // FEP threshold filters (str>50%, int2>15, hunger<2 ...) live as text in two inputs:
     // the search box (mixed with free text, kept for muscle memory) and the dedicated filter
     // box. Each is parsed once per change here — BaseFiltered is re-enumerated many times per
@@ -1160,6 +1201,52 @@
     private void RebuildAllConditions()
     {
         _allConditions = _conditions.Concat(_filterConditions).ToList();
+        QueueServerMatchRefresh();
+    }
+
+    // Variant-aware matching: the server evaluates the conditions against every food's base
+    // values AND all of its recipe variations (data the client never loads in full), so a food
+    // like Nut Jerky shows up for str>50% when one of its variations passes even though the
+    // base does not. Until a result lands (or on error), base-only evaluation is the fallback.
+    private Dictionary<int, FoodConditionMatchDto>? _serverMatches;
+    private CancellationTokenSource? _matchCts;
+
+    private void QueueServerMatchRefresh()
+    {
+        _matchCts?.Cancel();
+        _serverMatches = null;
+
+        if (_allConditions.Count == 0)
+        {
+            return;
+        }
+
+        var expr = string.Join(" ", _allConditions.Select(c => c.RawText));
+        var cts = new CancellationTokenSource();
+        _matchCts = cts;
+        _ = RefreshServerMatchesAsync(expr, _quality, cts.Token);
+    }
+
+    private async Task RefreshServerMatchesAsync(string expr, int quality, CancellationToken ct)
+    {
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var matches = await client.GetFromJsonAsync<List<FoodConditionMatchDto>>(
+                $"/api/v1/cookbook/filter-matches?expression={Uri.EscapeDataString(expr)}&quality={quality}", ct);
+            if (!ct.IsCancellationRequested)
+            {
+                _serverMatches = matches?.ToDictionary(m => m.FoodId);
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception)
+        {
+            // Base-only filtering remains the graceful fallback.
+        }
     }
 
     // Cediner-style filtering: per-stat columns toggle (display/sort only), chip sorting
@@ -1288,7 +1375,12 @@
 
             if (_allConditions.Count > 0)
             {
-                rows = rows.Where(r => MatchesConditions(TargetOf(r)));
+                // Server match set = base OR any recipe variation passes; base-only fallback
+                // while the async result is pending or unavailable.
+                var serverMatches = _serverMatches;
+                rows = serverMatches != null
+                    ? rows.Where(r => serverMatches.ContainsKey(r.Food.Id))
+                    : rows.Where(r => MatchesConditions(TargetOf(r)));
             }
 
             return rows;
@@ -1565,63 +1657,19 @@
 
     // ----- FEP threshold filters (search-box expressions like "str>50%", "int2>15") -----
 
-    /// <summary>The values conditions evaluate against — one shape for foods and variants.</summary>
-    private readonly record struct ConditionTarget(
-        decimal TotalFep,
-        decimal FepPerHunger,
-        decimal Hunger,
-        int Energy,
-        Dictionary<string, decimal> StatTotals,
-        Dictionary<string, decimal> StatTierTotals);
-
-    private static ConditionTarget TargetOf(FoodRow r) =>
+    private static FepConditionTarget TargetOf(FoodRow r) =>
         new(r.TotalFep, r.FepPerHunger, r.Food.Hunger, r.Food.Energy, r.StatTotals, r.StatTierTotals);
 
-    private static ConditionTarget TargetOf(VariantRow v) =>
+    private static FepConditionTarget TargetOf(VariantRow v) =>
         new(v.Total, v.PerHunger, v.Variant.Hunger, v.Variant.Energy, v.StatTotals, v.StatTierTotals);
 
-    /// <summary>AND-evaluates all parsed threshold conditions against one row.</summary>
-    private bool MatchesConditions(ConditionTarget t)
-    {
-        foreach (var c in _allConditions)
-        {
-            // Compare what the table shows (0.## formats) — keeps '=' and boundary values usable.
-            var actual = Math.Round(ConditionValue(t, c), 2);
-            var ok = c.Op switch
-            {
-                FepFilterOp.Gt => actual > c.Value,
-                FepFilterOp.Ge => actual >= c.Value,
-                FepFilterOp.Lt => actual < c.Value,
-                FepFilterOp.Le => actual <= c.Value,
-                _ => actual == c.Value
-            };
-            if (!ok)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
+    /// <summary>AND-evaluates all active conditions against one row (shared Core semantics).</summary>
+    private bool MatchesConditions(FepConditionTarget t) =>
+        FepConditionEvaluator.Matches(t, _allConditions, QualityMultiplier);
 
     /// <summary>What one condition measures on a row — also the value chip-click sorting uses.</summary>
-    private decimal ConditionValue(ConditionTarget t, FepFilterCondition c) => c.Key switch
-    {
-        // Percent = share of the row's own total FEP; base values on both sides, so quality cancels.
-        FepFilterKey.Stat when c.IsPercent =>
-            t.TotalFep > 0 ? StatValue(t, c) / t.TotalFep * 100m : 0m,
-        FepFilterKey.Stat => ScaledFep(StatValue(t, c)),
-        FepFilterKey.Total => ScaledFep(t.TotalFep),
-        FepFilterKey.Eff => ScaledFep(t.FepPerHunger),
-        FepFilterKey.Hunger => t.Hunger,
-        _ => t.Energy
-    };
-
-    /// <summary>A row without the stat scores 0 ("str>0" excludes it, "str<10" includes it).</summary>
-    private static decimal StatValue(ConditionTarget t, FepFilterCondition c) =>
-        c.Tier is int tier
-            ? t.StatTierTotals.GetValueOrDefault(c.Attribute + tier.ToString())
-            : t.StatTotals.GetValueOrDefault(c.Attribute!);
+    private decimal ConditionValue(FepConditionTarget t, FepFilterCondition c) =>
+        FepConditionEvaluator.Value(t, c, QualityMultiplier);
 
     private static string ConditionLabel(FepFilterCondition c)
     {
@@ -1685,6 +1733,22 @@
         FilterText = string.Empty;
     }
 
+    /// <summary>Chips shown in the Filters row: facet selections + threshold conditions.</summary>
+    private int ActiveFilterChipCount =>
+        _allConditions.Count
+        + (_selectedStat != null ? 1 : 0)
+        + (_selectedSatiation != null ? 1 : 0)
+        + (_selectedPrep != null ? 1 : 0);
+
+    /// <summary>The Filters row's Clear chip: drops facet selections and conditions, keeps text search.</summary>
+    private void ClearActiveFilters()
+    {
+        _selectedStat = null;
+        _selectedSatiation = null;
+        _selectedPrep = null;
+        ClearConditions();
+    }
+
     // ----- Filter-input helpers: key chips start an expression in the filter box -----
 
     private static readonly (string Key, string Label, string Tooltip)[] FilterKeyHelpers =
@@ -1745,26 +1809,7 @@
         }
     }
 
-    // ----- One-click tools: pills, cells and presets compose expressions into the filter input -----
-
-    // Preset thresholds are percentile-derived from the real catalog (928 foods, base q10):
-    // eff median is 5 and hunger median is 1, so the old eff>=3 / hunger<=1 matched ~3/4 of all
-    // foods; half of the high-eff foods are sub-5-FEP junk, hence the substance floors. Scaled
-    // keys (total/eff) multiply by the quality multiplier at click time so each preset keeps
-    // selecting the same foods (~top slice of the catalog) at any Q input.
-    private static string Sc(double baseValue, double multiplier) =>
-        Math.Round((decimal)(baseValue * multiplier), 2)
-            .ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
-
-    private static readonly (string Label, Func<double, string> Expr, string Tooltip)[] QuickPresets =
-    {
-        ("Efficient", m => $"eff>={Sc(5, m)} total>={Sc(8, m)}",
-            "High FEP per hunger with real substance (~top 10% of the catalog)"),
-        ("Light", m => $"hunger<=0.5 total>={Sc(3, m)}",
-            "Barely any hunger but still feeds stats (~15% of the catalog)"),
-        ("Feast", m => $"total>={Sc(15, m)}",
-            "The biggest FEP totals in the catalog (~top 5%)")
-    };
+    // ----- One-click tools: pills and cells compose expressions into the filter input -----
 
     private void FilterByPill(FoodFepDto fep) =>
         ApplyToolExpression(fep.Attribute.ToLowerInvariant() + fep.Tier + ">="
@@ -1784,13 +1829,6 @@
     private static bool SameShape(FepFilterCondition a, FepFilterCondition b) =>
         a.Key == b.Key && a.Tier == b.Tier && a.IsPercent == b.IsPercent
         && string.Equals(a.Attribute, b.Attribute, StringComparison.OrdinalIgnoreCase);
-
-    private bool PresetActive(string expr)
-    {
-        var (parsed, _) = FepFilterParser.Parse(expr);
-        return parsed.Count > 0 && parsed.All(p =>
-            _allConditions.Any(c => SameShape(c, p) && c.Op == p.Op && c.Value == p.Value));
-    }
 
     /// <summary>
     /// Shared funnel for the one-click tools: replaces same-shaped conditions (same key, tier and

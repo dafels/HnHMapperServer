@@ -32,6 +32,14 @@ public interface IFoodCatalogService
     Task<List<FoodVariantDto>> GetVariationsAsync(int foodId, CancellationToken ct = default);
 
     /// <summary>
+    /// Foods whose base values OR any recorded recipe variation satisfy every threshold
+    /// condition in <paramref name="expression"/> (FepFilterParser syntax) at the given
+    /// quality, with per-food matching-variation counts. Empty when the expression
+    /// contains no valid conditions.
+    /// </summary>
+    Task<List<FoodConditionMatchDto>> GetConditionMatchesAsync(string expression, int quality, CancellationToken ct = default);
+
+    /// <summary>
     /// Returns the wiki recipe line for every known craftable — including intermediates
     /// that are not eaten foods ("Unbaked Meatpie") — so recipes can be expanded
     /// recursively. Tenant-independent (built from the bundled wiki dump, cached).

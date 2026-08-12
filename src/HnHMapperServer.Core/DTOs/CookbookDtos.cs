@@ -148,6 +148,19 @@ public class FavoriteToggleResultDto
 }
 
 /// <summary>
+/// One food's result from the variant-aware condition matching: whether the base values
+/// pass and how many of its recorded recipe variations do.
+/// </summary>
+public class FoodConditionMatchDto
+{
+    public int FoodId { get; set; }
+
+    public bool BaseMatches { get; set; }
+
+    public int MatchingVariants { get; set; }
+}
+
+/// <summary>
 /// One recorded recipe variation of a food: a distinct ingredient combination and the
 /// values observed for it. Fetched lazily per food.
 /// </summary>

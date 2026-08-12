@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using HnHMapperServer.Core.Cookbook;
 using HnHMapperServer.Core.DTOs;
 using HnHMapperServer.Core.Interfaces;
 using HnHMapperServer.Infrastructure.Data;
@@ -127,6 +128,11 @@ public class FoodCatalogService : IFoodCatalogService
 
     private static string CatalogCacheKey(string tenantId) => $"cookbook:catalog:{tenantId}";
 
+    private static string ConditionStatsCacheKey(string tenantId) => $"cookbook:conditionstats:{tenantId}";
+
+    /// <summary>Compact per-food targets (base + every variation) for variant-aware filtering.</summary>
+    private sealed record FoodConditionStats(int FoodId, FepConditionTarget Base, List<FepConditionTarget> Variants);
+
     public async Task<List<FoodDto>> GetCatalogAsync(CancellationToken ct = default)
     {
         var tenantId = _tenantContext.GetCurrentTenantId();
@@ -214,12 +220,60 @@ public class FoodCatalogService : IFoodCatalogService
         }
 
         _cache.Remove(CatalogCacheKey(tenantId));
+        _cache.Remove(ConditionStatsCacheKey(tenantId));
 
         _logger.LogInformation(
             "Cookbook cleared for tenant {TenantId}: {Foods} foods, {Variants} variants removed",
             tenantId, result.Foods, result.Variants);
 
         return result;
+    }
+
+    public async Task<List<FoodConditionMatchDto>> GetConditionMatchesAsync(string expression, int quality, CancellationToken ct = default)
+    {
+        var tenantId = _tenantContext.GetCurrentTenantId();
+        if (string.IsNullOrEmpty(tenantId))
+        {
+            return new List<FoodConditionMatchDto>();
+        }
+
+        var (conditions, _) = FepFilterParser.Parse(expression);
+        if (conditions.Count == 0)
+        {
+            return new List<FoodConditionMatchDto>();
+        }
+
+        var stats = await _cache.GetOrCreateAsync(ConditionStatsCacheKey(tenantId), async _ =>
+        {
+            // Query filters scope both sets to the current tenant.
+            var foods = await _dbContext.Foods.AsNoTracking().ToListAsync(ct);
+            var variants = await _dbContext.FoodVariants.AsNoTracking().ToListAsync(ct);
+            var variantsByFood = variants.ToLookup(v => v.FoodId);
+
+            return foods
+                .Select(f => new FoodConditionStats(
+                    f.Id,
+                    FepConditionEvaluator.BuildTarget(f.Energy, f.Hunger,
+                        f.Feps.Select(x => (x.Attribute, x.Tier, x.Value))),
+                    variantsByFood[f.Id]
+                        .Select(v => FepConditionEvaluator.BuildTarget(v.Energy, v.Hunger,
+                            v.Feps.Select(x => (x.Attribute, x.Tier, x.Value))))
+                        .ToList()))
+                .ToList();
+        }) ?? new List<FoodConditionStats>();
+
+        // Same quality math as the cookbook UI's QualityMultiplier.
+        var multiplier = Math.Sqrt(Math.Max(1, quality) / 10.0);
+
+        return stats
+            .Select(s => new FoodConditionMatchDto
+            {
+                FoodId = s.FoodId,
+                BaseMatches = FepConditionEvaluator.Matches(s.Base, conditions, multiplier),
+                MatchingVariants = s.Variants.Count(v => FepConditionEvaluator.Matches(v, conditions, multiplier))
+            })
+            .Where(m => m.BaseMatches || m.MatchingVariants > 0)
+            .ToList();
     }
 
     public async Task<List<FoodVariantDto>> GetVariationsAsync(int foodId, CancellationToken ct = default)
@@ -386,6 +440,7 @@ public class FoodCatalogService : IFoodCatalogService
         }
 
         _cache.Remove(CatalogCacheKey(tenantId));
+        _cache.Remove(ConditionStatsCacheKey(tenantId));
         result.Imported = entities.Count;
 
         _logger.LogInformation(
@@ -491,6 +546,7 @@ public class FoodCatalogService : IFoodCatalogService
         if (changed)
         {
             _cache.Remove(CatalogCacheKey(tenantId));
+            _cache.Remove(ConditionStatsCacheKey(tenantId));
         }
 
         if (result.NewFoods > 0 || result.NewVariants > 0)
