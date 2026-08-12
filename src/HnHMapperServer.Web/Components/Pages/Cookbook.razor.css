@@ -41,9 +41,10 @@
     right: 0;
     height: 17px;
     z-index: -1;
-    background: rgba(255, 255, 255, 0.55);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    /* Plain tint, deliberately no backdrop-filter: on a ~7px visible strip the
+       blur is imperceptible, and an in-bounds blur here would edge-flicker as
+       rows scroll beneath (the sampling band would span the whole strip). */
+    background: rgba(255, 255, 255, 0.7);
 }
 
 .sticky-stack.ck-stuck .cookbook-toolbar {
@@ -573,12 +574,29 @@
     border-radius: 8px;
     padding: 8px 10px;
     background: rgba(255, 255, 255, 0.65);
-    backdrop-filter: blur(12px);
     border: 1px solid rgba(255, 255, 255, 0.35);
     /* Subtle per-panel identity: each panel gets its own accent hue */
     border-top: 3px solid var(--panel-accent, rgba(44, 62, 80, 0.2));
     box-shadow: 0 3px 10px rgba(0, 0, 0, 0.07);
     transition: box-shadow 0.12s, border-color 0.12s, transform 0.12s;
+    /* Blur lives on the oversized clipped ::before, not the element: when the
+       cards condense over the scrolling table (ck-stuck) an in-bounds blur's
+       edge band spans nearly the whole chip and pulses dark as rows pass
+       beneath (same Chromium edge-sampling issue as the glass containers —
+       see .glass-morphism in app.css). The clip is load-bearing. */
+    position: relative;
+    overflow: hidden;
+    transform: translateZ(0);
+}
+
+.panel-card::before {
+    content: '';
+    position: absolute;
+    inset: -40px;
+    z-index: -1;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    pointer-events: none;
 }
 
 .panel-card.shared-other {

@@ -698,7 +698,11 @@ frame-by-frame via CDP screencast during 1px-step scrolling (bottom-band luma sp
 regressions on cookbook/dashboard/login). **Do not put `backdrop-filter` back on glass elements directly,
 and don't add `overflow: visible` children that must poke outside a glass container** (the clip is
 load-bearing). The pseudo needs the element's stacking context (`transform: translateZ(0)`) to stay
-behind content.
+behind content. Follow-up (same day): the residual "darker flickering" over the pinned stack came from
+the last two in-bounds blurs on the page — `.panel-card` (blur band spans nearly the whole condensed
+chip floating over scrolling rows) and the `ck-stuck` slit pseudo. `.panel-card` now uses the same
+oversized-`::before` pattern; the slit cover is a plain `rgba(255,255,255,0.7)` tint (blur is
+imperceptible on a 7px strip).
 
 **Second mechanism, pixel-verified via puppeteer screenshots:** the cookbook's pinned `.sticky-stack` had
 two fully transparent strips — the slit between the appbar (~65px) and the stack (top: 72px), and the
