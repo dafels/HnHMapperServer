@@ -284,6 +284,17 @@ public class FoodCatalogService : IFoodCatalogService
             .Where(v => v.FoodId == foodId)
             .ToListAsync(ct);
 
+        var contributorIds = variants
+            .SelectMany(v => v.Contributors)
+            .Distinct()
+            .ToList();
+        var contributorNames = contributorIds.Count == 0
+            ? new Dictionary<string, string>()
+            : await _dbContext.Users
+                .AsNoTracking()
+                .Where(u => contributorIds.Contains(u.Id))
+                .ToDictionaryAsync(u => u.Id, u => u.UserName ?? "unknown", ct);
+
         return variants
             .Select(v => new FoodVariantDto
             {
@@ -291,6 +302,9 @@ public class FoodCatalogService : IFoodCatalogService
                 Energy = v.Energy,
                 Hunger = v.Hunger,
                 TimesSeen = v.TimesSeen,
+                ContributorNames = v.Contributors
+                    .Select(id => contributorNames.GetValueOrDefault(id, "unknown"))
+                    .ToList(),
                 Feps = v.Feps
                     .Select(f => new FoodFepDto { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value })
                     .ToList(),
@@ -505,6 +519,9 @@ public class FoodCatalogService : IFoodCatalogService
                     Energy = (int)Math.Round(source.Energy),
                     Hunger = source.Hunger,
                     TimesSeen = 1,
+                    Contributors = contributedByUserId != null
+                        ? new List<string> { contributedByUserId }
+                        : new List<string>(),
                     Feps = ParseDumpFeps(source.Feps, name),
                     Ingredients = MapIngredients(source.Ingredients)
                 });
@@ -514,6 +531,10 @@ public class FoodCatalogService : IFoodCatalogService
             else
             {
                 variant.TimesSeen++;
+                if (contributedByUserId != null && !variant.Contributors.Contains(contributedByUserId))
+                {
+                    variant.Contributors.Add(contributedByUserId);
+                }
                 // Keep the lowest observed FEP total as the representative record
                 // (closest to base quality — same heuristic as the import).
                 var newTotal = source.Feps?.Sum(f => f.Value) ?? 0m;

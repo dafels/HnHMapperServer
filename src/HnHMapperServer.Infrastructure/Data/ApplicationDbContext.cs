@@ -2336,6 +2336,14 @@ public sealed class FoodVariantEntity
     /// <summary>How many source records had this exact ingredient combination.</summary>
     public int TimesSeen { get; set; }
 
+    /// <summary>
+    /// Identity UserIds of every player whose client upload reported this exact
+    /// variation (first uploader first; empty for admin-imported data). Stored as a
+    /// JSON list like the other collections; plain strings (no FK) so user deletion
+    /// never cascades into the catalog.
+    /// </summary>
+    public List<string> Contributors { get; set; } = new();
+
     public List<FoodFep> Feps { get; set; } = new();
 
     public List<FoodIngredient> Ingredients { get; set; } = new();

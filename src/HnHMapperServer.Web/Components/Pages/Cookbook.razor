@@ -849,6 +849,13 @@
                                                                 {
                                                                     <span class="variant-seen">×@variantRow.Variant.TimesSeen</span>
                                                                 }
+                                                                @if (variantRow.Variant.ContributorNames.Count > 0)
+                                                                {
+                                                                    <span class="contrib-name"
+                                                                          title="Uploaded by @string.Join(", ", variantRow.Variant.ContributorNames)">
+                                                                        <MudIcon Icon="@Icons.Material.Filled.PersonAddAlt1" Size="Size.Small" />@variantRow.Variant.ContributorNames[0]@(variantRow.Variant.ContributorNames.Count > 1 ? $" +{variantRow.Variant.ContributorNames.Count - 1}" : "")
+                                                                    </span>
+                                                                }
                                                             </MudTd>
                                                             <MudTd Class="py-1">
                                                                 <div class="variant-bar">

@@ -176,6 +176,9 @@ public class FoodVariantDto
     /// <summary>How many source records had this exact ingredient combination.</summary>
     public int TimesSeen { get; set; }
 
+    /// <summary>Usernames of everyone who uploaded this variation (empty for imported data).</summary>
+    public List<string> ContributorNames { get; set; } = new();
+
     public List<FoodFepDto> Feps { get; set; } = new();
 
     public List<FoodIngredientDto> Ingredients { get; set; } = new();

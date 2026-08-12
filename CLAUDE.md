@@ -738,6 +738,13 @@ mixed with free text (`meat str>50% int2>15`):
   of the variant's own total; skipped while a focused panel chip pins a variant).
 - **Data:** `FoodRow` gained `StatTierTotals` (keys `"STR1"`/`"STR2"`) since the existing
   `StatTotals` merges tiers.
+- **Variant contributors (2026-08-12):** `FoodVariants.Contributors` — a JSON string-list column
+  (like `SatiationGroups`, migration `AddVariantContributors`, default `[]`) holding the Identity
+  UserIds of *everyone* whose client upload reported that exact variation: set on new-variant
+  ingestion, appended (deduped) when a re-upload bumps `TimesSeen`. `FoodVariantDto.ContributorNames`
+  resolves usernames batched in `GetVariationsAsync`; the variations table shows a `contrib-name`
+  tag ("name +N", full list in the tooltip). Pre-existing variations stay anonymous (`[]`) — the
+  uploader was never recorded. Food-level `ContributedBy` (first discoverer) is unchanged.
 
 ### 2026-08-10: Superadmin tenant data purge
 
