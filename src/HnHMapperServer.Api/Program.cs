@@ -143,6 +143,7 @@ builder.Services.AddScoped<ITenantFilePathService, TenantFilePathService>();
 builder.Services.AddScoped<ITenantDataPurgeService, TenantDataPurgeService>();  // Superadmin: wipe tenant content, keep users
 builder.Services.AddScoped<IAuditService, AuditService>();  // Phase 6: Audit logging service
 builder.Services.AddScoped<INotificationService, NotificationService>();  // Notification system
+builder.Services.AddScoped<ICookbookNotificationService, CookbookNotificationService>();  // "New foods" digest coalescing
 builder.Services.AddScoped<ITimerService, TimerService>();  // Timer system
 builder.Services.AddScoped<ITimerWarningService, TimerWarningService>();  // Timer warning tracking
 builder.Services.AddScoped<IHmapImportService, HmapImportService>();  // .hmap file import service
@@ -226,6 +227,7 @@ builder.Services.AddHostedService<PingCleanupService>(); // Ping cleanup service
 builder.Services.AddHostedService<ZoomTileRebuildService>(); // Zoom tile rebuild service (safety net for missed tiles)
 builder.Services.AddHostedService<ZoomTileProcessorService>(); // Fast zoom tile pre-generation from upload queue
 builder.Services.AddHostedService<TimerCheckService>(); // Timer monitoring and notification service
+builder.Services.AddHostedService<NotificationCleanupService>(); // Expired notification cleanup (30-min interval)
 builder.Services.AddHostedService<PreviewCleanupService>(); // Map preview cleanup service (7 day retention)
 builder.Services.AddHostedService<HmapTempCleanupService>(); // HMAP temp file cleanup service (7 day retention)
 builder.Services.AddHostedService<OrphanedMarkerCleanupService>(); // Orphaned marker cleanup service

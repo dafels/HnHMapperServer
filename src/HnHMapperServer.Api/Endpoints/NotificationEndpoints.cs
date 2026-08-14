@@ -1,7 +1,9 @@
 using System.Security.Claims;
+using System.Text.Json;
 using HnHMapperServer.Core.DTOs;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
 
 namespace HnHMapperServer.Api.Endpoints;
 
@@ -17,6 +19,10 @@ public static class NotificationEndpoints
 
         // Get user's notifications
         group.MapGet("", GetNotifications);
+
+        // Live notification stream (SSE) — works on every page, unlike /map/updates
+        // which requires Map permission and carries the full map traffic
+        group.MapGet("stream", StreamNotifications);
 
         // Get notification by ID
         group.MapGet("{id:int}", GetNotificationById);
@@ -35,6 +41,128 @@ public static class NotificationEndpoints
 
         // Delete all read notifications
         group.MapDelete("read", DeleteAllRead);
+    }
+
+    // CamelCase to match the /map/updates SSE contract and client expectations
+    private static readonly JsonSerializerOptions SseJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
+    /// <summary>
+    /// Lightweight SSE stream carrying only notification events, for the notification bell
+    /// on every authenticated page. Does no DB work — it just drains the in-memory channels.
+    /// </summary>
+    private static async Task StreamNotifications(
+        HttpContext context,
+        IUpdateNotificationService updateNotificationService,
+        ILogger<Program> logger)
+    {
+        var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var tenantId = context.Items["TenantId"] as string;
+        if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(tenantId))
+        {
+            context.Response.StatusCode = 401;
+            return;
+        }
+
+        context.Response.ContentType = "text/event-stream; charset=utf-8";
+        context.Response.Headers.Append("Cache-Control", "no-cache, no-store, must-revalidate");
+        context.Response.Headers.Append("X-Accel-Buffering", "no");
+        context.Response.Headers.Append("X-Content-Type-Options", "nosniff");
+        context.Response.Headers.Append("Connection", "keep-alive");
+        context.Response.Headers.Append("Pragma", "no-cache");
+        context.Response.Headers.Append("Expires", "0");
+
+        // Kestrel would abort the connection below ~240 bytes/second; the stream is mostly idle
+        var minResponseDataRateFeature = context.Features.Get<IHttpMinResponseDataRateFeature>();
+        if (minResponseDataRateFeature != null)
+        {
+            minResponseDataRateFeature.MinDataRate = null;
+        }
+
+        var created = updateNotificationService.SubscribeToNotificationCreated();
+        var updated = updateNotificationService.SubscribeToNotificationUpdated();
+        var read = updateNotificationService.SubscribeToNotificationRead();
+        var dismissed = updateNotificationService.SubscribeToNotificationDismissed();
+
+        try
+        {
+            // Immediate first byte so the browser fires onopen right away
+            await context.Response.WriteAsync(": connected\n\n", context.RequestAborted);
+            await context.Response.Body.FlushAsync(context.RequestAborted);
+
+            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
+            var idleTicks = 0;
+
+            while (await timer.WaitForNextTickAsync(context.RequestAborted))
+            {
+                var sentData = false;
+
+                // SECURITY: created/updated carry content — only this tenant's, and only
+                // per-user rows addressed to this user (UserId == null is a tenant broadcast)
+                while (created.TryRead(out var notification))
+                {
+                    if (notification.TenantId == tenantId &&
+                        (notification.UserId == null || notification.UserId == userId))
+                    {
+                        var json = JsonSerializer.Serialize(notification, SseJsonOptions);
+                        await context.Response.WriteAsync($"event: notificationCreated\ndata: {json}\n\n");
+                        sentData = true;
+                    }
+                }
+
+                while (updated.TryRead(out var notification))
+                {
+                    if (notification.TenantId == tenantId &&
+                        (notification.UserId == null || notification.UserId == userId))
+                    {
+                        var json = JsonSerializer.Serialize(notification, SseJsonOptions);
+                        await context.Response.WriteAsync($"event: notificationUpdated\ndata: {json}\n\n");
+                        sentData = true;
+                    }
+                }
+
+                // Read/dismiss events are id-only (same contract as /map/updates)
+                while (read.TryRead(out var readId))
+                {
+                    var json = JsonSerializer.Serialize(new { Id = readId }, SseJsonOptions);
+                    await context.Response.WriteAsync($"event: notificationRead\ndata: {json}\n\n");
+                    sentData = true;
+                }
+
+                while (dismissed.TryRead(out var dismissedId))
+                {
+                    var json = JsonSerializer.Serialize(new { Id = dismissedId }, SseJsonOptions);
+                    await context.Response.WriteAsync($"event: notificationDismissed\ndata: {json}\n\n");
+                    sentData = true;
+                }
+
+                if (sentData)
+                {
+                    await context.Response.Body.FlushAsync(context.RequestAborted);
+                    idleTicks = 0;
+                }
+                else
+                {
+                    // Keep-alive comment every ~5s of idle (VPNs/proxies drop idle connections)
+                    idleTicks++;
+                    if (idleTicks % 10 == 0)
+                    {
+                        await context.Response.WriteAsync(": keep-alive\n\n");
+                        await context.Response.Body.FlushAsync(context.RequestAborted);
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogDebug("Notification SSE stream closed for user {UserId}", userId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unhandled exception in notification SSE stream");
+        }
     }
 
     /// <summary>

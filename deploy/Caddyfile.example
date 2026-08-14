@@ -49,6 +49,9 @@ yourdomain.com {
   # Match requests to Server-Sent Events for real-time updates (API service)
   @mapsse path /map/updates
 
+  # Match the notification bell's SSE stream (API service)
+  @notifsse path /api/notifications/stream
+
   # Match Blazor SignalR connections (Web service - must not be compressed)
   @blazor path /_blazor/*
 
@@ -68,6 +71,24 @@ yourdomain.com {
     # Handle SSE FIRST (before any encoding middleware)
     # CRITICAL: No compression or buffering for SSE streaming to work
     handle @mapsse {
+      header Cache-Control "no-cache"
+      header Connection "keep-alive"
+      reverse_proxy api:8080 {
+        flush_interval -1
+
+        # Disable all timeouts for long-lived SSE connections
+        transport http {
+          read_timeout 0
+          write_timeout 0
+          dial_timeout 30s
+        }
+      }
+    }
+
+    # Notification bell SSE stream - same no-compression/no-buffering rules as @mapsse.
+    # Without this rule the path would fall through to the Web service behind gzip,
+    # which buffers and stalls SSE.
+    handle @notifsse {
       header Cache-Control "no-cache"
       header Connection "keep-alive"
       reverse_proxy api:8080 {

@@ -174,6 +174,67 @@ public class NotificationEventDto
 }
 
 /// <summary>
+/// Structured payload stored in NotificationEntity.ActionData for CookbookFoodAdded
+/// digests, serialized camelCase. Carries the deep-link targets and the bell's stat
+/// preview; every list is capped so the column stays bounded while TotalCount keeps
+/// the real number.
+/// </summary>
+public class CookbookNotificationActionData
+{
+    public const int CurrentSchemaVersion = 1;
+    public const int MaxFoodIds = 50;
+    public const int MaxFoodNames = 20;
+    public const int MaxWorlds = 8;
+    public const int MaxContributors = 10;
+    public const int MaxPreviews = 8;
+
+    public int SchemaVersion { get; set; } = CurrentSchemaVersion;
+
+    /// <summary>Total new foods in the digest (uncapped, unlike the lists below).</summary>
+    public int TotalCount { get; set; }
+
+    /// <summary>Ids of the new foods, insertion order, first MaxFoodIds.</summary>
+    public List<int> FoodIds { get; set; } = new();
+
+    /// <summary>Names aligned with the first entries of FoodIds, first MaxFoodNames.</summary>
+    public List<string> FoodNames { get; set; } = new();
+
+    /// <summary>Distinct genus hashes the foods were discovered in (see GameWorlds).</summary>
+    public List<string> Worlds { get; set; } = new();
+
+    /// <summary>Usernames of the uploaders, deduped, insertion order.</summary>
+    public List<string> ContributorNames { get; set; } = new();
+
+    /// <summary>New recipe variations that accompanied the new foods (not shown in the message).</summary>
+    public int VariantCount { get; set; }
+
+    /// <summary>Compact stat previews of the first MaxPreviews foods, for bell rendering.</summary>
+    public List<CookbookNotificationFoodPreview> Previews { get; set; } = new();
+
+    /// <summary>UTC time of the last merge into this digest.</summary>
+    public DateTime LastUpdatedAt { get; set; }
+}
+
+/// <summary>Compact stat preview of one newly discovered food.</summary>
+public class CookbookNotificationFoodPreview
+{
+    public int Id { get; set; }
+
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Game resource path, e.g. "gfx/invobjs/autumnsteak" — the icon source.</summary>
+    public string ResourceName { get; set; } = string.Empty;
+
+    /// <summary>Energy restored when eaten (game percent points).</summary>
+    public int Energy { get; set; }
+
+    /// <summary>Hunger cost per bite.</summary>
+    public decimal Hunger { get; set; }
+
+    public List<FoodFepDto> Feps { get; set; } = new();
+}
+
+/// <summary>
 /// DTO for querying notifications
 /// </summary>
 public class NotificationQuery

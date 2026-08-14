@@ -135,7 +135,7 @@ public static partial class ClientEndpoints
         ApplicationDbContext db,
         ITokenService tokenService,
         IFoodCatalogService foodCatalogService,
-        INotificationService notificationService,
+        ICookbookNotificationService cookbookNotificationService,
         ITenantActivityService activityService,
         ILogger<Program> logger)
     {
@@ -189,7 +189,10 @@ public static partial class ClientEndpoints
 
         if (result.NewFoods > 0)
         {
-            await NotifyTenantOfNewFoodsAsync(db, notificationService, tenantId, userId, result, logger);
+            // Rolling per-tenant digest: bursts merge instead of stacking rows.
+            // Never throws — a failed notification must not fail the upload.
+            await cookbookNotificationService.NotifyNewFoodsAsync(
+                tenantId, userId, result.NewFoodDetails, result.NewVariants);
         }
 
         if (result.NewFoods > 0 || result.NewVariants > 0)
@@ -200,55 +203,6 @@ public static partial class ClientEndpoints
         }
 
         return Results.Json(result);
-    }
-
-    /// <summary>
-    /// One digest notification per upload batch that created new foods,
-    /// broadcast to the whole tenant (UserId = null).
-    /// </summary>
-    private static async Task NotifyTenantOfNewFoodsAsync(
-        ApplicationDbContext db,
-        INotificationService notificationService,
-        string tenantId,
-        string? userId,
-        FoodUploadResultDto result,
-        ILogger<Program> logger)
-    {
-        try
-        {
-            var username = "A player";
-            if (!string.IsNullOrEmpty(userId))
-            {
-                username = await db.Users.AsNoTracking()
-                    .Where(u => u.Id == userId)
-                    .Select(u => u.UserName)
-                    .FirstOrDefaultAsync() ?? username;
-            }
-
-            var names = result.NewFoodNames.Take(3).ToList();
-            var listed = string.Join(", ", names);
-            if (result.NewFoodNames.Count > names.Count)
-            {
-                listed += $", … (+{result.NewFoodNames.Count - names.Count} more)";
-            }
-
-            await notificationService.CreateAsync(new CreateNotificationDto
-            {
-                TenantId = tenantId,
-                UserId = null, // broadcast to everyone in the tenant
-                Type = "CookbookFoodAdded",
-                Title = "New cookbook entries",
-                Message = result.NewFoodNames.Count == 1
-                    ? $"{username} discovered {listed} — check it out in the cookbook!"
-                    : $"{username} discovered {result.NewFoodNames.Count} new foods: {listed}",
-                ActionType = "NoAction"
-            });
-        }
-        catch (Exception ex)
-        {
-            // A failed notification must never fail the upload.
-            logger.LogWarning(ex, "Failed to create cookbook notification for tenant {TenantId}", tenantId);
-        }
     }
 
     /// <summary>

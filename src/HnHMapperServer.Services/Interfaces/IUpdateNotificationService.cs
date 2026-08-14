@@ -162,6 +162,11 @@ public interface IUpdateNotificationService
     ChannelReader<NotificationEventDto> SubscribeToNotificationCreated();
 
     /// <summary>
+    /// Subscribes to notification in-place update events (e.g. a coalesced digest changed)
+    /// </summary>
+    ChannelReader<NotificationEventDto> SubscribeToNotificationUpdated();
+
+    /// <summary>
     /// Subscribes to notification read events
     /// </summary>
     ChannelReader<int> SubscribeToNotificationRead();
@@ -175,6 +180,11 @@ public interface IUpdateNotificationService
     /// Notifies all subscribers of a notification creation
     /// </summary>
     void NotifyNotificationCreated(NotificationEventDto notification);
+
+    /// <summary>
+    /// Notifies all subscribers of a notification changing in place (e.g. a coalesced digest)
+    /// </summary>
+    void NotifyNotificationUpdated(NotificationEventDto notification);
 
     /// <summary>
     /// Notifies all subscribers of a notification being read

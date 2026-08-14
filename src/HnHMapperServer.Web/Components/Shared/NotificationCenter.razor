@@ -1,4 +1,5 @@
 @using System.Net.Http.Json
+@using HnHMapperServer.Core.Cookbook
 @using HnHMapperServer.Core.DTOs
 @using Microsoft.JSInterop
 @inject IHttpClientFactory HttpClientFactory
@@ -18,6 +19,7 @@
              AnchorOrigin="Origin.BottomRight"
              TransformOrigin="Origin.TopRight"
              MaxHeight="500"
+             OpenChanged="HandleMenuOpenChanged"
              @ref="_menu">
         <div style="min-width: 350px; max-height: 500px; overflow-y: auto;">
             @if (_notifications == null || _loading)
@@ -74,6 +76,40 @@
                                     </MudText>
                                 }
 
+                                @* Stat preview for newly discovered foods (FEP pills share the cookbook palette) *@
+                                @if (notification.Type == "CookbookFoodAdded" && GetCookbookPreview(notification) is { } ckData && ckData.Previews.Count > 0)
+                                {
+                                    <div class="ck-notif-previews">
+                                        @foreach (var food in ckData.Previews.Take(MaxBellPreviews))
+                                        {
+                                            <div class="ck-notif-food">
+                                                @if (!string.IsNullOrEmpty(food.ResourceName))
+                                                {
+                                                    <img class="ck-notif-icon"
+                                                         src="@FoodIcons.LocalSrc(food.ResourceName)"
+                                                         onerror="@FoodIcons.RemoteFallback(food.ResourceName)"
+                                                         loading="lazy" alt="" />
+                                                }
+                                                <span class="ck-notif-food-name" title="@food.Name">@food.Name</span>
+                                                @foreach (var fep in food.Feps.OrderByDescending(f => f.Value).Take(4))
+                                                {
+                                                    <span class="ck-notif-fep"
+                                                          style="background: @FepPalette.Color(fep.Attribute, fep.Tier);"
+                                                          title="@FepPalette.FullName(fep.Attribute) +@fep.Tier: @fep.Value.ToString("0.##")">
+                                                        @fep.Attribute.ToUpperInvariant()@(fep.Tier == 2 ? "+2" : "") @fep.Value.ToString("0.#")
+                                                    </span>
+                                                }
+                                                <span class="ck-notif-meta">@food.Energy% · @food.Hunger.ToString("0.##") hunger</span>
+                                            </div>
+                                        }
+                                        @{ var shownPreviews = Math.Min(ckData.Previews.Count, MaxBellPreviews); }
+                                        @if (ckData.TotalCount > shownPreviews)
+                                        {
+                                            <div class="ck-notif-more">+@(ckData.TotalCount - shownPreviews) more in the cookbook</div>
+                                        }
+                                    </div>
+                                }
+
                                 <MudText Typo="Typo.caption" Color="Color.Tertiary" Class="mt-1">
                                     @FormatTimestamp(notification.CreatedAt)
                                 </MudText>
@@ -96,6 +132,16 @@
 </MudBadge>
 
 @code {
+    private const int MaxListLength = 50;
+    private const int MaxBellPreviews = 3;
+
+    // ActionData JSON is camelCase; Blazor's case-insensitive interop doesn't apply
+    // to our own System.Text.Json calls, so be explicit.
+    private static readonly System.Text.Json.JsonSerializerOptions CookbookActionDataJson = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
     private MudMenu? _menu;
     private List<NotificationDto>? _notifications;
     private int _unreadCount = 0;
@@ -103,6 +149,10 @@
     private int? _hoveredId = null;
     private DotNetObjectReference<NotificationCenter>? _objRef;
     private bool _isRendered = false;
+
+    // Parsed CookbookFoodAdded payloads, keyed by notification id; the raw string is
+    // kept so a digest merge (same id, new ActionData) re-parses.
+    private readonly Dictionary<int, (string Raw, CookbookNotificationActionData? Data)> _cookbookDataCache = new();
 
     protected override async Task OnInitializedAsync()
     {
@@ -129,23 +179,52 @@
         }
     }
 
-    private async Task LoadNotifications()
+    private async Task LoadNotifications(bool silent = false)
     {
-        _loading = true;
+        // Silent refreshes (menu open, SSE reconnect) skip the spinner so an
+        // already-rendered list doesn't flash the progress bar.
+        if (!silent)
+        {
+            _loading = true;
+        }
         try
         {
             var httpClient = HttpClientFactory.CreateClient("API");
             _notifications = await httpClient.GetFromJsonAsync<List<NotificationDto>>("/api/notifications?includeRead=false&limit=20");
+
+            // Drop cached cookbook payloads for rows no longer in the list
+            if (_notifications != null && _cookbookDataCache.Count > 0)
+            {
+                var liveIds = _notifications.Select(n => n.Id).ToHashSet();
+                foreach (var staleId in _cookbookDataCache.Keys.Where(id => !liveIds.Contains(id)).ToList())
+                {
+                    _cookbookDataCache.Remove(staleId);
+                }
+            }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Error loading notifications: {ex.Message}");
-            _notifications = new List<NotificationDto>();
+            _notifications ??= new List<NotificationDto>();
         }
         finally
         {
             _loading = false;
         }
+    }
+
+    private async Task HandleMenuOpenChanged(bool open)
+    {
+        if (!open)
+        {
+            return;
+        }
+
+        // Cheap staleness fix: the bell otherwise only knows what SSE delivered
+        // since page load (and read-all / delete-read fire no per-id events).
+        await LoadNotifications(silent: _notifications != null);
+        await LoadUnreadCount();
+        await InvokeAsync(StateHasChanged);
     }
 
     private async Task LoadUnreadCount()
@@ -189,6 +268,10 @@
                     {
                         await NavigateToCustomMarker(notification.ActionData);
                     }
+                    break;
+
+                case "NavigateToCookbook":
+                    NavigateToCookbook(notification.ActionData);
                     break;
 
                 // Future action types can be added here
@@ -264,6 +347,7 @@
                 }
                 _notifications?.Remove(notification);
             }
+            _cookbookDataCache.Remove(notificationId);
 
             await InvokeAsync(StateHasChanged);
         }
@@ -310,6 +394,35 @@
         }
     }
 
+    private void NavigateToCookbook(string? actionData)
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(actionData))
+            {
+                var data = System.Text.Json.JsonSerializer.Deserialize<CookbookNotificationActionData>(
+                    actionData, CookbookActionDataJson);
+                if (data != null && data.FoodIds.Count > 0)
+                {
+                    // Same circuit — /cookbook picks the params up via [SupplyParameterFromQuery]
+                    var url = $"/cookbook?highlight={string.Join(",", data.FoodIds)}";
+                    if (data.Worlds.Count > 0 && !string.IsNullOrEmpty(data.Worlds[0]))
+                    {
+                        url += $"&hlworld={Uri.EscapeDataString(data.Worlds[0])}";
+                    }
+                    Navigation.NavigateTo(url);
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error navigating to cookbook: {ex.Message}");
+        }
+
+        Navigation.NavigateTo("/cookbook");
+    }
+
     private string GetNotificationIcon(string type)
     {
         return type switch
@@ -317,6 +430,7 @@
             "MarkerTimerExpired" => Icons.Material.Filled.AlarmOn,
             "StandaloneTimerExpired" => Icons.Material.Filled.AlarmOn,
             "TimerPreExpiryWarning" => Icons.Material.Filled.AlarmAdd,
+            "CookbookFoodAdded" => Icons.Material.Filled.Restaurant,
             "Info" => Icons.Material.Filled.Info,
             "Warning" => Icons.Material.Filled.Warning,
             "Error" => Icons.Material.Filled.Error,
@@ -359,22 +473,93 @@
     }
 
     /// <summary>
-    /// Called from JavaScript when a new notification arrives via SSE
+    /// Called from JavaScript when a new notification arrives via SSE.
+    /// Upsert-by-Id: redelivery after a stream reconnect must not duplicate rows.
     /// </summary>
     [JSInvokable]
     public async Task OnNotificationReceived(NotificationDto notification)
     {
-        // Add to list
         _notifications ??= new List<NotificationDto>();
-        _notifications.Insert(0, notification);
 
-        // Update unread count
-        if (!notification.IsRead)
+        var index = _notifications.FindIndex(n => n.Id == notification.Id);
+        if (index >= 0)
         {
-            _unreadCount++;
+            ReplaceAt(index, notification);
+        }
+        else
+        {
+            _notifications.Insert(0, notification);
+            if (!notification.IsRead)
+            {
+                _unreadCount++;
+            }
+
+            // Bound the in-memory list (the REST fetch window is 20)
+            if (_notifications.Count > MaxListLength)
+            {
+                _notifications.RemoveRange(MaxListLength, _notifications.Count - MaxListLength);
+            }
         }
 
         await InvokeAsync(StateHasChanged);
+    }
+
+    /// <summary>
+    /// Called from JavaScript when a coalesced digest changes in place. Deliberately
+    /// silent: no toast/sound (JS side), position kept, badge only moves on a genuine
+    /// read-state flip — a cooking session updates one row instead of stacking.
+    /// </summary>
+    [JSInvokable]
+    public async Task OnNotificationUpdated(NotificationDto notification)
+    {
+        _notifications ??= new List<NotificationDto>();
+
+        var index = _notifications.FindIndex(n => n.Id == notification.Id);
+        if (index >= 0)
+        {
+            ReplaceAt(index, notification);
+        }
+        else
+        {
+            // The digest predates this page's fetch window — insert silently and let
+            // the server say what the real unread count is.
+            _notifications.Insert(0, notification);
+            await LoadUnreadCount();
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    /// <summary>
+    /// Called from JavaScript after the SSE stream reconnects: refetch to heal
+    /// anything missed while it was down.
+    /// </summary>
+    [JSInvokable]
+    public async Task OnStreamReconnected()
+    {
+        await LoadNotifications(silent: true);
+        await LoadUnreadCount();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    /// <summary>
+    /// Replace a list entry with fresh content, adjusting the unread count only by
+    /// the read-state delta.
+    /// </summary>
+    private void ReplaceAt(int index, NotificationDto notification)
+    {
+        var wasUnread = !_notifications![index].IsRead;
+        _notifications[index] = notification;
+        var isUnread = !notification.IsRead;
+
+        if (wasUnread && !isUnread)
+        {
+            _unreadCount = Math.Max(0, _unreadCount - 1);
+        }
+        else if (!wasUnread && isUnread)
+        {
+            _unreadCount++;
+        }
     }
 
     /// <summary>
@@ -398,6 +583,7 @@
     [JSInvokable]
     public async Task OnNotificationDismissed(int notificationId)
     {
+        _cookbookDataCache.Remove(notificationId);
         var notification = _notifications?.FirstOrDefault(n => n.Id == notificationId);
         if (notification != null)
         {
@@ -422,6 +608,7 @@
             "MarkerTimerExpired" => Severity.Success,
             "StandaloneTimerExpired" => Severity.Success,
             "TimerPreExpiryWarning" => Severity.Warning,
+            "CookbookFoodAdded" => Severity.Success,
             "Error" => Severity.Error,
             "Warning" => Severity.Warning,
             "Success" => Severity.Success,
@@ -467,6 +654,42 @@
         }
 
         _objRef?.Dispose();
+    }
+
+    /// <summary>
+    /// Parsed ActionData for a CookbookFoodAdded row (memoized); null when missing,
+    /// unparseable, or from an unknown newer schema.
+    /// </summary>
+    private CookbookNotificationActionData? GetCookbookPreview(NotificationDto notification)
+    {
+        if (string.IsNullOrEmpty(notification.ActionData))
+        {
+            return null;
+        }
+
+        if (_cookbookDataCache.TryGetValue(notification.Id, out var cached)
+            && cached.Raw == notification.ActionData)
+        {
+            return cached.Data;
+        }
+
+        CookbookNotificationActionData? data = null;
+        try
+        {
+            data = System.Text.Json.JsonSerializer.Deserialize<CookbookNotificationActionData>(
+                notification.ActionData, CookbookActionDataJson);
+            if (data != null && data.SchemaVersion > CookbookNotificationActionData.CurrentSchemaVersion)
+            {
+                data = null;
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // Legacy/foreign payload — no preview, message text still renders
+        }
+
+        _cookbookDataCache[notification.Id] = (notification.ActionData, data);
+        return data;
     }
 
     // Helper classes for JSON deserialization

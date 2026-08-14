@@ -629,6 +629,7 @@ public static class MapEndpoints
         var roadDeleted = updateNotificationService.SubscribeToRoadDeleted();
         var overlayUpdated = updateNotificationService.SubscribeToOverlayUpdated();
         var notificationCreated = updateNotificationService.SubscribeToNotificationCreated();
+        var notificationUpdated = updateNotificationService.SubscribeToNotificationUpdated();
         var notificationRead = updateNotificationService.SubscribeToNotificationRead();
         var notificationDismissed = updateNotificationService.SubscribeToNotificationDismissed();
         var timerCreated = updateNotificationService.SubscribeToTimerCreated();
@@ -888,6 +889,20 @@ public static class MapEndpoints
                     {
                         var notificationJson = JsonSerializer.Serialize(notification, jsonOptions);
                         await context.Response.WriteAsync($"event: notificationCreated\ndata: {notificationJson}\n\n");
+                        await context.Response.Body.FlushAsync();
+                    }
+                }
+
+                // Check for notification in-place update events (coalesced digests)
+                // SECURITY: same tenant/user filter as creation events
+                while (notificationUpdated.TryRead(out var updatedNotification))
+                {
+                    var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                    if (updatedNotification.TenantId == tenantId &&
+                        (updatedNotification.UserId == null || updatedNotification.UserId == userId))
+                    {
+                        var updatedJson = JsonSerializer.Serialize(updatedNotification, jsonOptions);
+                        await context.Response.WriteAsync($"event: notificationUpdated\ndata: {updatedJson}\n\n");
                         await context.Response.Body.FlushAsync();
                     }
                 }

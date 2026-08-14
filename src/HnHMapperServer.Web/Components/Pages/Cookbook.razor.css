@@ -1060,3 +1060,49 @@
     font-size: 0.8rem;
     padding-right: 6px;
 }
+
+/* ----- "New" recency badge + facet chip + notification deep-link highlight ----- */
+
+/* Badge on recently player-discovered foods (geometry mirrors .prep-badge) */
+.new-badge {
+    display: inline-block;
+    margin-left: 7px;
+    padding: 0 7px;
+    border-radius: 9px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1.7;
+    background: #d6ecd8;
+    border: 1px solid rgba(46, 125, 50, 0.35);
+    color: #1b5e20; /* ~7.6:1 on #d6ecd8 */
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
+/* "New (7d)" facet chip (same family as .stat-chip.world) */
+.stat-chip.newfoods {
+    background: #cde9cf;
+    font-weight: 600;
+}
+
+/* Rows deep-linked from a "new foods" notification: persistent tint + one-shot pulse.
+   Backgrounds only — text colors untouched, so the contrast tiers are unaffected. */
+.cookbook-page ::deep .ck-new-flash .mud-table-cell {
+    background: rgba(129, 199, 132, 0.16);
+    animation: ck-new-pulse 1.2s ease-in-out 2;
+}
+
+.cookbook-page ::deep .ck-new-flash .mud-table-cell:first-child {
+    box-shadow: inset 3px 0 0 #2e7d32;
+}
+
+@keyframes ck-new-pulse {
+    0%, 100% { background: rgba(129, 199, 132, 0.16); }
+    50%      { background: rgba(129, 199, 132, 0.42); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cookbook-page ::deep .ck-new-flash .mud-table-cell {
+        animation: none;
+    }
+}

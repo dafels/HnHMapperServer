@@ -95,7 +95,7 @@ public class TimerCheckService : BackgroundService
 
                                     if (!warningSent)
                                     {
-                                        await ProcessPreExpiryWarning(timer, warningMinutes, notificationService, updateNotificationService, timerWarningService);
+                                        await ProcessPreExpiryWarning(timer, warningMinutes, notificationService, timerWarningService);
                                         warningCount++;
                                     }
                                 }
@@ -171,8 +171,8 @@ public class TimerCheckService : BackgroundService
                 actionType = "NoAction";
             }
 
-            // Create notification
-            var notificationDto = await notificationService.CreateAsync(new CreateNotificationDto
+            // Create notification (CreateAsync also broadcasts it over SSE)
+            await notificationService.CreateAsync(new CreateNotificationDto
             {
                 TenantId = timer.TenantId,
                 UserId = timer.UserId, // Send to specific user who created the timer
@@ -189,27 +189,9 @@ public class TimerCheckService : BackgroundService
             await timerService.MarkNotificationSentAsync(timer.Id);
 
             // Broadcast SSE event for timer completion
+            // (the notification itself is broadcast by NotificationService.CreateAsync)
             var timerEvent = TimerService.MapToEventDto(timer);
             updateNotificationService.NotifyTimerCompleted(timerEvent);
-
-            // Broadcast SSE event for new notification
-            // Get the full entity to map to event DTO
-            var notificationEntity = new NotificationEntity
-            {
-                Id = notificationDto.Id,
-                TenantId = notificationDto.TenantId,
-                UserId = notificationDto.UserId,
-                Type = notificationDto.Type,
-                Title = notificationDto.Title,
-                Message = notificationDto.Message,
-                ActionType = notificationDto.ActionType,
-                ActionData = notificationDto.ActionData,
-                Priority = notificationDto.Priority,
-                CreatedAt = notificationDto.CreatedAt,
-                IsRead = false
-            };
-            var notificationEvent = NotificationService.MapToEventDto(notificationEntity);
-            updateNotificationService.NotifyNotificationCreated(notificationEvent);
 
             _logger.LogInformation(
                 "Timer {TimerId} expired: '{Title}' for tenant {TenantId}",
@@ -230,7 +212,6 @@ public class TimerCheckService : BackgroundService
         TimerEntity timer,
         int warningMinutes,
         INotificationService notificationService,
-        IUpdateNotificationService updateNotificationService,
         ITimerWarningService timerWarningService)
     {
         try
@@ -256,8 +237,8 @@ public class TimerCheckService : BackgroundService
                 _ => "Normal"
             };
 
-            // Create warning notification
-            var notificationDto = await notificationService.CreateAsync(new CreateNotificationDto
+            // Create warning notification (CreateAsync also broadcasts it over SSE)
+            await notificationService.CreateAsync(new CreateNotificationDto
             {
                 TenantId = timer.TenantId,
                 UserId = timer.UserId,
@@ -273,25 +254,8 @@ public class TimerCheckService : BackgroundService
             });
 
             // Mark this specific warning as sent
+            // (the notification broadcast happens inside NotificationService.CreateAsync)
             await timerWarningService.MarkWarningSentAsync(timer.Id, warningMinutes);
-
-            // Broadcast SSE event for new notification
-            var notificationEntity = new NotificationEntity
-            {
-                Id = notificationDto.Id,
-                TenantId = notificationDto.TenantId,
-                UserId = notificationDto.UserId,
-                Type = notificationDto.Type,
-                Title = notificationDto.Title,
-                Message = notificationDto.Message,
-                ActionType = notificationDto.ActionType,
-                ActionData = notificationDto.ActionData,
-                Priority = notificationDto.Priority,
-                CreatedAt = notificationDto.CreatedAt,
-                IsRead = false
-            };
-            var notificationEvent = NotificationService.MapToEventDto(notificationEntity);
-            updateNotificationService.NotifyNotificationCreated(notificationEvent);
 
             _logger.LogInformation(
                 "Pre-expiry warning sent for timer {TimerId}: '{Title}' ({TimeDesc} remaining, {WarningMinutes}m interval)",

@@ -69,10 +69,11 @@ public interface INotificationService
     Task<int> DeleteAllReadAsync(string userId);
 
     /// <summary>
-    /// Delete expired notifications (background cleanup).
+    /// Delete expired notifications across all tenants (background cleanup; bypasses the
+    /// tenant query filter, which cannot resolve outside an HTTP request).
     /// </summary>
-    /// <returns>Number of notifications deleted</returns>
-    Task<int> DeleteExpiredAsync();
+    /// <returns>Ids of the deleted notifications, for broadcasting dismissals</returns>
+    Task<List<int>> DeleteExpiredAsync();
 
     /// <summary>
     /// Get unread notification count for a user.

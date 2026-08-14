@@ -1038,6 +1038,7 @@ public class FoodCatalogService : IFoodCatalogService
         var wiki = await GetBundledWikiAsync(ct);
         var now = DateTime.UtcNow;
         var changed = false;
+        var newFoodEntities = new List<FoodEntity>();
 
         foreach (var upload in records)
         {
@@ -1072,6 +1073,7 @@ public class FoodCatalogService : IFoodCatalogService
                 await _dbContext.SaveChangesAsync(ct);
                 result.NewFoods++;
                 result.NewFoodNames.Add(name);
+                newFoodEntities.Add(food);
                 changed = true;
             }
 
@@ -1173,6 +1175,24 @@ public class FoodCatalogService : IFoodCatalogService
             _cache.Remove(CatalogCacheKey(tenantId));
             _cache.Remove(ConditionStatsCacheKey(tenantId));
         }
+
+        // Snapshot for the notification digest. The food rows were committed at creation
+        // (so their Ids are final even through the conflict-recovery ChangeTracker.Clear),
+        // and Worlds is read after the genus append so world tags from this batch are included.
+        result.NewFoodDetails = newFoodEntities
+            .Select(f => new FoodUploadNewFoodDto
+            {
+                FoodId = f.Id,
+                Name = f.Name,
+                ResourceName = f.ResourceName,
+                Energy = f.Energy,
+                Hunger = f.Hunger,
+                Worlds = f.Worlds.ToList(),
+                Feps = f.Feps
+                    .Select(fep => new FoodFepDto { Attribute = fep.Attribute, Tier = fep.Tier, Value = fep.Value })
+                    .ToList()
+            })
+            .ToList();
 
         if (result.NewFoods > 0 || result.NewVariants > 0)
         {

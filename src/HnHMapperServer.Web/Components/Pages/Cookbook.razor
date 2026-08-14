@@ -8,6 +8,8 @@
 @inject IHttpClientFactory HttpClientFactory
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
 
 <PageTitle>Cookbook - HnH Mapper</PageTitle>
 
@@ -139,6 +141,18 @@
                     </button>
                 </div>
             }
+            @if (_rows.Any(IsNewFood))
+            {
+                <div class="stat-chips">
+                    <span class="chips-label">Added</span>
+                    <button type="button"
+                            class="stat-chip newfoods @(_showNewOnly ? "selected" : "")"
+                            title="Foods discovered by players in the last 7 days — click to filter, newest first"
+                            @onclick="() => _showNewOnly = !_showNewOnly">
+                        New (7d)<span class="stat-chip-count">@NewChipCount</span>
+                    </button>
+                </div>
+            }
             <div class="stat-chips filter-input-row">
                 <span class="chips-label">Filter</span>
                 <MudTextField T="string"
@@ -230,6 +244,15 @@
                             @WorldLabel(_selectedWorld)<span class="stat-chip-count">&times;</span>
                         </span>
                     }
+                    @if (_showNewOnly)
+                    {
+                        <span class="stat-chip filter-chip"
+                              style="--chip-color: #cde9cf;"
+                              title="Recently discovered foods (last 7 days) — click to clear"
+                              @onclick="() => _showNewOnly = false">
+                            New (7d)<span class="stat-chip-count">&times;</span>
+                        </span>
+                    }
                     @foreach (var condition in _allConditions)
                     {
                         var isSorted = _conditionSortKey == SortKeyOf(condition);
@@ -273,6 +296,12 @@
                 <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined"
                          Icon="@Icons.Material.Filled.CenterFocusStrong"
                          OnClose="ClearFocus">@_focusFoodName</MudChip>
+            }
+            @if (_highlightIds.Count > 0)
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Outlined"
+                         Icon="@Icons.Material.Filled.Restaurant"
+                         OnClose="ClearHighlight">New foods (@_highlightIds.Count)</MudChip>
             }
             <div class="panels-bar-spacer"></div>
             <MudButton StartIcon="@Icons.Material.Filled.Add" Size="Size.Small" Variant="Variant.Text"
@@ -441,6 +470,7 @@
                           Elevation="0"
                           RowsPerPage="50"
                           OnRowClick="RowClicked"
+                          RowClassFunc="@MasterRowClass"
                           Breakpoint="Breakpoint.Sm">
                     <HeaderContent>
                         <MudTh Style="width: 36px;"></MudTh>
@@ -515,6 +545,11 @@
                                 @if (context.Prep != null)
                                 {
                                     <span class="prep-badge">@context.Prep</span>
+                                }
+                                @if (IsNewFood(context))
+                                {
+                                    <span class="new-badge"
+                                          title="Discovered by @context.Food.ContributedByName on @context.Food.ImportedAt.ToString("yyyy-MM-dd")">New</span>
                                 }
                                 @{ var shownVariantCount = WorldVariantCount(context); }
                                 @if (shownVariantCount > 1)
@@ -757,6 +792,10 @@
                                                 <div class="detail-row">
                                                     <span class="detail-label">Added by</span>
                                                     <span>@context.Food.ContributedByName &middot; @context.Food.ImportedAt.ToString("yyyy-MM-dd")</span>
+                                                    @if (IsNewFood(context))
+                                                    {
+                                                        <span class="new-badge">New</span>
+                                                    }
                                                 </div>
                                             }
                                             <div class="detail-row">
@@ -964,32 +1003,9 @@
 </div>
 
 @code {
-    // Cediner hnh-food-book palette (FEPBar.vue): muted tier-1, brighter tier-2 per stat.
-    private static readonly Dictionary<string, (string Tier1, string Tier2)> StatColors = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["STR"] = ("#BF9794", "#DF958F"),
-        ["AGI"] = ("#9995B8", "#9991DC"),
-        ["INT"] = ("#9DB7B9", "#97D6DC"),
-        ["CON"] = ("#C29AB4", "#E193C5"),
-        ["PER"] = ("#E4BF98", "#F2C28D"),
-        ["CHA"] = ("#9BEEB1", "#8EF7AA"),
-        ["DEX"] = ("#FEFDCC", "#FFFEA6"),
-        ["WILL"] = ("#E4F38F", "#EEFF9E"),
-        ["PSY"] = ("#C48DFD", "#C286FE")
-    };
-
-    private static readonly Dictionary<string, string> StatFullNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["STR"] = "Strength",
-        ["AGI"] = "Agility",
-        ["INT"] = "Intelligence",
-        ["CON"] = "Constitution",
-        ["PER"] = "Perception",
-        ["CHA"] = "Charisma",
-        ["DEX"] = "Dexterity",
-        ["WILL"] = "Will",
-        ["PSY"] = "Psyche"
-    };
+    // FEP palette lives in Core (FepPalette) so the notification bell's stat
+    // preview shares it; this alias keeps the page's many call sites unchanged.
+    private static readonly IReadOnlyDictionary<string, string> StatFullNames = FepPalette.StatFullNames;
 
     /// <summary>
     /// One master-table row. The Effective* fields (and every derived number: totals,
@@ -1336,15 +1352,141 @@
 
     private double QualityMultiplier => Math.Sqrt(Math.Max(1, _quality) / 10.0);
 
+    // ----- Notification deep link (?highlight=ids&hlworld=genus) -----
+
+    [SupplyParameterFromQuery(Name = "highlight")]
+    public string? HighlightCsv { get; set; }
+
+    [SupplyParameterFromQuery(Name = "hlworld")]
+    public string? HighlightWorld { get; set; }
+
+    private readonly HashSet<int> _highlightIds = new();
+    private string? _appliedHighlightCsv;
+    private bool _revealQueued;
+
+    // ----- "New" recency (badge + Added facet chip) -----
+
+    /// <summary>Frozen per catalog load so rows don't age out mid-session render by render.</summary>
+    private DateTime _newCutoffUtc = DateTime.UtcNow.AddDays(-7);
+    private bool _showNewOnly;
+
+    /// <summary>
+    /// Player-discovered within the last 7 days. ContributedByName != null excludes
+    /// admin bulk imports, which reset ImportedAt for the whole catalog.
+    /// </summary>
+    private bool IsNewFood(FoodRow r) =>
+        r.Food.ContributedByName != null && r.Food.ImportedAt >= _newCutoffUtc;
+
+    private int NewChipCount =>
+        CountBase(includeSatiation: true, includePrep: true, includeStat: true).Count(IsNewFood);
+
     protected override async Task OnInitializedAsync()
     {
         await Task.WhenAll(LoadCatalogAsync(), LoadPanelsAsync());
     }
 
+    /// <summary>
+    /// Applies the ?highlight= deep link. Lives in OnAfterRenderAsync (not OnParametersSet)
+    /// because the page prerenders: stripping the query there would erase it before the
+    /// interactive circuit sees it, and JS interop is illegal during prerender. Fires for
+    /// both entry paths — fresh load with the param, and an in-circuit NavigateTo from the
+    /// notification bell while already on /cookbook.
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (string.IsNullOrEmpty(HighlightCsv))
+        {
+            // Param gone (stripped or never set): allow the same digest to re-apply later.
+            _appliedHighlightCsv = null;
+        }
+        else if (HighlightCsv != _appliedHighlightCsv && !_loading && !_loadFailed)
+        {
+            _appliedHighlightCsv = HighlightCsv;
+            ApplyHighlight(HighlightCsv, HighlightWorld);
+            return; // reveal on the NEXT render, once the highlighted rows exist in the DOM
+        }
+
+        if (_revealQueued)
+        {
+            _revealQueued = false;
+            try
+            {
+                await JS.InvokeVoidAsync("cookbookHighlight.reveal");
+            }
+            catch (Exception)
+            {
+                // Scrolling is progressive enhancement.
+            }
+
+            // One-shot: strip the query so F5 doesn't re-pulse. The chip keeps the filter.
+            Navigation.NavigateTo("/cookbook", replace: true);
+        }
+    }
+
+    private void ApplyHighlight(string csv, string? world)
+    {
+        var ids = new HashSet<int>();
+        foreach (var part in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (int.TryParse(part, out var id))
+            {
+                ids.Add(id);
+            }
+        }
+
+        var matched = _rows.Where(r => ids.Contains(r.Food.Id)).ToList();
+        if (matched.Count == 0)
+        {
+            // Re-import may have replaced the ids since the notification was created.
+            Snackbar.Add("Those foods are not in the catalog right now", Severity.Info);
+            _highlightIds.Clear();
+            _revealQueued = true; // still strips the query; reveal no-ops without a match
+            StateHasChanged();
+            return;
+        }
+
+        // A highlighted food must never be invisible: clear every facet that could hide
+        // it, then keep/pick a world bucket all the matches actually live in.
+        Search = string.Empty;
+        FilterText = string.Empty;
+        _selectedStat = null;
+        _selectedSatiation = null;
+        _selectedPrep = null;
+        _conditionSortKey = null;
+        _showNewOnly = false;
+        ClearFocus();
+        ClearPanelFilter();
+
+        if (_selectedWorld != null && !matched.All(r => WorldMatches(r.Food.Worlds, _selectedWorld)))
+        {
+            if (!string.IsNullOrEmpty(world) && matched.All(r => r.Food.Worlds.Contains(world)))
+            {
+                SetWorld(world);
+            }
+            else
+            {
+                SetWorld(null);
+            }
+        }
+
+        _highlightIds.Clear();
+        _highlightIds.UnionWith(matched.Select(r => r.Food.Id));
+
+        _masterTable?.NavigateTo(0);
+        _revealQueued = true;
+        StateHasChanged();
+    }
+
+    private void ClearHighlight() => _highlightIds.Clear();
+
+    private string MasterRowClass(FoodRow row, int _) =>
+        _highlightIds.Contains(row.Food.Id) ? "ck-new-flash" : string.Empty;
+
     private async Task LoadCatalogAsync()
     {
         _loading = true;
         _loadFailed = false;
+        _newCutoffUtc = DateTime.UtcNow.AddDays(-7);
 
         try
         {
@@ -1510,6 +1652,13 @@
     {
         get
         {
+            // A notification deep link filters to exactly the new foods (activation
+            // cleared conflicting facets, so these rows are guaranteed visible).
+            if (_highlightIds.Count > 0)
+            {
+                return _rows.Where(r => _highlightIds.Contains(r.Food.Id));
+            }
+
             // A focused panel chip overrides everything: show exactly that food
             // (the free-text search also matches ingredients, which would bury it).
             if (_focusFoodName != null)
@@ -1565,6 +1714,12 @@
             if (_activePanelNames != null)
             {
                 rows = rows.Where(r => _activePanelNames.Contains(r.Food.Name));
+            }
+
+            if (_showNewOnly)
+            {
+                // Facet chip that filters AND orders, like the selected-stat chip below.
+                rows = rows.Where(IsNewFood).OrderByDescending(r => r.Food.ImportedAt);
             }
 
             if (_selectedStat != null)
@@ -1701,7 +1856,7 @@
     private decimal ScaledFep(decimal baseValue) => baseValue * (decimal)QualityMultiplier;
 
     private static string StatColor(string attribute, int tier = 1) =>
-        StatColors.TryGetValue(attribute, out var c) ? (tier >= 2 ? c.Tier2 : c.Tier1) : "#d8d8d8";
+        FepPalette.Color(attribute, tier);
 
     private string FepTitle(FoodFepDto fep)
     {
@@ -1727,10 +1882,9 @@
         return attrs;
     }
 
-    private static string LocalIconSrc(FoodDto food) => "/" + food.ResourceName + ".png";
+    private static string LocalIconSrc(FoodDto food) => FoodIcons.LocalSrc(food.ResourceName);
 
-    private static string RemoteIconFallback(FoodDto food) =>
-        $"this.onerror=null;this.src='https://www.havenandhearth.com/mt/r/{food.ResourceName}';";
+    private static string RemoteIconFallback(FoodDto food) => FoodIcons.RemoteFallback(food.ResourceName);
 
     private async Task RowClicked(TableRowClickEventArgs<FoodRow> args)
     {
@@ -1839,6 +1993,8 @@
         _selectedStat = null;
         _selectedSatiation = null;
         _selectedPrep = null;
+        _showNewOnly = false;
+        _highlightIds.Clear();
         SetWorld(null);
         _conditionSortKey = null;
         ClearFocus();
@@ -1929,7 +2085,8 @@
         + (_selectedStat != null ? 1 : 0)
         + (_selectedSatiation != null ? 1 : 0)
         + (_selectedPrep != null ? 1 : 0)
-        + (_selectedWorld != null ? 1 : 0);
+        + (_selectedWorld != null ? 1 : 0)
+        + (_showNewOnly ? 1 : 0);
 
     /// <summary>The Filters row's Clear chip: drops facet selections and conditions, keeps text search.</summary>
     private void ClearActiveFilters()
@@ -1937,6 +2094,7 @@
         _selectedStat = null;
         _selectedSatiation = null;
         _selectedPrep = null;
+        _showNewOnly = false;
         SetWorld(null);
         ClearConditions();
     }

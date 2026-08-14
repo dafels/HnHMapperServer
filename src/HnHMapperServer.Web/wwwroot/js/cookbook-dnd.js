@@ -94,3 +94,17 @@
     new MutationObserver(scheduleRemeasure).observe(document.body, { childList: true, subtree: true });
     scheduleStuck();
 })();
+
+// Scroll the first notification-highlighted row into view (called by Cookbook.razor
+// after applying a ?highlight= deep link). rAF waits out the Blazor render; 'center'
+// keeps the row clear of the sticky toolbar stack.
+window.cookbookHighlight = {
+    reveal: function () {
+        requestAnimationFrame(function () {
+            var row = document.querySelector('.cookbook-page .ck-new-flash');
+            if (row && row.scrollIntoView) {
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        });
+    }
+};

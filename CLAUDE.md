@@ -228,6 +228,7 @@ User-placed annotations with authorization:
 | `MapCleanupService` | 10min | Delete empty maps older than 1 hour |
 | `InvitationExpirationService` | 1 hour | Expire old invitations |
 | `TenantStorageVerificationService` | 6 hours | Verify storage quotas |
+| `NotificationCleanupService` | 30min | Delete expired notifications (all tenants), broadcast dismissals |
 
 ---
 
@@ -626,6 +627,87 @@ See `deploy/SECURITY.md` for complete security checklist.
 ---
 
 ## Recent Changes
+
+### 2026-08-15: New-foods notifications overhaul (live SSE everywhere + coalescing digest + cookbook deep-link)
+
+**CookbookFoodAdded went from a dead DB row (no SSE, no click action, one row per ~10s client flush,
+never expiring) to a live, actionable, coalescing digest with a stat preview.**
+- **Coalescing (anti-spam core):** new `CookbookNotificationService` (Services; scoped) replaces the
+  endpoint-local digest in ClientEndpoints. One rolling tenant-broadcast row: while the latest unread
+  `CookbookFoodAdded` digest is <15 min old (sliding window keyed on `CreatedAt`, which is **bumped on
+  every merge** — floats to bell top AND keeps the window query on the existing `(TenantId, CreatedAt)`
+  index), new foods merge in place; read/aged/legacy(-null-ActionData)/newer-schema rows → fresh row.
+  Per-tenant `SemaphoreSlim` serializes concurrent flushes; the whole method never throws (upload must
+  never fail). `ExpiresAt = lastMerge + 14d`. **`ActionData` is the single source of truth**
+  (`CookbookNotificationActionData` in Core/NotificationDtos.cs, serialized camelCase with an explicit
+  serializer — the outer HTTP serializer does NOT re-case nested JSON strings): schemaVersion,
+  totalCount (uncapped), foodIds(≤50)/foodNames(≤20)/worlds(≤8 genus)/contributorNames(≤10)/
+  previews(≤8: id, resourceName, energy, hunger, feps), variantCount; Title/Message are rebuilt from it
+  on every create/merge (world tag via `GameWorlds.DisplayName` only when single-world; multi-contributor
+  phrasing "A and B" / "A, B and N others"). `ActionType = "NavigateToCookbook"`.
+  Data plumbing: `FoodUploadResultDto.NewFoodDetails` is `[JsonIgnore]` (game-client response shape
+  unchanged); `IngestClientRecordsAsync` collects new `FoodEntity`s (ids committed per-food, so they
+  survive the conflict-recovery `ChangeTracker.Clear()`).
+- **SSE broadcast moved into `NotificationService.CreateAsync`** — every notification type is now live;
+  the two hand-rolled broadcast blocks in `TimerCheckService` were REMOVED (leaving them = double toasts).
+  Discord webhook still fires only inside CreateAsync → merges never re-ping Discord (🍳 emoji case added).
+  New **`notificationUpdated`** SSE event (same `NotificationEventDto` payload) = silent client upsert —
+  distinct from `notificationCreated` so merges never toast. The 4 notification channels in
+  `UpdateNotificationService` are now **bounded (256, DropOldest)** — subscribers have no unsubscribe and
+  the always-on stream would otherwise leak unbounded buffers on dead connections.
+- **Dedicated stream `GET /api/notifications/stream`** (NotificationEndpoints; auth-only — deliberately
+  NOT the Map-permission-gated /map/updates): subscribes only the 4 notification channels, zero DB work,
+  tenantId from `HttpContext.Items["TenantId"]`, same tenant/user filter as /map/updates, 500ms drain +
+  keep-alive. Browsers can't reach `/api/*` on the API service, so it ships with BOTH: a Web-side SSE
+  proxy in Web/Program.cs (dev path + prod fallback; `HttpCompletionOption.ResponseHeadersRead` is
+  load-bearing — anything else lets the resilience handler sever the stream) and a Caddy `@notifsse`
+  rule **before `encode gzip`** in deploy/Caddyfile + Caddyfile.example (gzip buffering stalls SSE).
+- **notification-center.js owns its own EventSource** (`STREAM_URL` const) — the old
+  window.mapUpdates piggyback (worked only on fresh /map loads, died on navigation) is gone. Listeners
+  attach inside `connect()` on each new instance; browser-native retry while CONNECTING, manual 1s→30s
+  backoff when CLOSED (non-200, e.g. expired cookie); `dispose()` keeps the ES (component remounts just
+  re-swap the .NET ref); `OnStreamReconnected` → silent refetch. **All payload reads are camelCase now**
+  (the old PascalCase reads meant browser notifications/sounds/read-sync had NEVER worked). Sound default
+  is `/sounds/ping.wav` — the referenced mp3s never shipped.
+- **Bell (NotificationCenter.razor):** upsert-by-Id on created (reconnect redelivery), silent
+  `OnNotificationUpdated` keeping list position (badge only moves on genuine read-state flips), refetch
+  on menu open (`MudMenu OpenChanged`), list capped at 50, Restaurant icon + Success toast severity,
+  click → `/cookbook?highlight={ids}&hlworld={genus}`. **Stat preview** on digest rows: real food icons
+  (shared `FoodIcons` helper — local `wwwroot/gfx/invobjs/*.png` (~2000 ship) with
+  havenandhearth.com/mt/r fallback, same as the cookbook table) + FEP pills colored via **`FepPalette`
+  (moved from Cookbook.razor's @code to Core/Cookbook so both share it** — Cookbook's `StatColor`/
+  `StatFullNames` now delegate) + energy/hunger, rendered from ActionData previews (no fetch), memoized
+  per (id, raw-json). Scoped CSS: NotificationCenter.razor.css (#33322e on pastels, ≥4.5:1).
+- **Cookbook deep-link:** `[SupplyParameterFromQuery] highlight/hlworld`, applied in
+  **`OnAfterRenderAsync`** (page prerenders: stripping the query in OnParametersSet would erase it before
+  the circuit sees it, and JS interop is illegal there; also covers clicking while already on /cookbook).
+  Activation clears conflicting facets (search/filter/stat/satiation/prep/sort/focus/panel/NewOnly) and
+  switches world only when needed (keep if all matches satisfy it, else hlworld if ALL matches contain
+  it, else null — always via `SetWorld`); `BaseFiltered` override (before the focus branch) pins the
+  table to the ids; dismissible Success chip in the panels bar; `RowClassFunc` → `.ck-new-flash` green
+  tint + 2-cycle pulse (reduced-motion safe) + `cookbookHighlight.reveal()` (cookbook-dnd.js,
+  scrollIntoView center); **one-shot**: query stripped via `NavigateTo(replace: true)` after apply
+  (`_appliedHighlightCsv` resets when the param goes null so the same digest can re-apply).
+- **"New" recency:** name-cell + detail-panel `New` badge and a "New (7d)" facet chip (filters AND
+  orders newest-first, `_selectedStat` precedent) — predicate `ContributedByName != null && ImportedAt >=
+  now-7d` (**contributor check excludes admin bulk imports**, which reset ImportedAt for the whole
+  catalog; snapshot imports restore original dates so they stay correct); cutoff frozen per catalog load;
+  chip row hidden when nothing is new; wired into ActiveFilterChipCount/ClearActiveFilters/ClearFilters.
+- **`DeleteExpiredAsync` was broken for background use** — the global tenant filter reads
+  `HttpContext.Items["TenantId"]`, which is null in hosted services → filter became `TenantId == NULL` →
+  deleted nothing, ever. Fixed with `IgnoreQueryFilters()`, returns deleted ids; new
+  `NotificationCleanupService` (30-min, PingCleanupService pattern) deletes expired + legacy
+  no-expiry CookbookFoodAdded rows (>14d) and broadcasts `NotifyNotificationDismissed` per id
+  (verified live on the dev DB: purged 91 expired + 1 legacy on first run).
+- **Gotchas recorded:** MudBlazor components swallow unknown parameters into `UserAttributes`, so a
+  typo'd parameter name compiles clean and silently does nothing — verify param names against the
+  package XML docs (`~/.nuget/packages/mudblazor/8.13.0/lib/net9.0/MudBlazor.xml`); nested-JSON columns
+  (ActionData) need their own camelCase `JsonSerializerOptions`.
+- **Tests:** `CookbookNotificationServiceTests` (11 — real SQLite, DbContext built WITHOUT
+  IHttpContextAccessor to prove no ambient-tenant reliance; real UpdateNotificationService so emitted
+  events are asserted: create/merge/window-expiry/read→new-row/multi-contributor/caps/tenant-isolation/
+  legacy-row/world-tag/unknown-user/empty-burst) + `NotificationServiceTests` (3 — broadcast-on-create,
+  Title/Message truncation, DeleteExpiredAsync tenant-filter bypass). 147/147 green.
 
 ### 2026-08-14: Live map list + map-switching overhaul (/map viewer)
 

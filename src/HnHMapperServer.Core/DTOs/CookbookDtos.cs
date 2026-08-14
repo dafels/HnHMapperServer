@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace HnHMapperServer.Core.DTOs;
 
 /// <summary>
@@ -382,6 +384,39 @@ public class FoodUploadResultDto
 
     /// <summary>Names of foods newly created by this batch (for the tenant notification digest).</summary>
     public List<string> NewFoodNames { get; set; } = new();
+
+    /// <summary>
+    /// Details of the foods newly created by this batch, for the tenant notification digest.
+    /// Server-internal — hidden from the game-client response so its shape stays unchanged.
+    /// </summary>
+    [JsonIgnore]
+    public List<FoodUploadNewFoodDto> NewFoodDetails { get; set; } = new();
+}
+
+/// <summary>
+/// Per-food details of a newly created food, captured at ingestion time for the
+/// tenant notification digest (deep link + stat preview).
+/// </summary>
+public class FoodUploadNewFoodDto
+{
+    public int FoodId { get; set; }
+
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Full game resource path, e.g. "gfx/invobjs/autumnsteak" (for the icon).</summary>
+    public string ResourceName { get; set; } = string.Empty;
+
+    /// <summary>Energy restored when eaten (game percent points).</summary>
+    public int Energy { get; set; }
+
+    /// <summary>Hunger cost per bite.</summary>
+    public decimal Hunger { get; set; }
+
+    /// <summary>Genus hashes tagged on the food at ingestion time (empty = untagged).</summary>
+    public List<string> Worlds { get; set; } = new();
+
+    /// <summary>FEP lines as parsed from the upload (may be empty).</summary>
+    public List<FoodFepDto> Feps { get; set; } = new();
 }
 
 /// <summary>

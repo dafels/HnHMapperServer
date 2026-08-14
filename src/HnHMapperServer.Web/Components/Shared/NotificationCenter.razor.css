@@ -1,26 +1,58 @@
-.notification-item {
-    transition: background-color 0.2s ease;
+/* Compact stat preview on CookbookFoodAdded rows. Pill backgrounds come from the
+   shared FepPalette (light pastels); text is #33322e like the cookbook's pills,
+   which clears 4.5:1 on every stat color. Grays never lighter than #67747f. */
+
+.ck-notif-previews {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
 }
 
-.notification-item:hover {
-    background-color: rgba(0, 0, 0, 0.04);
+.ck-notif-food {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
 }
 
-.notification-item.unread {
-    background-color: rgba(33, 150, 243, 0.08);
+.ck-notif-icon {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+    flex-shrink: 0;
 }
 
-.notification-item.unread:hover {
-    background-color: rgba(33, 150, 243, 0.12);
+.ck-notif-food-name {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #2c3e50;
+    max-width: 130px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
-.notification-item.read {
-    opacity: 0.7;
+.ck-notif-fep {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 9px;
+    font-size: 0.66rem;
+    font-weight: 700;
+    line-height: 1.7;
+    color: #33322e;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    white-space: nowrap;
 }
 
-.notification-header {
-    position: sticky;
-    top: 0;
-    background: white;
-    z-index: 1;
+.ck-notif-meta {
+    font-size: 0.66rem;
+    color: #67747f;
+    white-space: nowrap;
+}
+
+.ck-notif-more {
+    font-size: 0.68rem;
+    color: #67747f;
+    font-style: italic;
 }

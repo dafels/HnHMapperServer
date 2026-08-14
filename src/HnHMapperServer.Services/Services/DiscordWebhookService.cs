@@ -214,6 +214,7 @@ public class DiscordWebhookService : IDiscordWebhookService
                 "Normal" when notification.Title?.Contains("1 day") == true => "📅",    // 1 day - calendar
                 _ => "⏰"
             },
+            "CookbookFoodAdded" => "🍳",
             _ => "📢"
         };
 
@@ -231,6 +232,7 @@ public class DiscordWebhookService : IDiscordWebhookService
             "MarkerTimerExpired" => "Timer Expired",
             "StandaloneTimerExpired" => "Timer Expired",
             "TimerPreExpiryWarning" => "Timer Warning",
+            "CookbookFoodAdded" => "New Cookbook Entries",
             _ => notification.Type
         };
 

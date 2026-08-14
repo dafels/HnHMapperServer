@@ -16,15 +16,18 @@ public class NotificationService : INotificationService
     private readonly ApplicationDbContext _db;
     private readonly ILogger<NotificationService> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IUpdateNotificationService _updateNotificationService;
 
     public NotificationService(
         ApplicationDbContext db,
         ILogger<NotificationService> logger,
-        IServiceScopeFactory scopeFactory)
+        IServiceScopeFactory scopeFactory,
+        IUpdateNotificationService updateNotificationService)
     {
         _db = db;
         _logger = logger;
         _scopeFactory = scopeFactory;
+        _updateNotificationService = updateNotificationService;
     }
 
     /// <summary>
@@ -37,8 +40,8 @@ public class NotificationService : INotificationService
             TenantId = dto.TenantId,
             UserId = dto.UserId,
             Type = dto.Type,
-            Title = dto.Title,
-            Message = dto.Message,
+            Title = Truncate(dto.Title, 200),
+            Message = Truncate(dto.Message, 1000),
             ActionType = dto.ActionType,
             ActionData = dto.ActionData,
             Priority = dto.Priority,
@@ -53,6 +56,9 @@ public class NotificationService : INotificationService
         _logger.LogInformation(
             "Created notification {Id} of type {Type} for tenant {TenantId}",
             entity.Id, entity.Type, entity.TenantId);
+
+        // Live delivery for every notification type; SSE endpoints filter by tenant/user.
+        _updateNotificationService.NotifyNotificationCreated(MapToEventDto(entity));
 
         var notificationDto = MapToDto(entity);
 
@@ -231,23 +237,33 @@ public class NotificationService : INotificationService
     }
 
     /// <summary>
-    /// Delete expired notifications (background cleanup).
+    /// Delete expired notifications across all tenants (background cleanup).
+    /// Runs without an HttpContext, so the tenant query filter (which would resolve to
+    /// TenantId == NULL and match nothing) must be bypassed. Returns the deleted ids so the
+    /// caller can broadcast dismissals to open clients.
     /// </summary>
-    public async Task<int> DeleteExpiredAsync()
+    public async Task<List<int>> DeleteExpiredAsync()
     {
         var now = DateTime.UtcNow;
-        var count = await _db.Notifications
+        var expiredIds = await _db.Notifications
+            .IgnoreQueryFilters()
+            .Where(n => n.ExpiresAt != null && n.ExpiresAt < now)
+            .Select(n => n.Id)
+            .ToListAsync();
+
+        if (expiredIds.Count == 0)
+            return expiredIds;
+
+        await _db.Notifications
+            .IgnoreQueryFilters()
             .Where(n => n.ExpiresAt != null && n.ExpiresAt < now)
             .ExecuteDeleteAsync();
 
-        if (count > 0)
-        {
-            _logger.LogInformation(
-                "Deleted {Count} expired notifications",
-                count);
-        }
+        _logger.LogInformation(
+            "Deleted {Count} expired notifications",
+            expiredIds.Count);
 
-        return count;
+        return expiredIds;
     }
 
     /// <summary>
@@ -259,6 +275,17 @@ public class NotificationService : INotificationService
             .Where(n => (n.UserId == userId || n.UserId == null) && !n.IsRead)
             .Where(n => n.ExpiresAt == null || n.ExpiresAt > DateTime.UtcNow)
             .CountAsync();
+    }
+
+    /// <summary>
+    /// SQLite does not enforce the model's HasMaxLength, so cap in code
+    /// (Title 200 / Message 1000 per the entity configuration).
+    /// </summary>
+    private static string Truncate(string value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length <= maxLength)
+            return value;
+        return value[..maxLength];
     }
 
     /// <summary>

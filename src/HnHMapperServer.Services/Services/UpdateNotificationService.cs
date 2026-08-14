@@ -24,6 +24,7 @@ public class UpdateNotificationService : IUpdateNotificationService
     private readonly ConcurrentBag<Channel<RoadDeleteEventDto>> _roadDeletedChannels = new();
     private readonly ConcurrentBag<Channel<OverlayEventDto>> _overlayUpdatedChannels = new();
     private readonly ConcurrentBag<Channel<NotificationEventDto>> _notificationCreatedChannels = new();
+    private readonly ConcurrentBag<Channel<NotificationEventDto>> _notificationUpdatedChannels = new();
     private readonly ConcurrentBag<Channel<int>> _notificationReadChannels = new();
     private readonly ConcurrentBag<Channel<int>> _notificationDismissedChannels = new();
     private readonly ConcurrentBag<Channel<TimerEventDto>> _timerCreatedChannels = new();
@@ -525,39 +526,43 @@ public class UpdateNotificationService : IUpdateNotificationService
         }
     }
 
-    // Notification events
-    public ChannelReader<NotificationEventDto> SubscribeToNotificationCreated()
-    {
-        var channel = Channel.CreateUnbounded<NotificationEventDto>(new UnboundedChannelOptions
+    // Notification events.
+    // Unlike the map channels, these are subscribed by the always-on /api/notifications/stream
+    // on every authenticated page, and subscribers have no unsubscribe — bounded channels keep
+    // an abandoned connection from buffering events without limit (REST list remains the
+    // source of truth for anything dropped).
+    private static Channel<T> CreateNotificationChannel<T>() =>
+        Channel.CreateBounded<T>(new BoundedChannelOptions(256)
         {
+            FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
             SingleWriter = false
         });
 
+    public ChannelReader<NotificationEventDto> SubscribeToNotificationCreated()
+    {
+        var channel = CreateNotificationChannel<NotificationEventDto>();
         _notificationCreatedChannels.Add(channel);
+        return channel.Reader;
+    }
+
+    public ChannelReader<NotificationEventDto> SubscribeToNotificationUpdated()
+    {
+        var channel = CreateNotificationChannel<NotificationEventDto>();
+        _notificationUpdatedChannels.Add(channel);
         return channel.Reader;
     }
 
     public ChannelReader<int> SubscribeToNotificationRead()
     {
-        var channel = Channel.CreateUnbounded<int>(new UnboundedChannelOptions
-        {
-            SingleReader = true,
-            SingleWriter = false
-        });
-
+        var channel = CreateNotificationChannel<int>();
         _notificationReadChannels.Add(channel);
         return channel.Reader;
     }
 
     public ChannelReader<int> SubscribeToNotificationDismissed()
     {
-        var channel = Channel.CreateUnbounded<int>(new UnboundedChannelOptions
-        {
-            SingleReader = true,
-            SingleWriter = false
-        });
-
+        var channel = CreateNotificationChannel<int>();
         _notificationDismissedChannels.Add(channel);
         return channel.Reader;
     }
@@ -567,6 +572,24 @@ public class UpdateNotificationService : IUpdateNotificationService
         var channelsToRemove = new ConcurrentBag<Channel<NotificationEventDto>>();
 
         foreach (var channel in _notificationCreatedChannels)
+        {
+            if (!channel.Writer.TryWrite(notification))
+            {
+                channelsToRemove.Add(channel);
+            }
+        }
+
+        foreach (var deadChannel in channelsToRemove)
+        {
+            deadChannel.Writer.TryComplete();
+        }
+    }
+
+    public void NotifyNotificationUpdated(NotificationEventDto notification)
+    {
+        var channelsToRemove = new ConcurrentBag<Channel<NotificationEventDto>>();
+
+        foreach (var channel in _notificationUpdatedChannels)
         {
             if (!channel.Writer.TryWrite(notification))
             {

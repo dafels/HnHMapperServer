@@ -519,6 +519,66 @@ app.MapGet("/map/updates", async (HttpContext context, IHttpClientFactory httpCl
     }
 }).RequireAuthorization();
 
+// Notification SSE proxy - forwards the notification bell's EventSource to the API service.
+// Same mechanics as the /map/updates proxy above, but auth-only: notifications are for every
+// authenticated user, so no Map-permission check. In production Caddy routes this path straight
+// to the API (@notifsse); this proxy is the dev path (Aspire) and the prod fallback.
+app.MapGet("/api/notifications/stream", async (HttpContext context, IHttpClientFactory httpClientFactory, ILogger<Program> logger) =>
+{
+    if (!context.User.Identity?.IsAuthenticated ?? true)
+    {
+        return Results.Unauthorized();
+    }
+
+    try
+    {
+        var apiClient = httpClientFactory.CreateClient("API");
+        apiClient.Timeout = Timeout.InfiniteTimeSpan;
+
+        var requestUri = "/api/notifications/stream" + (context.Request.QueryString.HasValue ? context.Request.QueryString.Value : string.Empty);
+        var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+        request.Headers.Add("Accept", "text/event-stream");
+
+        // ResponseHeadersRead is load-bearing: the standard resilience handler's total timeout
+        // completes at headers, not at end-of-stream, so the long-lived SSE body survives
+        var response = await apiClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            logger.LogDebug("[Notification SSE Proxy] API returned {StatusCode}", response.StatusCode);
+            return Results.StatusCode((int)response.StatusCode);
+        }
+
+        context.Response.ContentType = "text/event-stream";
+        context.Response.Headers.CacheControl = "no-cache";
+        context.Response.Headers.Connection = "keep-alive";
+        context.Response.Headers["X-Accel-Buffering"] = "no";
+
+        await using var stream = await response.Content.ReadAsStreamAsync(context.RequestAborted);
+
+        var buffer = new byte[4096];
+        int bytesRead;
+
+        while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, context.RequestAborted)) > 0)
+        {
+            await context.Response.Body.WriteAsync(buffer, 0, bytesRead, context.RequestAborted);
+            await context.Response.Body.FlushAsync(context.RequestAborted);
+        }
+
+        return Results.Empty;
+    }
+    catch (OperationCanceledException)
+    {
+        // Browser navigated away or closed the tab — normal
+        return Results.Empty;
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "[Notification SSE Proxy] Exception while proxying SSE");
+        return Results.StatusCode(500);
+    }
+}).RequireAuthorization();
+
 // Polling proxy endpoint - forwards poll requests to API service (fallback for SSE)
 // This is needed for VPN users where SSE connections fail
 app.MapGet("/map/api/v1/poll", async (HttpContext context, IHttpClientFactory httpClientFactory, [FromQuery] long? since) =>
