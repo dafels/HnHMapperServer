@@ -401,6 +401,7 @@ public static class MapAdminEndpoints
         IMapRepository mapRepository,
         IAuditService auditService,
         ITenantContextAccessor tenantContext,
+        IUpdateNotificationService notificationService,
         HttpContext context)
     {
         var tenantId = tenantContext.GetCurrentTenantId();
@@ -424,6 +425,9 @@ public static class MapAdminEndpoints
 
         // Save changes
         await mapRepository.SaveMapAsync(map);
+
+        // Notify viewers so Reset View picks up the new position without a refresh
+        notificationService.NotifyMapUpdated(map);
 
         // Audit log
         var userId = context.User.FindFirst("sub")?.Value ?? context.User.Identity?.Name ?? "unknown";

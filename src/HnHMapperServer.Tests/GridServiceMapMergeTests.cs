@@ -33,6 +33,7 @@ public class GridServiceMapMergeTests : IDisposable
     private readonly IMapRepository _mapRepository;
     private readonly ITileRepository _tileRepository;
     private readonly IConfigRepository _configRepository;
+    private readonly Mock<IUpdateNotificationService> _mockNotificationService;
 
     private const string TestTenantId = "default-tenant-1";
 
@@ -82,7 +83,8 @@ public class GridServiceMapMergeTests : IDisposable
         // Initialize services with mocked loggers and notification service
         var tileLogger = new Mock<ILogger<TileService>>();
         var gridLogger = new Mock<ILogger<GridService>>();
-        var mockNotificationService = new Mock<IUpdateNotificationService>();
+        _mockNotificationService = new Mock<IUpdateNotificationService>();
+        var mockNotificationService = _mockNotificationService;
         var mockQuotaService = new Mock<IStorageQuotaService>();
         var mockMapNameService = new Mock<IMapNameService>();
         mockMapNameService.Setup(x => x.GenerateUniqueIdentifierAsync(It.IsAny<string>()))
@@ -304,6 +306,67 @@ public class GridServiceMapMergeTests : IDisposable
         // The original file should still exist
         var originalFilePath = Path.Combine(_testGridStorage, sourceTilePath);
         Assert.True(File.Exists(originalFilePath), "Original tile file should still exist after merge");
+    }
+
+    [Fact]
+    public async Task MergeMapsAsync_NotifiesMergeAndSourceDeletion_WithTenantId()
+    {
+        // Arrange: two maps with one grid each and NO tiles. The old tenant lookup only
+        // yielded a tenant when a zoom-0 tile happened to be copied during the merge, so
+        // the no-tile case used to broadcast the merge with tenantId = "" (which the SSE
+        // tenant filter silently drops). This is the regression case.
+        var map1 = new MapInfo { Id = 1, Name = "Target", Hidden = false, Priority = 0 };
+        var map2 = new MapInfo { Id = 2, Name = "Source", Hidden = false, Priority = 0 };
+        await _mapRepository.SaveMapAsync(map1);
+        await _mapRepository.SaveMapAsync(map2);
+
+        await _gridRepository.SaveGridAsync(new GridData { Id = "t1", Map = 1, Coord = new Coord(0, 0), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "s1", Map = 2, Coord = new Coord(50, 50), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+
+        // Act: gridUpdate spanning both maps triggers the merge (target = lower id)
+        var gridUpdate = new GridUpdateDto
+        {
+            Grids = new List<List<string>>
+            {
+                new List<string> { "t1", "x2", "x3" },
+                new List<string> { "s1", "x5", "x6" },
+                new List<string> { "x7", "x8", "x9" }
+            }
+        };
+
+        await _gridService.ProcessGridUpdateAsync(gridUpdate, _testGridStorage);
+
+        // Assert: merge broadcast carries the real tenant, and the deleted source map is
+        // announced so viewers drop it from their map selectors
+        _mockNotificationService.Verify(x => x.NotifyMapMerge(2, 1, It.IsAny<Coord>(), TestTenantId), Times.Once);
+        _mockNotificationService.Verify(x => x.NotifyMapDeleted(2), Times.Once);
+        Assert.Null(await _mapRepository.GetMapAsync(2));
+        Assert.NotNull(await _mapRepository.GetMapAsync(1));
+    }
+
+    [Fact]
+    public async Task ProcessGridUpdateAsync_NewMap_NotifiesMapUpdatedWithTenantId()
+    {
+        // Act: all-unknown grids -> new-map branch
+        var gridUpdate = new GridUpdateDto
+        {
+            Grids = new List<List<string>>
+            {
+                new List<string> { "n1", "n2", "n3" },
+                new List<string> { "n4", "n5", "n6" },
+                new List<string> { "n7", "n8", "n9" }
+            }
+        };
+
+        var result = await _gridService.ProcessGridUpdateAsync(gridUpdate, _testGridStorage);
+
+        // Assert: viewers are told about the new map, with the generated id and the
+        // tenant set (the SSE loop filters events by TenantId, so "" would never deliver)
+        Assert.True(result.Map > 0);
+        _mockNotificationService.Verify(x => x.NotifyMapUpdated(It.Is<MapInfo>(m =>
+            m.Id == result.Map && m.TenantId == TestTenantId && m.Priority == -1)), Times.Once);
+        _mockNotificationService.Verify(x => x.NotifyMapMerge(
+            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<Coord>(), It.IsAny<string>()), Times.Never);
     }
 }
 

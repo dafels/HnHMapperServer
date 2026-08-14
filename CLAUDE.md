@@ -183,8 +183,10 @@ All endpoints tenant-scoped and backward compatible:
 
 **SSE Endpoints:**
 - `GET /map/updates` - Server-Sent Events for real-time character and marker updates
-- 250ms server-side coalescing with bounded channels (capacity 1024)
-- Events: `charactersSnapshot`, `characterDelta`, `customMarkerCreated/Updated/Deleted`, `mapDelete`
+- 500ms server-side drain loop over per-event channels, filtered by tenant
+- Events: tile batches (default), `charactersSnapshot` (initial), `characterDelta`, `merge`,
+  `mapUpdate` (**upsert** — full map item incl. new maps), `mapDelete`, `mapRevision`,
+  `customMarker*`, `marker*`, `ping*`, `road*`, `timer*`, `notification*`, `overlayUpdated`
 
 **Map APIs:**
 - `GET /map/api/v1/characters` - Character list (deprecated, use SSE)
@@ -625,6 +627,56 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-14: Live map list + map-switching overhaul (/map viewer)
+
+**Newly created maps now appear in the map selector without a browser refresh, and switching maps
+fully reloads per-map state.** Root causes fixed: the map list was fetched once at page init with no
+creation event on the wire, and JS `changeMap` cleared characters/markers/roads that nothing re-added.
+- **`mapUpdate` SSE is now an upsert** carrying the full `GET /map/api/maps` item shape
+  (`{id, mapInfo:{name,hidden,priority,revision,defaultStartX/Y}, size}` camelCase — binds into
+  `MapInfoModel` like the GET response). `isMainMap` is deliberately omitted (config lookup on the
+  long-lived SSE scope would be stale); the client preserves its known value, new maps default false.
+  Emitters: `GridService.ProcessGridUpdateAsync` new-map branch (sets `mapInfo.TenantId` first — the
+  SSE loop filters by it), `HmapImportService.CreateNewMapAsync` (service now injects
+  `IUpdateNotificationService`), `PUT /admin/maps/{id}/default-position` (was silent), plus the
+  pre-existing rename/settings/public-import emitters. Client `HandleMapUpdated` upserts: unknown
+  visible maps are added live (revision seeded via `SetMapRevisionAsync`/`InitializeMapRevision`),
+  hidden updates remove + switch away (that branch was previously unreachable — the old flat payload
+  `{id,name,hidden,priority}` only ever bound `ID`, which also blanked names on rename).
+- **Merge lifecycle**: `MergeMapsAsync` takes the tenant from `ITenantContextAccessor` — the old
+  per-merge tile lookup ran at post-shift coords and yielded `""` whenever the probed grid had no
+  zoom-0 tile, so the SSE tenant filter silently dropped the merge event. After deleting the source
+  map it now also broadcasts `NotifyMapDeleted(source)`, and the client's `HandleMapMerge` always
+  removes `merge.From` from the selector (previously only reacted when viewing the source; dead maps
+  stayed in the dropdown forever). When viewing the source, the camera switches to the target at
+  center+shift (same world spot).
+- **Dead camelCase SSE listeners fixed**: `mapDelete` had NEVER worked end-to-end (JS read
+  `deleteInfo.Id` against the camelCase `{"id":…}` payload → `undefined` → swallowed), so admin
+  deletes never reached viewers; same class fixed for `timerDeleted` and `OnCustomMarkerDeleted`
+  (case-sensitive `GetProperty("Id")`). SSE loop also registers ids in the per-connection
+  `tenantMapIds` on `mapUpdate` and `merge.From` — previously `mapDelete`/`mapRevision` for maps
+  created after the connection opened were silently suppressed by the `Contains` gate.
+- **Shared switch routine** in `Map.razor.cs`: `SwitchToMapAsync` + `ReloadMapScopedStateAsync` —
+  every switch path (selector, merge, delete, became-hidden, follow-mode, center-on-character, panel
+  refetch) now rebuilds game markers, re-adds characters (JS keeps no cross-map store; snapshot only
+  arrives at SSE connect), **refetches** custom markers (`LoadCustomMarkersAsync` is mapId-scoped —
+  the state service only ever holds one map's markers) and roads; JS `changeMap` now clears
+  `PingManager` (pings aren't map-filtered in JS). `MapNavigationService` gained one canonical sort
+  (IsMainMap desc, Priority desc, Name asc) used by `SetMaps`/`AddOrUpdateMap` — live updates used to
+  drop the main-map-first ordering.
+- **Belt-and-braces**: opening the Maps sidebar panel fires a background `GET /map/api/maps` refetch
+  (`RefreshMapListAsync`) — covers the polling fallback (`/map/api/v1/poll` carries no map list) and
+  any missed SSE window; if the current map vanished meanwhile it behaves like a live deletion.
+- **Races/init**: `MapView.ChangeMapAsync` queues `pendingMapId` when Leaflet hasn't fired `load` yet
+  and applies it in `OnMapReady` (was a silent no-op → C#/JS desync); `/map?map=N` without x/y/z no
+  longer snaps back to `Maps[0]` (respects `?map=` > MainMapId > first).
+- **Tests**: `GridServiceMapMergeTests` +2 — merge broadcasts with the real tenant (regression: the
+  no-tile merge case that used to yield `""`) + `NotifyMapDeleted`, and the new-map branch notifies
+  with `TenantId` set. No test host exists for the SSE endpoint/Blazor handlers.
+- **Known gaps (flagged, not fixed here)**: polling-mode characters bind flat `X/Y` into nested
+  `Position` (render at 0,0); merge orphans map-scoped rows (CustomMarkers/Roads/OverlayData keep the
+  deleted source MapId); `MapCleanupService` still disabled in Program.cs and tenant-blind.
+
 ### 2026-08-14: Cookbook bulk world assignment (tenant-admin)
 
 **Untagged cookbook data can be bulk-assigned to a known world** — the cleanup for pre-world-tagging
@@ -652,6 +704,10 @@ catalogs (admin imports + old uploads) whose data all sits in the /cookbook "Unt
   HttpClient (the default `API` client's 10s resilience timeout would cancel/retry the bulk write).
   /cookbook needs no changes — after F5 the Untagged chip disables at 0 and world chips/values pick
   the data up (same accepted circuit staleness as import/clear).
+  **MudBlazor gotcha:** `MudSelect` popovers are modal by default since v7 (`Modal="true"`), so with
+  the dropdown open the first click on a nearby button only dismisses the invisible overlay — the
+  world select sets `Modal="false"` so outside clicks pass through; do the same on future selects
+  that sit next to action buttons.
 - **Tests:** `FoodCatalogServiceWorldAssignTests` (real SQLite, same harness as export/import tests):
   tagging + snapshot seeding, merge into already-tagged foods without touching existing tags,
   no-op re-run, tenant isolation, validation, status counts, export roundtrip, and a
@@ -694,9 +750,10 @@ can never restore is the player-contributed data (variants, world tags, TimesSee
 Both clients send a `genus` world hash per food record (Hurricane from `GameUI.genus`, KamiClient from
 `ui.sess.user.genus`); the server used to drop it.
 - **Registry:** `GameWorlds` in `src/HnHMapperServer.Core/Cookbook/GameWorlds.cs` — code-constant list of
-  known worlds (`c646473983afec09` = W16, `b7c199a4557503a8` = W16.1). **When W16.2 launches, add its
-  genus hash + next Order there (one line) and deploy** — until then its uploads still tag/filter, shown
-  as a shortened hash. `Normalize()` (trim, reject >64 chars), `DisplayName()`, `OrderOf()` (-1 unknown).
+  known worlds (`c646473983afec09` = W16, `b7c199a4557503a8` = W16.1, `fd63ddee958da329` = W16.2).
+  **When the next world launches, add its genus hash + next Order there (one line) and deploy** — until
+  then its uploads still tag/filter, shown as a shortened hash. `Normalize()` (trim, reject >64 chars),
+  `DisplayName()`, `OrderOf()` (-1 unknown).
 - **Data:** `Foods.Worlds` AND `FoodVariants.Worlds` — JSON string-list columns like `SatiationGroups`
   (migrations `AddFoodWorlds`, `AddVariantWorlds`), appended (deduped) in `IngestClientRecordsAsync`
   from `upload.Genus` on both the food and the exact variation (new + re-upload paths).

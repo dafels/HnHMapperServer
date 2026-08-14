@@ -32,6 +32,7 @@
     private DotNetObjectReference<MapView>? dotnetRef;
     private bool initialized = false;
     private bool disposed = false;
+    private int pendingMapId = 0; // map switch requested before Leaflet 'load' — applied in OnMapReady
 
     /// <summary>
     /// Version suffix for cache busting dynamic JS imports
@@ -104,9 +105,17 @@
 
     public async Task ChangeMapAsync(int mapId)
     {
-        if (!initialized || jsModule == null || disposed) return;
-
         State.CurrentMapId = mapId;
+
+        if (!initialized || jsModule == null || disposed)
+        {
+            // Leaflet isn't ready yet — queue instead of silently dropping, so C# and JS
+            // don't desync (C# thinking it switched while JS still shows the old map)
+            pendingMapId = mapId;
+            return;
+        }
+
+        pendingMapId = 0;
         await SafeJs.InvokeVoidSafeAsync(jsModule, "changeMap", mapId);
     }
 
@@ -416,6 +425,15 @@
     {
         Logger.LogInformation("Map ready event received from JavaScript (Leaflet 'load' event fired)");
         initialized = true;
+
+        // Apply a map switch that was requested before Leaflet finished loading
+        if (pendingMapId > 0 && jsModule != null && !disposed)
+        {
+            var toApply = pendingMapId;
+            pendingMapId = 0;
+            Logger.LogInformation("Applying queued map switch to {MapId}", toApply);
+            await SafeJs.InvokeVoidSafeAsync(jsModule, "changeMap", toApply);
+        }
 
         if (OnMapInitialized.HasDelegate)
         {

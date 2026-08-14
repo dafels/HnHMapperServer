@@ -33,6 +33,7 @@ public class GameWorldsTests
     [Theory]
     [InlineData("c646473983afec09", "W16")]
     [InlineData("b7c199a4557503a8", "W16.1")]
+    [InlineData("fd63ddee958da329", "W16.2")]
     public void DisplayName_ResolvesKnownWorlds(string genus, string expected)
     {
         Assert.Equal(expected, GameWorlds.DisplayName(genus));

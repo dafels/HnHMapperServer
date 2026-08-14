@@ -452,13 +452,15 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         }
         else if (MapNavigation.Maps.Count > 0)
         {
-            var firstMap = MapNavigation.Maps[0];
-            var startX = firstMap.MapInfo.DefaultStartX ?? 0;
-            var startY = firstMap.MapInfo.DefaultStartY ?? 0;
-            Logger.LogInformation("No URL params, using default position ({X}, {Y}, 7) on map {MapId}", startX, startY, firstMap.ID);
-            MapNavigation.ChangeMap(firstMap.ID);
-            state.CurrentMapId = firstMap.ID;
-            await mapView.ChangeMapAsync(firstMap.ID);
+            // Respect the map already chosen during init (?map= param > MainMapId > first)
+            // instead of unconditionally snapping to the first map in the sorted list
+            var initialMap = MapNavigation.GetMapById(MapNavigation.CurrentMapId) ?? MapNavigation.Maps[0];
+            var startX = initialMap.MapInfo.DefaultStartX ?? 0;
+            var startY = initialMap.MapInfo.DefaultStartY ?? 0;
+            Logger.LogInformation("No full URL params, using default position ({X}, {Y}, 7) on map {MapId}", startX, startY, initialMap.ID);
+            MapNavigation.ChangeMap(initialMap.ID);
+            state.CurrentMapId = initialMap.ID;
+            await mapView.ChangeMapAsync(initialMap.ID);
             await mapView.SetViewAsync(startX, startY, 7);
             // Synchronize MapNavigationService state to prevent position resets
             MapNavigation.UpdatePosition(startX, startY, 7);
@@ -1038,22 +1040,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         if (map != null && mapView != null)
         {
-            MapNavigation.ChangeMap(map.ID);
-            state.CurrentMapId = map.ID;
-            await mapView.ChangeMapAsync(map.ID);
-
-            await RebuildMarkersForCurrentMap();
-
-            // Use the map's default starting position, or (0, 0) if not set
-            var startX = map.MapInfo.DefaultStartX ?? 0;
-            var startY = map.MapInfo.DefaultStartY ?? 0;
-            await mapView.SetViewAsync(startX, startY, 7);
-            MapNavigation.UpdatePosition(startX, startY, 7);
-            Navigation.NavigateTo(MapNavigation.GetUrl(map.ID, startX, startY, 7), false);
-
-            CustomMarkerState.MarkAsNeedingRender();
-            await TryRenderPendingCustomMarkersAsync();
-            StateHasChanged();
+            await SwitchToMapAsync(map.ID);
         }
     }
 
@@ -1819,25 +1806,38 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         InvokeAsync(async () =>
         {
-            if (MapNavigation.CurrentMapId == merge.From && mapView != null)
+            var wasCurrent = MapNavigation.CurrentMapId == merge.From;
+
+            // The source map was deleted server-side — always drop it from the selector,
+            // no matter which map this viewer is looking at
+            MapNavigation.RemoveMap(merge.From);
+
+            // Game markers were re-parented to the target map server-side; refetch the
+            // cache when this viewer can see either side of the merge
+            if (wasCurrent || MapNavigation.CurrentMapId == merge.To)
+            {
+                var markers = await MapData.GetMarkersAsync();
+                MarkerState.SetMarkers(markers);
+            }
+
+            if (wasCurrent && mapView != null)
             {
                 Logger.LogInformation("Map merged from {From} to {To}", merge.From, merge.To);
                 Snackbar.Add($"Map {merge.From} was merged into map {merge.To}. Switching view.", Severity.Info);
 
-                var preserveCenterX = (int)MapNavigation.CenterX;
-                var preserveCenterY = (int)MapNavigation.CenterY;
-                var preserveZoom = MapNavigation.Zoom;
-
-                MapNavigation.ChangeMap(merge.To);
-                state.CurrentMapId = merge.To;
-                await mapView.ChangeMapAsync(merge.To);
-
-                var markers = await MapData.GetMarkersAsync();
-                MarkerState.SetMarkers(markers);
-
-                await mapView.SetViewAsync(preserveCenterX, preserveCenterY, preserveZoom);
-                CustomMarkerState.MarkAsNeedingRender();
-                await TryRenderPendingCustomMarkersAsync();
+                // Keep looking at the same world location: target coords = source coords + shift
+                var newX = (int)MapNavigation.CenterX + merge.Shift.X;
+                var newY = (int)MapNavigation.CenterY + merge.Shift.Y;
+                await SwitchToMapAsync(merge.To, newX, newY, MapNavigation.Zoom);
+            }
+            else if (MapNavigation.CurrentMapId == merge.To)
+            {
+                // Fold the moved markers into the visible layer
+                await RebuildMarkersForCurrentMap();
+                StateHasChanged();
+            }
+            else
+            {
                 StateHasChanged();
             }
         });
@@ -1845,42 +1845,76 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
     private void HandleMapUpdated(MapInfoModel updatedMap)
     {
-        InvokeAsync(() =>
+        InvokeAsync(async () =>
         {
             var existingMap = MapNavigation.GetMapById(updatedMap.ID);
-            if (existingMap != null)
+
+            // The SSE payload deliberately omits IsMainMap (server-side config lookup would
+            // be stale on the long-lived SSE scope) — preserve what this client knows.
+            // A brand-new map is never the main map.
+            updatedMap.MapInfo.IsMainMap = existingMap?.MapInfo.IsMainMap ?? false;
+
+            if (updatedMap.MapInfo.Hidden)
             {
-                var wasHidden = existingMap.MapInfo.Hidden;
-                MapNavigation.AddOrUpdateMap(updatedMap);
+                // The viewer's list only holds visible maps (GET /map/api/maps parity).
+                // Unknown hidden map (e.g. created while defaultHide is on) — ignore.
+                if (existingMap == null) return;
 
-                if (SelectedMap?.ID == updatedMap.ID)
-                {
-                    SelectedMap = updatedMap;
-                }
+                MapNavigation.RemoveMap(updatedMap.ID);
 
-                if (OverlayMap?.ID == updatedMap.ID)
-                {
-                    OverlayMap = updatedMap;
-                }
-
-                if (!wasHidden && updatedMap.MapInfo.Hidden && MapNavigation.CurrentMapId == updatedMap.ID)
+                if (MapNavigation.CurrentMapId == updatedMap.ID)
                 {
                     var firstVisible = MapNavigation.GetFirstVisibleMap();
                     if (firstVisible != null && mapView != null)
                     {
                         Logger.LogInformation("Current map {MapId} became hidden, switching to {NewMapId}", updatedMap.ID, firstVisible.ID);
                         Snackbar.Add($"Map '{updatedMap.MapInfo.Name}' is now hidden. Switched to '{firstVisible.MapInfo.Name}'.", Severity.Info);
-                        MapNavigation.ChangeMap(firstVisible.ID);
-                        state.CurrentMapId = firstVisible.ID;
-                        SelectedMap = firstVisible;
-                        _ = mapView.ChangeMapAsync(firstVisible.ID);
+                        await SwitchToMapAsync(firstVisible.ID);
                     }
                 }
 
-                Logger.LogInformation("Map {MapId} updated: {Name}, Hidden={Hidden}, Priority={Priority}",
-                    updatedMap.ID, updatedMap.MapInfo.Name, updatedMap.MapInfo.Hidden, updatedMap.MapInfo.Priority);
+                if (OverlayMap?.ID == updatedMap.ID)
+                {
+                    OverlayMap = null;
+                    MapNavigation.ChangeOverlayMap(null);
+                    if (mapView != null)
+                    {
+                        await mapView.SetOverlayMapAsync(null);
+                    }
+                }
+
                 StateHasChanged();
+                return;
             }
+
+            // Upsert: renames/priority changes update in place; unknown visible maps
+            // (client-created, hmap import, un-hidden) are added live to the selector
+            var isNew = existingMap == null;
+            MapNavigation.AddOrUpdateMap(updatedMap);
+
+            if (isNew)
+            {
+                // Seed the tile revision so tile URLs get a valid ?v= (mirrors init)
+                if (mapView != null)
+                {
+                    await mapView.SetMapRevisionAsync(updatedMap.ID, updatedMap.MapInfo.Revision);
+                }
+                MapNavigation.InitializeMapRevision(updatedMap.ID, updatedMap.MapInfo.Revision);
+            }
+
+            if (SelectedMap?.ID == updatedMap.ID)
+            {
+                SelectedMap = updatedMap;
+            }
+
+            if (OverlayMap?.ID == updatedMap.ID)
+            {
+                OverlayMap = updatedMap;
+            }
+
+            Logger.LogInformation("Map {MapId} {Action}: {Name}, Hidden={Hidden}, Priority={Priority}",
+                updatedMap.ID, isNew ? "added" : "updated", updatedMap.MapInfo.Name, updatedMap.MapInfo.Hidden, updatedMap.MapInfo.Priority);
+            StateHasChanged();
         });
     }
 
@@ -2062,7 +2096,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
                             MapNavigation.ChangeMap(followed.Map);
                             state.CurrentMapId = followed.Map;
                             await mapView.ChangeMapAsync(followed.Map);
-                            await RebuildMarkersForCurrentMap();
+                            await ReloadMapScopedStateAsync();
                         }
 
                         await mapView.JumpToCharacterAsync(followed.Id);
@@ -2149,12 +2183,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
                     {
                         Logger.LogInformation("Current map {MapId} was deleted, switching to {NewMapId}", deletedMapId, firstMap.ID);
                         Snackbar.Add($"Map '{removedMap.MapInfo.Name}' was deleted. Switched to '{firstMap.MapInfo.Name}'.", Severity.Warning);
-                        MapNavigation.ChangeMap(firstMap.ID);
-                        state.CurrentMapId = firstMap.ID;
-                        SelectedMap = firstMap;
-                        await mapView.ChangeMapAsync(firstMap.ID);
-                        CustomMarkerState.MarkAsNeedingRender();
-                        await TryRenderPendingCustomMarkersAsync();
+                        await SwitchToMapAsync(firstMap.ID);
                     }
                     else
                     {
@@ -2198,21 +2227,9 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             state.CurrentMapId = character.Map;
             await mapView.ChangeMapAsync(character.Map);
 
-            await mapView.ClearAllCharactersAsync();
-            foreach (var ch in CharacterTracking.GetCharactersForMap(character.Map))
-            {
-                await mapView.AddCharacterAsync(ch);
-            }
-
-            // Sync character tooltip visibility after adding characters
-            await mapView.ToggleCharacterTooltipsAsync(LayerVisibility.ShouldShowCharacterTooltips());
-
-            await RebuildMarkersForCurrentMap();
-
             Navigation.NavigateTo(MapNavigation.GetUrl(character.Map, 0, 0, MapNavigation.Zoom), false);
 
-            CustomMarkerState.MarkAsNeedingRender();
-            await TryRenderPendingCustomMarkersAsync();
+            await ReloadMapScopedStateAsync();
         }
 
         await mapView.JumpToCharacterAsync(character.Id);
@@ -2240,6 +2257,62 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
         // Batch add all markers in a single JS interop call for performance
         await mapView.AddMarkersAsync(markers);
+    }
+
+    /// <summary>
+    /// Switches the current map (C# nav state + JS Leaflet) and reloads all map-scoped state.
+    /// The single entry point for every switch path (selector, merge, delete, hidden, refetch).
+    /// viewX/viewY/viewZoom default to the target map's DefaultStartX/Y at zoom 7.
+    /// </summary>
+    private async Task SwitchToMapAsync(int mapId, int? viewX = null, int? viewY = null, int? viewZoom = null)
+    {
+        if (mapView == null) return;
+
+        MapNavigation.ChangeMap(mapId); // also re-points SelectedMap at the list instance
+        state.CurrentMapId = mapId;
+        await mapView.ChangeMapAsync(mapId); // JS clears characters/markers/roads/pings
+
+        var map = MapNavigation.GetMapById(mapId);
+        var x = viewX ?? map?.MapInfo.DefaultStartX ?? 0;
+        var y = viewY ?? map?.MapInfo.DefaultStartY ?? 0;
+        var z = viewZoom ?? 7;
+        await mapView.SetViewAsync(x, y, z);
+        MapNavigation.UpdatePosition(x, y, z);
+        Navigation.NavigateTo(MapNavigation.GetUrl(mapId, x, y, z), false);
+
+        await ReloadMapScopedStateAsync();
+    }
+
+    /// <summary>
+    /// Re-populates everything JS changeMap() cleared, for the CURRENT map: game markers,
+    /// characters, custom markers (refetched from the API — the state service only ever holds
+    /// one map's markers), and roads. The ping layer was cleared in JS; reset its FAB flag.
+    /// </summary>
+    private async Task ReloadMapScopedStateAsync()
+    {
+        if (mapView == null) return;
+
+        await RebuildMarkersForCurrentMap();
+
+        await mapView.ClearAllCharactersAsync();
+        foreach (var ch in CharacterTracking.GetCharactersForMap(MapNavigation.CurrentMapId))
+        {
+            await mapView.AddCharacterAsync(ch);
+        }
+        await mapView.ToggleCharacterTooltipsAsync(LayerVisibility.ShouldShowCharacterTooltips());
+
+        if (hasMarkersPermission)
+        {
+            await LoadCustomMarkersAsync();
+        }
+        CustomMarkerState.MarkAsNeedingRender();
+        await TryRenderPendingCustomMarkersAsync();
+
+        await RefreshRoadsAsync();
+
+        hasActivePing = false;
+
+        StateHasChanged();
     }
 
     /// <summary>
@@ -2282,7 +2355,80 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     private void SetMode(SidebarMode mode)
     {
         sidebarMode = mode;
+        if (mode == SidebarMode.Maps)
+        {
+            // Belt-and-braces: the SSE mapUpdate upsert keeps the list live, but this
+            // guarantees the Maps panel is fresh even in polling-fallback mode or after
+            // a missed event. Fire-and-forget so the panel opens instantly.
+            _ = RefreshMapListAsync();
+        }
         StateHasChanged();
+    }
+
+    /// <summary>
+    /// Background refetch of GET /map/api/maps, merging the fresh list into navigation
+    /// state. If the current map vanished while we weren't listening (e.g. deleted or
+    /// merged away during polling mode), behaves like a live deletion.
+    /// </summary>
+    private async Task RefreshMapListAsync()
+    {
+        try
+        {
+            var mapsDict = await MapData.GetMapsAsync(); // returns {} on any error
+            if (mapsDict.Count == 0) return;
+
+            await InvokeAsync(async () =>
+            {
+                MapNavigation.SetMaps(mapsDict.Values.ToList()); // SetMaps applies the canonical sort
+
+                // Seed revisions for maps we learned about via this refetch
+                foreach (var m in MapNavigation.Maps)
+                {
+                    MapNavigation.InitializeMapRevision(m.ID, m.MapInfo.Revision);
+                    if (mapView != null)
+                    {
+                        await mapView.SetMapRevisionAsync(m.ID, m.MapInfo.Revision);
+                    }
+                }
+
+                if (MapNavigation.GetMapById(MapNavigation.CurrentMapId) == null)
+                {
+                    var firstVisible = MapNavigation.GetFirstVisibleMap();
+                    if (firstVisible != null && mapView != null)
+                    {
+                        Logger.LogInformation("Current map {MapId} no longer exists, switching to {NewMapId}",
+                            MapNavigation.CurrentMapId, firstVisible.ID);
+                        await SwitchToMapAsync(firstVisible.ID);
+                    }
+                }
+                else
+                {
+                    // Re-point SelectedMap at the fresh instance
+                    MapNavigation.ChangeMap(MapNavigation.CurrentMapId);
+                }
+
+                if (OverlayMap != null)
+                {
+                    var freshOverlay = MapNavigation.GetMapById(OverlayMap.ID);
+                    OverlayMap = freshOverlay;
+                    if (freshOverlay == null)
+                    {
+                        // Overlay map vanished while we weren't listening — clear the layer
+                        MapNavigation.ChangeOverlayMap(null);
+                        if (mapView != null)
+                        {
+                            await mapView.SetOverlayMapAsync(null);
+                        }
+                    }
+                }
+
+                StateHasChanged();
+            });
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Background map list refresh failed");
+        }
     }
 
     private string DrawerWidthCss => "min(400px, 85vw)";
@@ -3248,7 +3394,10 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     [JSInvokable]
     public async Task OnCustomMarkerDeleted(System.Text.Json.JsonElement data)
     {
-        var id = data.GetProperty("Id").GetInt32();
+        // Server sends camelCase ({ id: ... }); accept legacy PascalCase too
+        var id = data.TryGetProperty("id", out var idProp)
+            ? idProp.GetInt32()
+            : data.GetProperty("Id").GetInt32();
         CustomMarkerState.RemoveCustomMarker(id);
 
         if (mapView != null)

@@ -695,8 +695,10 @@ public static class MapEndpoints
                 {
                     if (merge.TenantId == tenantId)
                     {
-                        // Track merge target map so mapRevision events aren't filtered out
+                        // Track both sides so the follow-up mapDelete for the merged-away
+                        // source and later mapRevision events aren't filtered out
                         tenantMapIds.Add(merge.To);
+                        tenantMapIds.Add(merge.From);
                         var mergeJson = JsonSerializer.Serialize(merge, jsonOptions);
                         await context.Response.WriteAsync($"event: merge\ndata: {mergeJson}\n\n");
                         await context.Response.Body.FlushAsync();
@@ -709,12 +711,27 @@ public static class MapEndpoints
                 {
                     if (mapInfo.TenantId == tenantId)
                     {
+                        // Newly created/updated maps count as tenant maps from now on,
+                        // so later mapDelete/mapRevision events pass the Contains gates below
+                        tenantMapIds.Add(mapInfo.Id);
+
+                        // Same nested shape as a GET /map/api/maps item so the client can
+                        // upsert it straight into its map list. IsMainMap is deliberately
+                        // omitted (config lookup here would be stale on this long-lived
+                        // scope) — the client preserves its known value.
                         var mapUpdateDto = new
                         {
-                            Id = mapInfo.Id,
-                            Name = mapInfo.Name,
-                            Hidden = mapInfo.Hidden,
-                            Priority = mapInfo.Priority
+                            ID = mapInfo.Id,
+                            MapInfo = new
+                            {
+                                Name = mapInfo.Name,
+                                Hidden = mapInfo.Hidden,
+                                Priority = mapInfo.Priority,
+                                Revision = revisionCache.Get(mapInfo.Id),
+                                DefaultStartX = mapInfo.DefaultStartX,
+                                DefaultStartY = mapInfo.DefaultStartY
+                            },
+                            Size = 0
                         };
                         var mapJson = JsonSerializer.Serialize(mapUpdateDto, jsonOptions);
                         await context.Response.WriteAsync($"event: mapUpdate\ndata: {mapJson}\n\n");

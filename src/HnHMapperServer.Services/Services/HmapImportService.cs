@@ -141,6 +141,7 @@ public class HmapImportService : IHmapImportService
     private readonly IStorageQuotaService _quotaService;
     private readonly IMapNameService _mapNameService;
     private readonly IMarkerService _markerService;
+    private readonly IUpdateNotificationService _updateNotificationService;
     private readonly ILogger<HmapImportService> _logger;
     private const int GRID_SIZE = 100; // 100x100 tiles per grid
 
@@ -166,6 +167,7 @@ public class HmapImportService : IHmapImportService
         IStorageQuotaService quotaService,
         IMapNameService mapNameService,
         IMarkerService markerService,
+        IUpdateNotificationService updateNotificationService,
         ILogger<HmapImportService> logger)
     {
         _gridRepository = gridRepository;
@@ -176,6 +178,7 @@ public class HmapImportService : IHmapImportService
         _quotaService = quotaService;
         _mapNameService = mapNameService;
         _markerService = markerService;
+        _updateNotificationService = updateNotificationService;
         _logger = logger;
     }
 
@@ -1213,6 +1216,7 @@ public class HmapImportService : IHmapImportService
         };
 
         await _mapRepository.SaveMapAsync(mapInfo);
+        _updateNotificationService.NotifyMapUpdated(mapInfo);
         return mapInfo.Id;
     }
 

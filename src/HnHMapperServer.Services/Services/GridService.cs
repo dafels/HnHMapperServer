@@ -87,6 +87,12 @@ public class GridService : IGridService
             await _mapRepository.SaveMapAsync(mapInfo);
 
             var newMapId = mapInfo.Id;  // Use the auto-generated ID
+
+            // SaveMapAsync persists the tenant from the tenant context but does not set it
+            // back on the domain object — the SSE loop filters events by TenantId.
+            mapInfo.TenantId = tenantId;
+            _updateNotificationService.NotifyMapUpdated(mapInfo);
+
             _logger.LogInformation("Client created new map {MapId} with name '{MapName}'", newMapId, mapName);
 
             for (int x = 0; x < gridUpdate.Grids.Count; x++)
@@ -221,6 +227,7 @@ public class GridService : IGridService
         string gridStorage)
     {
         var allGrids = await _gridRepository.GetAllGridsAsync();
+        var tenantId = _tenantContext.GetRequiredTenantId();
 
         // Track tiles that need zoom regeneration (targetMapId, targetCoord)
         var tilesToRegenerate = new List<(int mapId, Coord coord)>();
@@ -272,13 +279,11 @@ public class GridService : IGridService
             // Delete source map
             await _mapRepository.DeleteMapAsync(sourceMapId);
 
-            // Get tenantId from first tile (all tiles in a map share the same tenantId)
-            var firstTile = await _tileService.GetTileAsync(targetMapId, sourceGrids.FirstOrDefault()?.Coord ?? new Coord(0,0), 0);
-            var tenantId = firstTile?.TenantId ?? string.Empty;
-
             _logger.LogInformation("Merged map {SourceMapId} into {TargetMapId} (shift: {ShiftX}, {ShiftY}) for tenant {TenantId}",
                 sourceMapId, targetMapId, shift.X, shift.Y, tenantId);
             _updateNotificationService.NotifyMapMerge(sourceMapId, targetMapId, shift, tenantId);
+            // The source map row is gone — tell viewers so it leaves their map selector.
+            _updateNotificationService.NotifyMapDeleted(sourceMapId);
         }
         
         // Regenerate zoom levels for all moved tiles (like Go does in client.go:779-791)

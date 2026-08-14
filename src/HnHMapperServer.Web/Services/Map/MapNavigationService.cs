@@ -175,11 +175,21 @@ public class MapNavigationService
     #region Map Management
 
     /// <summary>
+    /// Canonical map ordering used everywhere (init load, live upserts, panel refetch):
+    /// main map first, then priority (descending), then name.
+    /// </summary>
+    private static List<MapInfoModel> SortMaps(IEnumerable<MapInfoModel> maps) =>
+        maps.OrderByDescending(m => m.MapInfo.IsMainMap)
+            .ThenByDescending(m => m.MapInfo.Priority)
+            .ThenBy(m => m.MapInfo.Name)
+            .ToList();
+
+    /// <summary>
     /// Set the list of available maps
     /// </summary>
     public void SetMaps(List<MapInfoModel> maps)
     {
-        _maps = maps;
+        _maps = SortMaps(maps);
         _logger.LogDebug("Maps loaded: {Count} maps", maps.Count);
     }
 
@@ -198,10 +208,7 @@ public class MapNavigationService
             _maps.Add(map);
         }
 
-        // Re-sort the list by priority (descending) then name
-        _maps = _maps.OrderByDescending(m => m.MapInfo.Priority)
-            .ThenBy(m => m.MapInfo.Name)
-            .ToList();
+        _maps = SortMaps(_maps);
 
         _logger.LogDebug("Map added/updated: Id={Id}, Name={Name}", map.ID, map.MapInfo.Name);
     }

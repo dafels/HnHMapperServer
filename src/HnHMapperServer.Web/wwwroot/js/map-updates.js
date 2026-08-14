@@ -214,10 +214,16 @@ function connectSse() {
         });
 
         // Map deletion event
+        // Note: Server sends camelCase JSON ({ id: ... })
         eventSource.addEventListener('mapDelete', function (event) {
             try {
                 const deleteInfo = JSON.parse(event.data);
-                invokeDotNetSafe('OnSseMapDeleted', deleteInfo.Id);
+                const id = deleteInfo.id ?? deleteInfo.Id;
+                if (typeof id === 'number' && Number.isFinite(id)) {
+                    invokeDotNetSafe('OnSseMapDeleted', id);
+                } else {
+                    console.warn('[SSE] Ignoring mapDelete with invalid id:', deleteInfo);
+                }
             } catch (e) {
                 console.error('[SSE] Error parsing mapDelete event:', e);
             }
@@ -353,10 +359,16 @@ function connectSse() {
         });
 
         // Timer deleted event
+        // Note: Server sends camelCase JSON ({ id: ... })
         eventSource.addEventListener('timerDeleted', function (event) {
             try {
                 const deleteInfo = JSON.parse(event.data);
-                invokeDotNetSafe('OnTimerDeleted', deleteInfo.Id);
+                const id = deleteInfo.id ?? deleteInfo.Id;
+                if (typeof id === 'number' && Number.isFinite(id)) {
+                    invokeDotNetSafe('OnTimerDeleted', id);
+                } else {
+                    console.warn('[SSE] Ignoring timerDeleted with invalid id:', deleteInfo);
+                }
             } catch (e) {
                 console.error('[SSE] Error parsing timerDeleted event:', e);
             }

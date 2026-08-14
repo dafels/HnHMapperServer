@@ -25,7 +25,7 @@ public static class GameWorlds
     {
         new KnownWorld("c646473983afec09", "W16", 1),
         new KnownWorld("b7c199a4557503a8", "W16.1", 2),
-        // W16.2: add its genus hash + Order 3 when the world launches.
+        new KnownWorld("fd63ddee958da329", "W16.2", 3),
     };
 
     /// <summary>
