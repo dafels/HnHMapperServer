@@ -668,7 +668,9 @@ never expiring) to a live, actionable, coalescing digest with a stat preview.**
   backoff when CLOSED (non-200, e.g. expired cookie); `dispose()` keeps the ES (component remounts just
   re-swap the .NET ref); `OnStreamReconnected` → silent refetch. **All payload reads are camelCase now**
   (the old PascalCase reads meant browser notifications/sounds/read-sync had NEVER worked). Sound default
-  is `/sounds/ping.wav` — the referenced mp3s never shipped.
+  is `/sounds/ping.wav` — the referenced mp3s never shipped. **`CookbookFoodAdded` is deliberately
+  soundless** (`SILENT_TYPES` in notification-center.js: in-app sound skipped AND the OS notification is
+  created `silent: true`, which would otherwise play the system chime) — toast + bell + badge only.
 - **Bell (NotificationCenter.razor):** upsert-by-Id on created (reconnect redelivery), silent
   `OnNotificationUpdated` keeping list position (badge only moves on genuine read-state flips), refetch
   on menu open (`MudMenu OpenChanged`), list capped at 50, Restaurant icon + Success toast severity,

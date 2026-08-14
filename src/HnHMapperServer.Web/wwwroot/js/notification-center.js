@@ -14,6 +14,10 @@ window.notificationCenter = {
     // Single source of truth for the stream path (dev: Web-side proxy; prod: Caddy @notifsse)
     STREAM_URL: '/api/notifications/stream',
 
+    // Types that stay quiet: toast + bell only — no in-app sound, and the OS
+    // notification is created silent (it would otherwise play the system chime).
+    SILENT_TYPES: ['CookbookFoodAdded'],
+
     /**
      * Initialize the notification center
      * @param {DotNetObjectReference} dotNetReference - Reference to Blazor component
@@ -161,7 +165,7 @@ window.notificationCenter = {
                 badge: '/favicon.ico',
                 tag: `notification-${notification.id}`,
                 requireInteraction: notification.priority === 'High',
-                silent: false
+                silent: this.SILENT_TYPES.includes(notification.type)
             };
 
             const browserNotification = new Notification(notification.title, options);
@@ -188,6 +192,10 @@ window.notificationCenter = {
      * @param {string} notificationType - Type of notification (camelCase payload field)
      */
     playNotificationSound: function (notificationType) {
+        if (this.SILENT_TYPES.includes(notificationType)) {
+            return;
+        }
+
         try {
             // ping.wav is the only sound asset that ships; the timer mp3 branches
             // below are a pre-existing gap kept for when those assets appear.
