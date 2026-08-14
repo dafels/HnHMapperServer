@@ -1402,7 +1402,7 @@
         else if (HighlightCsv != _appliedHighlightCsv && !_loading && !_loadFailed)
         {
             _appliedHighlightCsv = HighlightCsv;
-            ApplyHighlight(HighlightCsv, HighlightWorld);
+            await ApplyHighlightAsync(HighlightCsv, HighlightWorld);
             return; // reveal on the NEXT render, once the highlighted rows exist in the DOM
         }
 
@@ -1423,7 +1423,7 @@
         }
     }
 
-    private void ApplyHighlight(string csv, string? world)
+    private async Task ApplyHighlightAsync(string csv, string? world)
     {
         var ids = new HashSet<int>();
         foreach (var part in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -1432,6 +1432,15 @@
             {
                 ids.Add(id);
             }
+        }
+
+        // The catalog in _rows is as old as this page instance — when the click happens
+        // while already on /cookbook, the just-discovered foods aren't in it yet.
+        // Refetch whenever any requested id is unknown, so the deep link always lands
+        // on the current catalog (also picks up new variant counts and New badges).
+        if (ids.Count > 0 && ids.Any(id => !_rows.Any(r => r.Food.Id == id)))
+        {
+            await LoadCatalogAsync();
         }
 
         var matched = _rows.Where(r => ids.Contains(r.Food.Id)).ToList();

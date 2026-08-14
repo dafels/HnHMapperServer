@@ -11,4 +11,12 @@ public static class FoodIcons
 
     public static string RemoteFallback(string resourceName) =>
         $"this.onerror=null;this.src='https://www.havenandhearth.com/mt/r/{resourceName}';";
+
+    /// <summary>
+    /// onerror chain for surfaces where a broken-image glyph is unacceptable (the
+    /// notification bell): try the remote renderer once, then hide the img entirely.
+    /// Requires https://www.havenandhearth.com in the CSP img-src (deploy/Caddyfile).
+    /// </summary>
+    public static string RemoteFallbackOrHide(string resourceName) =>
+        $"if(!this.dataset.fb){{this.dataset.fb='1';this.src='https://www.havenandhearth.com/mt/r/{resourceName}';}}else{{this.style.display='none';}}";
 }

@@ -27,7 +27,7 @@ yourdomain.com {
 
     # Content Security Policy (tuned for Blazor Server + Local Leaflet + MudBlazor)
     # Leaflet bundled locally, only external dependencies are Google Fonts and OSM tiles
-    Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: https://*.tile.openstreetmap.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self'; font-src 'self' https://fonts.gstatic.com; frame-ancestors 'none';"
+    Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: https://*.tile.openstreetmap.org https://www.havenandhearth.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self'; font-src 'self' https://fonts.gstatic.com; frame-ancestors 'none';"
 
     # Remove server information disclosure
     -Server

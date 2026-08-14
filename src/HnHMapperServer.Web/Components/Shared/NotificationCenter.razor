@@ -87,7 +87,7 @@
                                                 {
                                                     <img class="ck-notif-icon"
                                                          src="@FoodIcons.LocalSrc(food.ResourceName)"
-                                                         onerror="@FoodIcons.RemoteFallback(food.ResourceName)"
+                                                         onerror="@FoodIcons.RemoteFallbackOrHide(food.ResourceName)"
                                                          loading="lazy" alt="" />
                                                 }
                                                 <span class="ck-notif-food-name" title="@food.Name">@food.Name</span>

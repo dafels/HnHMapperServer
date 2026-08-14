@@ -676,13 +676,19 @@ never expiring) to a live, actionable, coalescing digest with a stat preview.**
   on menu open (`MudMenu OpenChanged`), list capped at 50, Restaurant icon + Success toast severity,
   click → `/cookbook?highlight={ids}&hlworld={genus}`. **Stat preview** on digest rows: real food icons
   (shared `FoodIcons` helper — local `wwwroot/gfx/invobjs/*.png` (~2000 ship) with
-  havenandhearth.com/mt/r fallback, same as the cookbook table) + FEP pills colored via **`FepPalette`
+  havenandhearth.com/mt/r fallback, same as the cookbook table; the bell uses `RemoteFallbackOrHide`,
+  which hides the img when both sources fail instead of showing a broken glyph. The remote fallback
+  needed `https://www.havenandhearth.com` added to the CSP `img-src` in deploy/Caddyfile{,.example} —
+  it had been silently CSP-blocked in prod for the cookbook table too) + FEP pills colored via **`FepPalette`
   (moved from Cookbook.razor's @code to Core/Cookbook so both share it** — Cookbook's `StatColor`/
   `StatFullNames` now delegate) + energy/hunger, rendered from ActionData previews (no fetch), memoized
   per (id, raw-json). Scoped CSS: NotificationCenter.razor.css (#33322e on pastels, ≥4.5:1).
 - **Cookbook deep-link:** `[SupplyParameterFromQuery] highlight/hlworld`, applied in
   **`OnAfterRenderAsync`** (page prerenders: stripping the query in OnParametersSet would erase it before
   the circuit sees it, and JS interop is illegal there; also covers clicking while already on /cookbook).
+  **Stale-catalog guard:** when already on /cookbook, Blazor reuses the page instance, so `_rows` predates
+  the discovery — if any highlight id is unknown, `ApplyHighlightAsync` refetches via `LoadCatalogAsync()`
+  before resolving (the deep link always lands on the current catalog).
   Activation clears conflicting facets (search/filter/stat/satiation/prep/sort/focus/panel/NewOnly) and
   switches world only when needed (keep if all matches satisfy it, else hlworld if ALL matches contain
   it, else null — always via `SetWorld`); `BaseFiltered` override (before the focus branch) pins the
