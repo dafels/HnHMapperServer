@@ -29,7 +29,6 @@ public class TenantDataPurgeServiceTests : IDisposable
     private readonly string _gridStorage;
     private readonly ApplicationDbContext _db;
     private readonly TenantDataPurgeService _service;
-    private readonly Mock<IFoodCatalogService> _foodCatalog = new();
 
     public TenantDataPurgeServiceTests()
     {
@@ -47,17 +46,12 @@ public class TenantDataPurgeServiceTests : IDisposable
 
         Seed();
 
-        _foodCatalog
-            .Setup(x => x.ClearAsync(TargetTenant, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new CookbookClearResultDto { Foods = 928, Variants = 49_000 });
-
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["GridStorage"] = _gridStorage })
             .Build();
 
         _service = new TenantDataPurgeService(
             _db,
-            _foodCatalog.Object,
             new StorageQuotaService(_db, Mock.Of<ILogger<StorageQuotaService>>()),
             new TenantFilePathService(),
             configuration,
@@ -142,7 +136,6 @@ public class TenantDataPurgeServiceTests : IDisposable
         Assert.Single(await _db.Tiles.IgnoreQueryFilters().Where(t => t.TenantId == OtherTenant).ToListAsync());
         Assert.Single(await _db.Markers.IgnoreQueryFilters().Where(m => m.TenantId == OtherTenant).ToListAsync());
         Assert.True(Directory.Exists(Path.Combine(_gridStorage, "tenants", OtherTenant)));
-        _foodCatalog.Verify(x => x.ClearAsync(OtherTenant, It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -175,13 +168,13 @@ public class TenantDataPurgeServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task PurgeAsync_ClearsCookbookAndFoldsInItsCounts()
+    public async Task PurgeAsync_KeepsTheCookbook()
     {
-        var result = await _service.PurgeAsync(TargetTenant);
+        await _service.PurgeAsync(TargetTenant);
 
-        _foodCatalog.Verify(x => x.ClearAsync(TargetTenant, It.IsAny<CancellationToken>()), Times.Once);
-        Assert.Equal(928, result.Foods);
-        Assert.Equal(49_000, result.FoodVariants);
+        // Foods and their variations hold player contributions no re-import can restore.
+        Assert.Single(await _db.Foods.IgnoreQueryFilters().Where(f => f.TenantId == TargetTenant).ToListAsync());
+        Assert.Single(await _db.FoodVariants.IgnoreQueryFilters().Where(v => v.TenantId == TargetTenant).ToListAsync());
     }
 
     [Fact]
@@ -484,6 +477,31 @@ public class TenantDataPurgeServiceTests : IDisposable
             CompletedAt = now,
             Type = "Marker",
             Title = "harvest"
+        });
+
+        // Cookbook data must survive the purge (player contributions, not map data).
+        var food = new FoodEntity
+        {
+            TenantId = tenantId,
+            Name = "Roast Meat",
+            ResourceName = "gfx/invobjs/roastmeat",
+            Energy = 200,
+            Hunger = 1,
+            ImportedAt = now,
+            ContributedBy = UserId
+        };
+        _db.Foods.Add(food);
+        _db.SaveChanges();
+
+        _db.FoodVariants.Add(new FoodVariantEntity
+        {
+            TenantId = tenantId,
+            FoodId = food.Id,
+            IngredientSignature = "Raw Meat:100",
+            Energy = 200,
+            Hunger = 1,
+            TimesSeen = 1,
+            Contributors = new List<string> { UserId }
         });
 
         _db.SaveChanges();

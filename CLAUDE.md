@@ -835,16 +835,16 @@ mixed with free text (`meat str>50% int2>15`):
   `{ "confirmTenantId": "<tenantId>" }` — a deliberate speed bump. Returns a `PurgeTenantDataResultDto`
   with per-table counts, `filesDeleted`, `bytesFreed`/`megabytesFreed`, `deletedMapIds` and any warnings.
 - **Deleted:** Maps, Grids, Tiles, Markers, CustomMarkers, Roads, Pings, OverlayData, OverlayOffsets,
-  DirtyZoomTiles, Timers (+ cascaded TimerWarnings), TimerHistory, Notifications, Foods/FoodVariants,
+  DirtyZoomTiles, Timers (+ cascaded TimerWarnings), TimerHistory, Notifications,
   the `mainMapId` config key, and `PublicMapSources`/`PublicMapSourceAlignments` that pointed at the
   wiped maps. On disk: all of `{GridStorage}/tenants/{tenantId}` and `{GridStorage}/previews/{tenantId}`.
 - **Kept:** the tenant row, TenantUsers, TenantPermissions, TenantInvitations, Tokens, remaining Config,
-  AuditLogs, Identity users, and cookbook FoodPanels/favorites (name-keyed, so they re-resolve after a
-  future import — same rationale as the existing cookbook clear).
+  AuditLogs, Identity users, and **the whole cookbook** — Foods/FoodVariants plus FoodPanels/favorites
+  (changed 2026-08-14: foods hold player contributions no re-import can restore, and they cost no tile
+  storage; use the tenant-admin cookbook clear if the catalog itself must go).
 - **Service:** `ITenantDataPurgeService` / `TenantDataPurgeService`. Every query is `IgnoreQueryFilters()`
   plus an explicit `TenantId` predicate, since the superadmin request's ambient tenant is a different one.
-  Deletes run child-before-parent inside one transaction; the cookbook clear runs first because
-  `FoodCatalogService.ClearAsync` opens its own transaction on the same DbContext. Files are removed after
+  Deletes run child-before-parent inside one transaction. Files are removed after
   the commit, then `RecalculateStorageUsageAsync` resets `CurrentStorageMB` and the directory skeleton is
   recreated so clients can upload immediately.
 - **UI:** red "delete sweep" icon in SuperAdmin → Tenants row actions → `PurgeTenantDataDialog`, which

@@ -6,10 +6,11 @@ namespace HnHMapperServer.Services.Interfaces;
 /// Wipes a tenant's *content* while leaving the tenant itself intact.
 ///
 /// Removed: maps, grids, tiles (rows and files on disk), game and custom markers, roads,
-/// pings, overlays, timers, notifications, and the cookbook catalog.
+/// pings, overlays, timers, and notifications.
 ///
-/// Kept: the tenant row, its users, roles, permissions, invitations, API tokens, cookbook
-/// panels/favorites and its config (minus the now-dangling main map pointer).
+/// Kept: the tenant row, its users, roles, permissions, invitations, API tokens, the whole
+/// cookbook (foods, variants, panels/favorites — player contributions no re-import can
+/// restore) and its config (minus the now-dangling main map pointer).
 ///
 /// The point of the operation is reclaiming disk, so the result reports bytes freed.
 /// </summary>

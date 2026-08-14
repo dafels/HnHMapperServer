@@ -18,7 +18,6 @@ namespace HnHMapperServer.Services.Services;
 public class TenantDataPurgeService : ITenantDataPurgeService
 {
     private readonly ApplicationDbContext _db;
-    private readonly IFoodCatalogService _foodCatalogService;
     private readonly IStorageQuotaService _quotaService;
     private readonly ITenantFilePathService _filePathService;
     private readonly IConfiguration _configuration;
@@ -26,14 +25,12 @@ public class TenantDataPurgeService : ITenantDataPurgeService
 
     public TenantDataPurgeService(
         ApplicationDbContext db,
-        IFoodCatalogService foodCatalogService,
         IStorageQuotaService quotaService,
         ITenantFilePathService filePathService,
         IConfiguration configuration,
         ILogger<TenantDataPurgeService> logger)
     {
         _db = db;
-        _foodCatalogService = foodCatalogService;
         _quotaService = quotaService;
         _filePathService = filePathService;
         _configuration = configuration;
@@ -62,12 +59,8 @@ public class TenantDataPurgeService : ITenantDataPurgeService
             .Select(m => m.Id)
             .ToListAsync(ct);
 
-        // Cookbook first: ClearAsync opens its own transaction on this same DbContext, so it
-        // cannot run nested inside the map-data transaction below. It also drops the catalog cache.
-        var cookbook = await _foodCatalogService.ClearAsync(tenantId, ct);
-        result.Foods = cookbook.Foods;
-        result.FoodVariants = cookbook.Variants;
-
+        // The cookbook (Foods/FoodVariants) is deliberately NOT purged: it holds
+        // player-contributed data that no re-import can restore, and it costs no tile storage.
         await PurgeDatabaseRowsAsync(tenantId, result, ct);
 
         await PurgeFilesAsync(tenantId, gridStorage, result);
@@ -80,10 +73,10 @@ public class TenantDataPurgeService : ITenantDataPurgeService
 
         _logger.LogWarning(
             "Purged tenant {TenantId} content: {Maps} maps, {Grids} grids, {Tiles} tiles, " +
-            "{Markers} markers, {CustomMarkers} custom markers, {Foods} foods, " +
+            "{Markers} markers, {CustomMarkers} custom markers, " +
             "{Files} files ({MB:F2} MB freed)",
             tenantId, result.Maps, result.Grids, result.Tiles, result.Markers,
-            result.CustomMarkers, result.Foods, result.FilesDeleted, result.MegabytesFreed);
+            result.CustomMarkers, result.FilesDeleted, result.MegabytesFreed);
 
         return result;
     }

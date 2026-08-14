@@ -169,10 +169,6 @@ public class PurgeTenantDataResultDto
     public int TimerHistory { get; set; }
     public int Notifications { get; set; }
 
-    // Cookbook
-    public int Foods { get; set; }
-    public int FoodVariants { get; set; }
-
     // Public map source references that pointed at the wiped maps
     public int PublicMapSources { get; set; }
 

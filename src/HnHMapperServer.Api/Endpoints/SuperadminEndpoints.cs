@@ -1743,9 +1743,10 @@ public static class SuperadminEndpoints
 
     /// <summary>
     /// POST /api/superadmin/tenants/{tenantId}/purge-data
-    /// Frees disk by wiping everything a tenant has *produced* — maps, grids, tiles (rows and
-    /// files), markers, roads, pings, overlays, timers, notifications and the cookbook catalog —
-    /// while leaving the tenant, its users, permissions, invitations and tokens in place.
+    /// Frees disk by wiping everything a tenant has *mapped* — maps, grids, tiles (rows and
+    /// files), markers, roads, pings, overlays, timers and notifications — while leaving the
+    /// tenant, its users, permissions, invitations, tokens and the whole cookbook in place
+    /// (the cookbook holds player contributions no re-import can restore).
     /// Irreversible; the request body must echo the tenant id back.
     /// </summary>
     private static async Task<IResult> PurgeTenantData(
@@ -1808,13 +1809,11 @@ public static class SuperadminEndpoints
                     result.Overlays,
                     result.Timers,
                     result.Notifications,
-                    result.Foods,
-                    result.FoodVariants,
                     result.PublicMapSources,
                     result.FilesDeleted,
                     result.BytesFreed
                 }),
-                NewValue = $"Tenant content purged by {adminUsername}; users, tokens and permissions retained"
+                NewValue = $"Tenant map data purged by {adminUsername}; users, tokens, permissions and cookbook retained"
             });
 
             logger.LogWarning(

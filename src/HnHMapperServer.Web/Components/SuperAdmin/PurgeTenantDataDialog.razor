@@ -9,7 +9,7 @@
         <MudStack Spacing="3">
             <MudAlert Severity="Severity.Error" Dense="true">
                 This permanently deletes everything <strong>@(Tenant?.Name ?? "this tenant")</strong> has
-                mapped and cooked. It cannot be undone and there is no backup step.
+                mapped. It cannot be undone and there is no backup step.
             </MudAlert>
 
             @if (_isLoadingStats)
@@ -33,10 +33,6 @@
                             <tr><td>Roads</td><td><strong>@_stats.RoadCount.ToString("N0")</strong></td></tr>
                             <tr><td>Timers &amp; notifications</td><td><strong>@_stats.TimerCount.ToString("N0")</strong></td></tr>
                             <tr>
-                                <td>Cookbook foods</td>
-                                <td><strong>@_stats.FoodCount.ToString("N0")</strong> (@_stats.FoodVariantCount.ToString("N0") variations)</td>
-                            </tr>
-                            <tr>
                                 <td>Disk in use</td>
                                 <td><strong>@FormatStorageSize(_stats.StorageUsageMB)</strong></td>
                             </tr>
@@ -52,8 +48,9 @@
                     <MudText Typo="Typo.body2">
                         The tenant itself, its <strong>@_stats.UserCount</strong> user(s) with their roles and
                         permissions, <strong>@_stats.TokenCount</strong> API token(s), pending invitations,
-                        cookbook panels and favorites, audit history, and the storage quota
-                        (@FormatStorageSize(_stats.StorageQuotaMB)).
+                        the whole cookbook (<strong>@_stats.FoodCount.ToString("N0")</strong> foods,
+                        @_stats.FoodVariantCount.ToString("N0") variations, panels and favorites),
+                        audit history, and the storage quota (@FormatStorageSize(_stats.StorageQuotaMB)).
                     </MudText>
                 </MudPaper>
 
@@ -175,8 +172,8 @@
                 var result = await response.Content.ReadFromJsonAsync<PurgeTenantDataResultDto>();
 
                 Snackbar.Add(
-                    $"Purged '{Tenant.Name}': {result?.Maps ?? 0} maps, {result?.Tiles ?? 0:N0} tiles, " +
-                    $"{result?.Foods ?? 0:N0} foods — {result?.MegabytesFreed ?? 0:N2} MB freed",
+                    $"Purged '{Tenant.Name}': {result?.Maps ?? 0} maps, {result?.Tiles ?? 0:N0} tiles " +
+                    $"— {result?.MegabytesFreed ?? 0:N2} MB freed",
                     Severity.Success);
 
                 if (result?.Warnings.Count > 0)
