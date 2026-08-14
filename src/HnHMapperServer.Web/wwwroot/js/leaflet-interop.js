@@ -50,6 +50,7 @@ let detailedMarkerLayer = null;
 let customMarkerLayer = null;
 let roadLayer = null;
 let currentMapId = 0;
+let pingKeydownHandler = null; // document-level Alt+M handler; replaced on SPA re-entry
 
 // Clustering state - create both regular and cluster layers, swap between them
 let markerClusterLayer = null;
@@ -131,6 +132,24 @@ function invokeDotNetSafe(method, ...args) {
 export async function initializeMap(mapElementId, dotnetReference) {
     console.log('[Leaflet] initializeMap called, element:', mapElementId);
     dotnetRef = dotnetReference;
+
+    // Blazor SPA navigation re-enters this module with all its state intact (ES modules
+    // are cached for the lifetime of the browser page, not the Blazor page). Destroy the
+    // previous Leaflet instance and reset navigation state — otherwise mapHasInitialView
+    // stays true, changeMap() skips the initial setView, Leaflet's 'load' event never
+    // fires on the new instance, OnMapReady/initialized never happen, and the whole map
+    // page is dead (black map, no interactions) until a hard refresh.
+    if (mapInstance) {
+        console.log('[Leaflet] Removing previous map instance (SPA re-entry)');
+        try {
+            mapInstance.remove();
+        } catch (e) {
+            console.warn('[Leaflet] Failed to remove previous map instance:', e);
+        }
+        mapInstance = null;
+    }
+    mapHasInitialView = false;
+    currentMapId = 0;
 
     // Ensure DOM element is ready before Leaflet touches it
     // Return a promise that resolves after requestAnimationFrame
@@ -259,7 +278,12 @@ export async function initializeMap(mapElementId, dotnetReference) {
         lastMouseLatLng = e.latlng;
     });
 
-    document.addEventListener('keydown', (e) => {
+    // Document-level listener must not accumulate across SPA re-entries (each stale
+    // copy would fire an extra ping) — drop the previous one before registering
+    if (pingKeydownHandler) {
+        document.removeEventListener('keydown', pingKeydownHandler);
+    }
+    pingKeydownHandler = (e) => {
         // Alt+M creates a ping at mouse position (or map center if no mouse position)
         if (e.altKey && e.key.toLowerCase() === 'm') {
             e.preventDefault();
@@ -277,7 +301,8 @@ export async function initializeMap(mapElementId, dotnetReference) {
             // Call Blazor to create ping
             invokeDotNetSafe('JsCreatePing', currentMapId, coordX, coordY, localX, localY);
         }
-    });
+    };
+    document.addEventListener('keydown', pingKeydownHandler);
 
     // Event handlers
     // Use 'dragend' instead of 'drag' to avoid triggering Blazor render cycles during pan

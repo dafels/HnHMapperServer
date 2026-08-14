@@ -670,6 +670,18 @@ creation event on the wire, and JS `changeMap` cleared characters/markers/roads 
 - **Races/init**: `MapView.ChangeMapAsync` queues `pendingMapId` when Leaflet hasn't fired `load` yet
   and applies it in `OnMapReady` (was a silent no-op → C#/JS desync); `/map?map=N` without x/y/z no
   longer snaps back to `Maps[0]` (respects `?map=` > MainMapId > first).
+- **SPA re-entry killed the whole page** (the "black map until F5" bug): `leaflet-interop.js` is an
+  ES module cached for the browser page's lifetime, so navigating dashboard → /map re-ran
+  `initializeMap` with `mapHasInitialView` still true from the previous visit → `changeMap` skipped
+  the initial `setView` → Leaflet `load` never fired on the new instance → `OnMapReady`/`initialized`
+  never happened → every interop call (view, jump-to-player, markers, SSE init) silently no-oped:
+  black map, dead clicks, URL stuck at `/map`. Fix: `initializeMap` now destroys the previous
+  `mapInstance` (`.remove()`) and resets `mapHasInitialView`/`currentMapId`, and the document-level
+  Alt+M keydown handler is replaced instead of stacking (each stale copy fired an extra ping).
+  **Rule going forward: any module-level JS state consumed by `initializeMap`-style re-entry points
+  must be reset there — Blazor SPA navigation does not reload JS modules.** (`map-updates.js` was
+  already re-entry-safe: it re-binds `dotnetRef` and Map.razor's `DisposeAsync` closes the
+  EventSource, so re-entry reconnects and gets a fresh snapshot.)
 - **Tests**: `GridServiceMapMergeTests` +2 — merge broadcasts with the real tenant (regression: the
   no-tile merge case that used to yield `""`) + `NotifyMapDeleted`, and the new-map branch notifies
   with `TenantId` set. No test host exists for the SSE endpoint/Blazor handlers.
