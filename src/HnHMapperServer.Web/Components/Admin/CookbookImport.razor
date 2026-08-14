@@ -1,3 +1,4 @@
+@using HnHMapperServer.Core.Cookbook
 @using HnHMapperServer.Core.DTOs
 @using Microsoft.JSInterop
 @inject IHttpClientFactory HttpClientFactory
@@ -100,6 +101,44 @@
                 </MudButton>
             </MudStack>
 
+            @if (_status is { } s && (s.UntaggedFoodCount > 0 || s.UntaggedVariantCount > 0))
+            {
+                <MudStack Row="true" Spacing="3" AlignItems="AlignItems.Center" Class="flex-wrap">
+                    <MudText Typo="Typo.body2">
+                        <strong>@s.UntaggedFoodCount</strong> foods /
+                        <strong>@s.UntaggedVariantCount.ToString("N0")</strong> recipe variations have no world
+                        tag (admin imports and uploads from before world tagging).
+                    </MudText>
+                    <MudSelect T="string"
+                               @bind-Value="_assignWorld"
+                               Label="World"
+                               Dense="true"
+                               Margin="Margin.Dense"
+                               Style="max-width: 160px;"
+                               Disabled="@(_isAssigning || _isImporting || _isClearing)">
+                        @foreach (var world in GameWorlds.Known.OrderByDescending(w => w.Order))
+                        {
+                            <MudSelectItem T="string" Value="@world.Genus">@world.Name</MudSelectItem>
+                        }
+                    </MudSelect>
+                    <MudButton Variant="Variant.Outlined"
+                               Color="Color.Primary"
+                               StartIcon="@Icons.Material.Filled.Public"
+                               Disabled="@(_isAssigning || _isImporting || _isClearing)"
+                               OnClick="AssignWorldAsync">
+                        @if (_isAssigning)
+                        {
+                            <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                            <span>Assigning...</span>
+                        }
+                        else
+                        {
+                            <span>Assign world</span>
+                        }
+                    </MudButton>
+                </MudStack>
+            }
+
             @if (_lastResult != null && _lastResult.Errors.Count > 0)
             {
                 <MudAlert Severity="Severity.Warning" Dense="true">
@@ -140,6 +179,8 @@
     private bool _isImporting;
     private bool _isClearing;
     private bool _isExporting;
+    private bool _isAssigning;
+    private string _assignWorld = GameWorlds.Known.OrderByDescending(w => w.Order).First().Genus;
     private CookbookImportResultDto? _lastResult;
 
     protected override async Task OnInitializedAsync()
@@ -364,6 +405,72 @@
         finally
         {
             _isClearing = false;
+        }
+    }
+
+    /// <summary>
+    /// Bulk-tags everything without world data as belonging to the selected world.
+    /// Irreversible (transferred data becomes indistinguishable from real uploads of
+    /// that world), so the admin confirms with the exact counts first.
+    /// </summary>
+    private async Task AssignWorldAsync()
+    {
+        if (_isAssigning || string.IsNullOrEmpty(_tenantId)
+            || _status is not { } status
+            || (status.UntaggedFoodCount == 0 && status.UntaggedVariantCount == 0))
+        {
+            return;
+        }
+
+        var label = GameWorlds.DisplayName(_assignWorld);
+        var confirmed = await DialogService.ShowMessageBox(
+            $"Assign all untagged data to {label}?",
+            (MarkupString)($"This tags <strong>{status.UntaggedFoodCount} foods</strong> and " +
+                           $"<strong>{status.UntaggedVariantCount:N0} recipe variations</strong> that have no world " +
+                           $"data as belonging to <strong>{label}</strong> — including untagged variations of foods " +
+                           "that already carry other world tags. Existing world tags are not changed, and the " +
+                           "Untagged bucket on the cookbook page becomes empty.<br /><br />" +
+                           "<strong>This cannot be undone:</strong> the data becomes indistinguishable from data " +
+                           $"uploaded by game clients playing {label}."),
+            yesText: $"Assign to {label}",
+            cancelText: "Cancel");
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        _isAssigning = true;
+        try
+        {
+            // APIUpload client: tagging ~50k variations can exceed the API client's 10s
+            // resilience timeout, and a mid-flight retry of a bulk write is confusing
+            // (same reason export/purge use it).
+            var client = HttpClientFactory.CreateClient("APIUpload");
+            var response = await client.PostAsJsonAsync(
+                $"/api/tenants/{Uri.EscapeDataString(_tenantId)}/cookbook/assign-world",
+                new CookbookWorldAssignRequestDto { World = _assignWorld });
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<CookbookWorldAssignResultDto>();
+                Snackbar.Add(
+                    $"Assigned {result?.Foods ?? 0} foods and {result?.Variants ?? 0:N0} recipe variations to {label}",
+                    Severity.Success);
+                await LoadStatusAsync();   // the row hides itself once the untagged counts hit 0
+            }
+            else
+            {
+                Snackbar.Add($"World assignment failed: HTTP {(int)response.StatusCode}", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Cookbook world assignment failed");
+            Snackbar.Add($"World assignment failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isAssigning = false;
         }
     }
 

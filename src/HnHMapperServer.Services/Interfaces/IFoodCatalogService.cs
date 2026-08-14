@@ -27,6 +27,15 @@ public interface IFoodCatalogService
     Task<CookbookClearResultDto> ClearAsync(string tenantId, CancellationToken ct = default);
 
     /// <summary>
+    /// Tags every untagged food and recipe variation of one tenant with the given known
+    /// world (genus hash), seeding per-world value snapshots from the canonical columns.
+    /// Untagged variations inside already-tagged foods are included; existing world tags
+    /// and snapshots are never modified, so the operation is idempotent. Throws
+    /// ArgumentException for blank, sentinel, or unknown worlds.
+    /// </summary>
+    Task<CookbookWorldAssignResultDto> AssignUntaggedToWorldAsync(string tenantId, string world, CancellationToken ct = default);
+
+    /// <summary>
     /// Returns all recorded recipe variations of one food (current tenant), best first.
     /// </summary>
     Task<List<FoodVariantDto>> GetVariationsAsync(int foodId, CancellationToken ct = default);

@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text.Json;
 using HnHMapperServer.Core.Constants;
+using HnHMapperServer.Core.Cookbook;
 using HnHMapperServer.Core.DTOs;
 using HnHMapperServer.Infrastructure.Data;
 using HnHMapperServer.Services.Interfaces;
@@ -48,6 +49,7 @@ public static class CookbookEndpoints
         admin.MapGet("/status", GetStatus);
         admin.MapGet("/export", ExportCookbook);
         admin.MapPost("/import", ImportCookbook);
+        admin.MapPost("/assign-world", AssignWorld);
         admin.MapDelete("", ClearCookbook);
     }
 
@@ -292,6 +294,58 @@ public static class CookbookEndpoints
         {
             logger.LogError(ex, "Error clearing cookbook for tenant {TenantId}", tenantId);
             return Results.Problem("Failed to clear cookbook data");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/tenants/{tenantId}/cookbook/assign-world   body: { "world": "&lt;genus&gt;" }
+    /// Tags every untagged food and recipe variation with a known world (the UI asks
+    /// for confirmation first). Existing world tags are never modified, so the
+    /// operation is idempotent — a re-run finds nothing untagged.
+    /// </summary>
+    private static async Task<IResult> AssignWorld(
+        string tenantId,
+        CookbookWorldAssignRequestDto request,
+        IFoodCatalogService foodCatalogService,
+        IAuditService auditService,
+        ClaimsPrincipal user,
+        ILogger<Program> logger)
+    {
+        if (!CanManageTenant(user, tenantId))
+        {
+            return Results.Forbid();
+        }
+
+        try
+        {
+            var result = await foodCatalogService.AssignUntaggedToWorldAsync(tenantId, request.World ?? string.Empty);
+
+            if (result.Foods > 0 || result.Variants > 0)
+            {
+                await auditService.LogAsync(new AuditEntry
+                {
+                    UserId = user.FindFirstValue(ClaimTypes.NameIdentifier),
+                    TenantId = tenantId,
+                    Action = "CookbookWorldAssigned",
+                    EntityType = "FoodCatalog",
+                    NewValue = $"{result.Foods} foods, {result.Variants} variants → {result.World} ({GameWorlds.DisplayName(result.World)})"
+                });
+
+                logger.LogInformation(
+                    "{Username} assigned untagged cookbook data of tenant {TenantId} to {World} ({Foods} foods, {Variants} variants)",
+                    user.FindFirstValue(ClaimTypes.Name) ?? "unknown", tenantId, result.World, result.Foods, result.Variants);
+            }
+
+            return Results.Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error assigning cookbook world for tenant {TenantId}", tenantId);
+            return Results.Problem("Failed to assign world to cookbook data");
         }
     }
 

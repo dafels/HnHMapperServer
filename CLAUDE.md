@@ -625,6 +625,38 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-14: Cookbook bulk world assignment (tenant-admin)
+
+**Untagged cookbook data can be bulk-assigned to a known world** — the cleanup for pre-world-tagging
+catalogs (admin imports + old uploads) whose data all sits in the /cookbook "Untagged" bucket.
+- **Endpoint:** `POST /api/tenants/{tenantId}/cookbook/assign-world` body `{"world":"<genus>"}` (same
+  TenantAdmin policy + `CanManageTenant` guard as the other cookbook admin endpoints). Audited as
+  `CookbookWorldAssigned` (counts + genus + display name), only when something changed. Idempotent —
+  a re-run finds nothing untagged and returns `{Foods:0, Variants:0}` without an audit row.
+- **Service:** `FoodCatalogService.AssignUntaggedToWorldAsync(tenantId, world)` — validates via
+  `GameWorlds` (**known worlds only**, `OrderOf >= 0`; sentinel/blank/unknown → `ArgumentException` →
+  400; ingestion stays permissive for unknown genus, this admin op does not). One transaction:
+  keyset-pages untagged variants by Id (`Worlds.Count == 0` — EF9 translates primitive-collection
+  Count to json_each SQL on SQLite; offset paging would skip rows as tagged ones leave the filter)
+  in `VariantBatchSize` batches with `SaveChanges` + `ChangeTracker.Clear()` per batch, then one
+  tracked food pass. Purely additive: appends genus to empty `Worlds` lists (foods also when a
+  tagged food's untagged variant transferred — mirrors ingestion's food-level append) and **seeds
+  `WorldValues` from the canonical columns** (`BuildWorldValueFromCanonical`) so a later real upload
+  from that world competes under the lowest-FEP-total-wins heuristic instead of winning by default.
+  Existing tags/snapshots never modified. Invalidates both tenant caches. No migration (JSON column
+  values only). `GetStatusAsync`/`CookbookStatusDto` gained `UntaggedFoodCount`/`UntaggedVariantCount`.
+- **UI:** Admin → Cookbook tab shows an "N foods / M recipe variations have no world tag" row
+  (auto-hidden at 0) with a world dropdown (`GameWorlds.Known`, newest first) + "Assign world"
+  button behind a counts-explicit `ShowMessageBox` confirmation ("cannot be undone — becomes
+  indistinguishable from data uploaded from that world"). POST goes through the `APIUpload`
+  HttpClient (the default `API` client's 10s resilience timeout would cancel/retry the bulk write).
+  /cookbook needs no changes — after F5 the Untagged chip disables at 0 and world chips/values pick
+  the data up (same accepted circuit staleness as import/clear).
+- **Tests:** `FoodCatalogServiceWorldAssignTests` (real SQLite, same harness as export/import tests):
+  tagging + snapshot seeding, merge into already-tagged foods without touching existing tags,
+  no-op re-run, tenant isolation, validation, status counts, export roundtrip, and a
+  `VariantBatchSize + 1` batch-boundary case proving the keyset loop.
+
 ### 2026-08-12: Cookbook export/import (tenant-admin)
 
 **The cookbook can be exported as a re-importable JSON snapshot** — the piece a food-info2 re-import
@@ -702,6 +734,17 @@ Both clients send a `genus` world hash per food record (Hurricane from `GameUI.g
   world-agnostic); the food's stored headline columns (creation-time wiki/first-upload values — the
   world view overrides them via the derived `WorldValues` instead).
 - Tests: `GameWorldsTests` (Core). Ingestion/UI verified against the dev DB.
+
+### 2026-08-14: Page-title glass pills (app.css)
+
+The bare page headlines ("Admin Panel", "SuperAdmin Panel", the Cookbook title row) were the only text
+sitting directly on the background artwork — dark `#2c3e50` heading text vanished over the image's dark
+regions. New `.page-title` class in `wwwroot/app.css`: a glass pill (translucent white 0.65, same
+border/shadow/radius as `.glass-morphism`, `inline-flex !important` so it hugs content and beats
+MudStack's `display:flex`). Deliberately **no `backdrop-filter`** — body::before is already blurred and
+nothing scrolls beneath these titles (see the white-flash rules below). Applied in `Admin.razor`,
+`SuperAdmin.razor`, `Cookbook.razor` (title + icon + food count share the pill). Every other heading
+already lives inside a glass paper; put any future bare-on-background headline in `.page-title`.
 
 ### 2026-08-11: Glassmorphism white-flash fix (app.css)
 

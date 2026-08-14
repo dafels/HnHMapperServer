@@ -220,12 +220,23 @@ public class FoodCatalogService : IFoodCatalogService
                 .Where(v => v.TenantId == tenantId)
                 .CountAsync(ct)
             : 0;
+        // Worlds is a primitive collection (JSON TEXT); EF translates Count via json_each.
+        var untaggedFoods = count > 0
+            ? await query.Where(f => f.Worlds.Count == 0).CountAsync(ct)
+            : 0;
+        var untaggedVariants = count > 0
+            ? await _dbContext.FoodVariants.IgnoreQueryFilters()
+                .Where(v => v.TenantId == tenantId && v.Worlds.Count == 0)
+                .CountAsync(ct)
+            : 0;
 
         return new CookbookStatusDto
         {
             FoodCount = count,
             VariantCount = variantCount,
-            LastImportedAt = lastImportedAt
+            LastImportedAt = lastImportedAt,
+            UntaggedFoodCount = untaggedFoods,
+            UntaggedVariantCount = untaggedVariants
         };
     }
 
@@ -251,6 +262,95 @@ public class FoodCatalogService : IFoodCatalogService
         _logger.LogInformation(
             "Cookbook cleared for tenant {TenantId}: {Foods} foods, {Variants} variants removed",
             tenantId, result.Foods, result.Variants);
+
+        return result;
+    }
+
+    public async Task<CookbookWorldAssignResultDto> AssignUntaggedToWorldAsync(
+        string tenantId, string world, CancellationToken ct = default)
+    {
+        var genus = GameWorlds.Normalize(world);
+        if (genus == null || string.Equals(genus, GameWorlds.UntaggedSentinel, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("A target world is required.", nameof(world));
+        }
+        // Known worlds only: an admin-picked bulk tag is irreversible, unlike ingestion,
+        // where an unknown genus is real data from the game client.
+        if (GameWorlds.OrderOf(genus) < 0)
+        {
+            throw new ArgumentException($"'{genus}' is not a known world.", nameof(world));
+        }
+
+        var result = new CookbookWorldAssignResultDto { World = genus };
+        var touchedFoodIds = new HashSet<int>();
+
+        await using (var transaction = await _dbContext.Database.BeginTransactionAsync(ct))
+        {
+            // Pass 1: untagged variants. Keyset paging by Id — tagged rows leave the
+            // Worlds.Count == 0 filter, so offset paging would skip rows — with a
+            // tracker clear per batch (same shape as the import's FlushVariantBatchAsync).
+            var lastId = 0;
+            while (true)
+            {
+                var batch = await _dbContext.FoodVariants.IgnoreQueryFilters()
+                    .Where(v => v.TenantId == tenantId && v.Id > lastId && v.Worlds.Count == 0)
+                    .OrderBy(v => v.Id)
+                    .Take(VariantBatchSize)
+                    .ToListAsync(ct);
+                if (batch.Count == 0)
+                {
+                    break;
+                }
+
+                foreach (var variant in batch)
+                {
+                    variant.Worlds.Add(genus);
+                    // Seed the world snapshot from the canonical columns so a later real
+                    // upload from this world competes under the lowest-total-wins heuristic
+                    // instead of becoming the snapshot unconditionally.
+                    if (!variant.WorldValues.Any(w => w.Genus == genus))
+                    {
+                        variant.WorldValues.Add(BuildWorldValueFromCanonical(genus, variant));
+                    }
+                    touchedFoodIds.Add(variant.FoodId);
+                    result.Variants++;
+                }
+
+                lastId = batch[^1].Id;
+                await _dbContext.SaveChangesAsync(ct);
+                _dbContext.ChangeTracker.Clear();
+            }
+
+            // Pass 2: foods. Untagged foods always gain the world (including variant-less
+            // ones, so the Untagged master bucket empties); tagged foods whose untagged
+            // variants were just transferred gain it too — mirrors ingestion's food-level
+            // append and keeps master-row world filtering consistent with WorldVariantCounts.
+            var foods = await _dbContext.Foods.IgnoreQueryFilters()
+                .Where(f => f.TenantId == tenantId)
+                .ToListAsync(ct);
+            foreach (var food in foods)
+            {
+                if (food.Worlds.Count == 0
+                    || (touchedFoodIds.Contains(food.Id) && !food.Worlds.Contains(genus)))
+                {
+                    food.Worlds.Add(genus);
+                    result.Foods++;
+                }
+            }
+            await _dbContext.SaveChangesAsync(ct);
+
+            await transaction.CommitAsync(ct);
+        }
+
+        if (result.Foods > 0 || result.Variants > 0)
+        {
+            _cache.Remove(CatalogCacheKey(tenantId));
+            _cache.Remove(ConditionStatsCacheKey(tenantId));
+
+            _logger.LogInformation(
+                "Cookbook world assignment for tenant {TenantId}: {Foods} foods, {Variants} variants tagged {World}",
+                tenantId, result.Foods, result.Variants, genus);
+        }
 
         return result;
     }
@@ -1261,6 +1361,18 @@ public class FoodCatalogService : IFoodCatalogService
 
     private static List<FoodWorldFep> MapWorldFeps(List<FoodFep> feps) =>
         feps.Select(f => new FoodWorldFep { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value }).ToList();
+
+    /// <summary>
+    /// A world snapshot seeded from a variant's canonical (all-worlds merge) columns —
+    /// used when bulk-assigning untagged data to a world, where no upload record exists.
+    /// </summary>
+    private static FoodVariantWorldValue BuildWorldValueFromCanonical(string genus, FoodVariantEntity variant) => new()
+    {
+        Genus = genus,
+        Energy = variant.Energy,
+        Hunger = variant.Hunger,
+        Feps = MapWorldFeps(variant.Feps)
+    };
 
     private static FoodWorldValueDto MapWorldValueDto(FoodVariantWorldValue value) => new()
     {

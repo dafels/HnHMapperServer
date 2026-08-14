@@ -281,6 +281,12 @@ public class CookbookStatusDto
 
     /// <summary>UTC timestamp of the last import, NULL when no data imported yet.</summary>
     public DateTime? LastImportedAt { get; set; }
+
+    /// <summary>Foods with no world tag (admin imports and pre-world-tagging uploads).</summary>
+    public int UntaggedFoodCount { get; set; }
+
+    /// <summary>Recipe variations with no world tag.</summary>
+    public int UntaggedVariantCount { get; set; }
 }
 
 /// <summary>
@@ -291,6 +297,30 @@ public class CookbookClearResultDto
     public int Foods { get; set; }
 
     public int Variants { get; set; }
+}
+
+/// <summary>
+/// Request body for bulk-assigning a tenant's untagged cookbook data to a world.
+/// </summary>
+public class CookbookWorldAssignRequestDto
+{
+    /// <summary>Genus hash of the target world (must be a known world, see GameWorlds).</summary>
+    public string? World { get; set; }
+}
+
+/// <summary>
+/// Outcome of bulk-assigning untagged cookbook data to a world.
+/// </summary>
+public class CookbookWorldAssignResultDto
+{
+    /// <summary>Foods whose world list gained the target world.</summary>
+    public int Foods { get; set; }
+
+    /// <summary>Recipe variations tagged with the target world.</summary>
+    public int Variants { get; set; }
+
+    /// <summary>Normalized genus hash that was assigned.</summary>
+    public string World { get; set; } = string.Empty;
 }
 
 /// <summary>
