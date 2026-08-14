@@ -109,12 +109,16 @@
                         <strong>@s.UntaggedVariantCount.ToString("N0")</strong> recipe variations have no world
                         tag (admin imports and uploads from before world tagging).
                     </MudText>
+                    @* Modal="false": the dropdown popover is modal by default since MudBlazor 7,
+                       so with it open the first click on "Assign world" only dismissed the
+                       overlay and the button needed a second click. *@
                     <MudSelect T="string"
                                @bind-Value="_assignWorld"
                                Label="World"
                                Dense="true"
                                Margin="Margin.Dense"
                                Style="max-width: 160px;"
+                               Modal="false"
                                Disabled="@(_isAssigning || _isImporting || _isClearing)">
                         @foreach (var world in GameWorlds.Known.OrderByDescending(w => w.Order))
                         {
