@@ -11,52 +11,12 @@
     --ck-gold-icon: #b8860b;     /* ~3.3:1 — filled favorite star (icon minimum) */
 }
 
-/* Toolbar + panels travel together while scrolling the table (like the search) */
-.sticky-stack {
-    position: sticky;
-    top: 72px;
-    z-index: 10;
-}
-
+/* Toolbar and panels scroll away with the page — deliberately NOT sticky:
+   pinned over the table they covered half the screen (tried and reverted). */
 .cookbook-toolbar {
     padding: 12px 16px 8px 16px;
     border-radius: 8px;
     margin-bottom: 12px;
-}
-
-/* Pinned: the table slides under the stack, and the two transparent strips —
-   the slit up to the appbar (stack top 72px vs appbar ~65px) and the toolbar's
-   12px bottom margin — showed raw row slices scrolling by ("a bar below the
-   banner"). Swap the toolbar's bottom margin for the same amount of padding so
-   its own glass paints the gap (outer height unchanged, nothing jumps), and
-   frost the slit with a ::before on the stack. The pseudo must sit on the
-   stack, not on a glass child: the children have backdrop-filter, which would
-   make them the pseudo's backdrop root and its blur would sample nothing.
-   Oversized upward on purpose — the surplus hides behind the fixed appbar. */
-.sticky-stack.ck-stuck::before {
-    content: '';
-    position: absolute;
-    top: -16px;
-    left: 0;
-    right: 0;
-    height: 17px;
-    z-index: -1;
-    /* Plain tint, deliberately no backdrop-filter: on a ~7px visible strip the
-       blur is imperceptible, and an in-bounds blur here would edge-flicker as
-       rows scroll beneath (the sampling band would span the whole strip). */
-    background: rgba(255, 255, 255, 0.7);
-}
-
-.sticky-stack.ck-stuck .cookbook-toolbar {
-    margin-bottom: 0;
-    padding-bottom: 20px;
-    border-bottom-left-radius: 0;
-    border-bottom-right-radius: 0;
-}
-
-.sticky-stack.ck-stuck .panels-bar {
-    border-top-left-radius: 0;
-    border-top-right-radius: 0;
 }
 
 /* Active threshold-condition chips: sits directly under the builder rows,
@@ -546,27 +506,6 @@
     margin-bottom: 8px;
 }
 
-/* Pinned over the table (ck-stuck set by cookbook-dnd.js): cards condense to
-   just their headers — still filter buttons and drop targets — so the strip
-   never blankets the rows. Full cards return when scrolled back to the top. */
-.sticky-stack.ck-stuck .panel-items {
-    display: none;
-}
-
-.sticky-stack.ck-stuck .panel-card {
-    min-width: 0;
-    padding: 3px 10px;
-}
-
-.sticky-stack.ck-stuck .panel-card-header {
-    margin-bottom: 0;
-    min-height: 26px;
-}
-
-.sticky-stack.ck-stuck .panels-divider span {
-    display: none;
-}
-
 .panel-card {
     flex: 0 0 auto;
     min-width: 220px;
@@ -579,11 +518,10 @@
     border-top: 3px solid var(--panel-accent, rgba(44, 62, 80, 0.2));
     box-shadow: 0 3px 10px rgba(0, 0, 0, 0.07);
     transition: box-shadow 0.12s, border-color 0.12s, transform 0.12s;
-    /* Blur lives on the oversized clipped ::before, not the element: when the
-       cards condense over the scrolling table (ck-stuck) an in-bounds blur's
-       edge band spans nearly the whole chip and pulses dark as rows pass
-       beneath (same Chromium edge-sampling issue as the glass containers —
-       see .glass-morphism in app.css). The clip is load-bearing. */
+    /* Blur lives on the oversized clipped ::before, not the element — an
+       in-bounds blur's edge band flickers as content moves beneath (same
+       Chromium edge-sampling issue as the glass containers — see
+       .glass-morphism in app.css). The clip is load-bearing. */
     position: relative;
     overflow: hidden;
     transform: translateZ(0);
