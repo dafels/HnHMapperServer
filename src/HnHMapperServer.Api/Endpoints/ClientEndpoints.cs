@@ -1,4 +1,5 @@
 using HnHMapperServer.Core.Interfaces;
+using HnHMapperServer.Core.Json;
 using HnHMapperServer.Core.Models;
 using HnHMapperServer.Core.DTOs;
 using HnHMapperServer.Services.Interfaces;
@@ -890,6 +891,49 @@ public static partial class ClientEndpoints
         return Results.Ok();
     }
 
+    /// <summary>
+    /// Reads a client marker payload (JSON array of loosely-typed marker objects).
+    /// Parses strictly first; on failure retries with bare value tokens quoted — older
+    /// Haven client builds emit shared-marker ids as unquoted hex (see LenientJson) and
+    /// none of the marker endpoints consume that field. Returns null when unparseable.
+    /// </summary>
+    private static async Task<List<Dictionary<string, object>>?> ReadMarkerListAsync(
+        HttpContext context, ILogger<Program> logger, string endpoint)
+    {
+        string body;
+        using (var reader = new StreamReader(context.Request.Body, Encoding.UTF8))
+            body = await reader.ReadToEndAsync();
+
+        if (string.IsNullOrWhiteSpace(body))
+            return null;
+
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        try
+        {
+            return JsonSerializer.Deserialize<List<Dictionary<string, object>>>(body, options);
+        }
+        catch (JsonException error)
+        {
+            var repairedBody = LenientJson.QuoteBareTokens(body);
+            if (!ReferenceEquals(repairedBody, body))
+            {
+                try
+                {
+                    var markers = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(repairedBody, options);
+                    logger.LogWarning("{Endpoint}: repaired malformed marker payload (bare value tokens quoted)", endpoint);
+                    return markers;
+                }
+                catch (JsonException)
+                {
+                }
+            }
+
+            logger.LogWarning(error, "{Endpoint}: rejecting unparseable marker payload: {Snippet}",
+                endpoint, body.Length <= 300 ? body : body[..300]);
+            return null;
+        }
+    }
+
     private static async Task<IResult> MarkerBulkUpload(
         [FromRoute] string token,
         HttpContext context,
@@ -905,11 +949,7 @@ public static partial class ClientEndpoints
 
         var tenantId = context.Items["TenantId"] as string ?? string.Empty;
 
-        // Read raw JSON with case-insensitive options (Go client sends lowercase keys)
-        var markers = await context.Request.ReadFromJsonAsync<List<Dictionary<string, object>>>(new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true
-        });
+        var markers = await ReadMarkerListAsync(context, logger, "markerBulkUpload");
 
         if (markers == null)
             return Results.BadRequest("Invalid marker bulk upload payload");
@@ -975,11 +1015,7 @@ public static partial class ClientEndpoints
 
         var tenantId = context.Items["TenantId"] as string ?? string.Empty;
 
-        // Read raw JSON with case-insensitive options (Go client sends lowercase keys)
-        var markers = await context.Request.ReadFromJsonAsync<List<Dictionary<string, object>>>(new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true
-        });
+        var markers = await ReadMarkerListAsync(context, logger, "markerDelete");
 
         if (markers == null)
             return Results.BadRequest("Invalid marker delete payload");
@@ -1033,11 +1069,7 @@ public static partial class ClientEndpoints
 
         var tenantId = context.Items["TenantId"] as string ?? string.Empty;
 
-        // Read raw JSON with case-insensitive options (Go client sends lowercase keys)
-        var markers = await context.Request.ReadFromJsonAsync<List<Dictionary<string, object>>>(new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true
-        });
+        var markers = await ReadMarkerListAsync(context, logger, "markerUpdate");
 
         if (markers == null)
             return Results.BadRequest("Invalid marker update payload");
@@ -1111,11 +1143,7 @@ public static partial class ClientEndpoints
 
         var tenantId = context.Items["TenantId"] as string ?? string.Empty;
 
-        // Read raw JSON with case-insensitive options (Go client sends lowercase keys)
-        var markers = await context.Request.ReadFromJsonAsync<List<Dictionary<string, object>>>(new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true
-        });
+        var markers = await ReadMarkerListAsync(context, logger, "markerReadyTime");
 
         if (markers == null)
             return Results.BadRequest("Invalid marker ready time payload");
