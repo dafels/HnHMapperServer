@@ -29,6 +29,23 @@ const OVERLAY_COLORS = {
 // so we render VillageOutline as a fill to show the entire village area
 const OUTLINE_TYPES = new Set(['ClaimOutline']);
 
+// Overlay fetching/rendering is gated by zoom.
+//
+// Why: overlay data is fetched per 100x100 game grid, and one 400px canvas tile covers
+// scaleFactor^2 grids (scaleFactor = 2^(HnHMaxZoom - z) * 4 → 4 at max zoom, 256 at min zoom).
+// Zoomed out, one viewport spans >1M grids → tens of thousands of batched Blazor/API round
+// trips (100 coords each) that freeze the browser and hammer the server — even (especially)
+// on maps with NO overlay data at all, because every batch just returns 0 rows.
+// At those zooms a claim is only a few pixels anyway, so overlays are skipped entirely.
+//
+// Max scaleFactor at which overlays are fetched/rendered:
+//   4 = max zoom only, 8 = top two zoom levels, 16 = top three (one grid ≥ 25px on screen).
+const MAX_OVERLAY_SCALE_FACTOR = 16;
+
+// Safety cap on grid coords queued for fetching per map at any one time (~cap/100 HTTP batches).
+// Coords skipped by the cap are NOT marked pending, so a later redraw can still request them.
+const MAX_PENDING_FETCH_COORDS = 3000;
+
 // Overlay data cache: mapId -> coordKey -> overlayType -> Uint8Array
 const overlayCache = {};
 
@@ -121,6 +138,12 @@ function requestOverlays(mapId, coords) {
             continue;
         }
 
+        // Safety cap: never queue an unbounded number of coords. Skipped coords are left
+        // uncached (NOT marked pending) so a later redraw can request them again.
+        if (pendingSet.size >= MAX_PENDING_FETCH_COORDS) {
+            break;
+        }
+
         // Mark as pending and add to batch
         overlayCache[mapId][coordKey] = { _pending: true };
         pendingSet.add(coordKey);
@@ -187,18 +210,21 @@ export function setRequestOverlaysCallback(callback) {
 export function setOverlayData(mapId, overlays) {
     console.debug('[Overlay] Received', overlays.length, 'overlays from Blazor for map', mapId);
 
+    // Fast path: nothing came back (uncharted grids, or a map with no overlay data at all).
+    // The requested coords stay marked _pending in the cache — that is what prevents them
+    // from being re-requested — and with no data there is nothing to repaint.
+    if (!overlays || overlays.length === 0) {
+        return;
+    }
+
     // Initialize map cache if needed
     if (!overlayCache[mapId]) {
         overlayCache[mapId] = {};
     }
 
-    // Build set of affected grid coordinates for efficient lookup
-    const affectedGrids = new Set();
-
-    // Process and cache each overlay
+    // Process and cache each overlay (overlays carry numeric x/y used for range tests below)
     for (const overlay of overlays) {
         const coordKey = `${overlay.x}_${overlay.y}`;
-        affectedGrids.add(coordKey);
 
         // Initialize or replace cache entry (clears _pending flag if present)
         if (!overlayCache[mapId][coordKey] || overlayCache[mapId][coordKey]._pending) {
@@ -212,16 +238,18 @@ export function setOverlayData(mapId, overlays) {
     // Note: Coords with no overlays stay pending forever (won't be re-requested).
     // This is intentional - they just won't show overlays, which is correct behavior.
 
-    // Find and update only tiles that cover affected grid coordinates (avoids flickering)
+    // Find and update only tiles that cover affected grid coordinates (avoids flickering).
+    // Iterate the (small, ≤100) overlay list against each tile's grid range — NEVER
+    // per-grid-per-tile: a zoomed-out tile spans up to 65k grids and that inner scan,
+    // multiplied by thousands of batch responses, used to freeze the browser.
     if (overlayCanvasLayer) {
-        for (const [tileKey, tileInfo] of activeTiles) {
-            // Check if this tile covers any of the affected grids
+        for (const [, tileInfo] of activeTiles) {
             let needsUpdate = false;
-            for (let gx = tileInfo.startX; gx < tileInfo.endX && !needsUpdate; gx++) {
-                for (let gy = tileInfo.startY; gy < tileInfo.endY && !needsUpdate; gy++) {
-                    if (affectedGrids.has(`${gx}_${gy}`)) {
-                        needsUpdate = true;
-                    }
+            for (const overlay of overlays) {
+                if (overlay.x >= tileInfo.startX && overlay.x < tileInfo.endX &&
+                    overlay.y >= tileInfo.startY && overlay.y < tileInfo.endY) {
+                    needsUpdate = true;
+                    break;
                 }
             }
 
@@ -252,6 +280,15 @@ function createOverlayLayer() {
             // Calculate scale factor for zoom (each zoom level covers 2x2 tiles of next level)
             // Multiply by TileSize/BaseTileSize (4) because 400x400 tiles cover 4x4 base 100x100 grid cells
             const scaleFactor = Math.pow(2, HnHMaxZoom - coords.z) * (TileSize / BaseTileSize);
+
+            // Zoom gate + disabled gate: while zoomed out (or with no overlay types enabled),
+            // return a blank tile and do NOTHING else — no per-grid enumeration (up to 65k
+            // grids per tile!), no fetch requests, no activeTiles registration. Toggling an
+            // overlay type or zooming back in triggers redraw(), which recreates the tiles.
+            if (enabledOverlayTypes.size === 0 || scaleFactor > MAX_OVERLAY_SCALE_FACTOR) {
+                setTimeout(() => done(null, tile), 0);
+                return tile;
+            }
 
             // Calculate grid coordinates covered by this tile
             const startX = coords.x * scaleFactor;
@@ -584,6 +621,18 @@ export function invalidateOverlayAtCoord(mapId, x, y, overlayType) {
 
     // Only refetch if this is the current map and overlays are enabled
     if (mapId === currentMapId && enabledOverlayTypes.size > 0) {
+        // Respect the zoom gate: while zoomed out, overlay tiles are neither rendered nor
+        // registered, so refetching now would be pure waste (SSE overlayUpdated events fire
+        // for every grid a game client uploads). The coord was invalidated above, so it is
+        // refetched naturally via createTile when the user zooms back into gated range.
+        const map = overlayCanvasLayer && overlayCanvasLayer._map;
+        if (map) {
+            const scaleFactor = Math.pow(2, HnHMaxZoom - map.getZoom()) * (TileSize / BaseTileSize);
+            if (scaleFactor > MAX_OVERLAY_SCALE_FACTOR) {
+                return;
+            }
+        }
+
         // Request fresh data for this coordinate
         requestOverlays(mapId, [{ x, y }]);
     }
