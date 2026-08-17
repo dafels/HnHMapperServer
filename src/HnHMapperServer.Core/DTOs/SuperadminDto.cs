@@ -183,3 +183,74 @@ public class PurgeTenantDataResultDto
     /// <summary>Non-fatal problems (e.g. a locked file that could not be deleted).</summary>
     public List<string> Warnings { get; set; } = new();
 }
+
+/// <summary>
+/// Preview of what a map-region wipe would remove, so a superadmin can see the blast radius
+/// (counts + percent of the map) before committing. Read-only.
+/// </summary>
+public class MapRegionWipePreviewDto
+{
+    public string TenantId { get; set; } = string.Empty;
+    public int MapId { get; set; }
+
+    // Normalized inclusive box (X1 <= X2, Y1 <= Y2), in grid coordinates.
+    public int X1 { get; set; }
+    public int Y1 { get; set; }
+    public int X2 { get; set; }
+    public int Y2 { get; set; }
+
+    public int Grids { get; set; }
+    public int Markers { get; set; }
+    public int Zoom0Tiles { get; set; }
+    public int Overlays { get; set; }
+
+    public int MapTotalGrids { get; set; }
+    public double PercentOfMap { get; set; }
+
+    // Full extent of the map's grids (null when the map has no grids).
+    public int? MapExtentMinX { get; set; }
+    public int? MapExtentMinY { get; set; }
+    public int? MapExtentMaxX { get; set; }
+    public int? MapExtentMaxY { get; set; }
+}
+
+/// <summary>
+/// Request body for wiping a map region. <see cref="ConfirmMapId"/> must match the route map id —
+/// the same deliberate speed bump the tenant purge uses.
+/// </summary>
+public class WipeMapRegionRequestDto
+{
+    public int X1 { get; set; }
+    public int X2 { get; set; }
+    public int Y1 { get; set; }
+    public int Y2 { get; set; }
+    public int ConfirmMapId { get; set; }
+}
+
+/// <summary>
+/// What a map-region wipe actually removed. Zoom 1-6 tile rows are deliberately kept (they heal
+/// as later uploads regenerate the pyramid), so they are not counted here.
+/// </summary>
+public class MapRegionWipeResultDto
+{
+    public string TenantId { get; set; } = string.Empty;
+    public int MapId { get; set; }
+
+    public int X1 { get; set; }
+    public int Y1 { get; set; }
+    public int X2 { get; set; }
+    public int Y2 { get; set; }
+
+    public int Grids { get; set; }
+    public int Markers { get; set; }
+    public int Timers { get; set; }
+    public int Zoom0Tiles { get; set; }
+    public int Overlays { get; set; }
+
+    public int FilesDeleted { get; set; }
+    public long BytesFreed { get; set; }
+    public double MegabytesFreed => Math.Round(BytesFreed / 1024.0 / 1024.0, 2);
+
+    /// <summary>Non-fatal problems (e.g. a tile file that could not be deleted).</summary>
+    public List<string> Warnings { get; set; } = new();
+}

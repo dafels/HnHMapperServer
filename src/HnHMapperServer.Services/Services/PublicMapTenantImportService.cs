@@ -206,6 +206,19 @@ public class PublicMapTenantImportService : IPublicMapTenantImportService
                 .Select(g => g.Id)
                 .ToHashSetAsync(cancellationToken);
 
+            // Cells of the target map already owned by a grid row. The import must never plant a
+            // DIFFERENT grid id on an owned cell — that is the two-grids-one-cell corruption the
+            // 2026-08 incident was made of. TryAdd, not ToDictionary: a previously corrupted DB
+            // can hold several grids on one cell, and any owner blocks the cell.
+            var occupiedCellOwnerRows = await _db.Grids
+                .IgnoreQueryFilters()
+                .Where(g => g.TenantId == targetTenantId && g.Map == finalMapId)
+                .Select(g => new { g.CoordX, g.CoordY, g.Id })
+                .ToListAsync(cancellationToken);
+            var occupiedCellOwners = new Dictionary<(int X, int Y), string>();
+            foreach (var row in occupiedCellOwnerRows)
+                occupiedCellOwners.TryAdd((row.CoordX, row.CoordY), row.Id);
+
             // ---- Decompose 400x400 WebPs → 16 100x100 PNGs each, using index gridIds ----
             Directory.CreateDirectory(Path.Combine(gridStorage, "tenants", targetTenantId, finalMapId.ToString(), "0"));
 
@@ -294,19 +307,33 @@ public class PublicMapTenantImportService : IPublicMapTenantImportService
                         // visually complete even if the character mapping stays with another map.
                         if (!gridAlreadyInTenant)
                         {
-                            var gridEntity = new GridDataEntity
+                            if (occupiedCellOwners.TryGetValue((finalX, finalY), out var ownerId))
                             {
-                                Id = snapshotGridId,
-                                CoordX = finalX,
-                                CoordY = finalY,
-                                Map = finalMapId,
-                                NextUpdate = DateTime.UtcNow,
-                                TenantId = targetTenantId
-                            };
-                            _db.Grids.Add(gridEntity);
-                            createdGridEntities.Add(gridEntity);
-                            existingTenantGridIds.Add(snapshotGridId);
-                            result.CreatedGridIds.Add(snapshotGridId);
+                                // A different grid id already owns this cell — planting another id
+                                // here would double-claim the cell. The tile was still written
+                                // above (tiles are coord-keyed); only the grid row is skipped.
+                                result.GridRowsSkippedOccupiedCell++;
+                                _logger.LogDebug(
+                                    "PUBLIC import: cell ({X},{Y}) on map {MapId} already owned by grid {OwnerId}; grid row for {GridId} skipped (tile still written)",
+                                    finalX, finalY, finalMapId, ownerId, snapshotGridId);
+                            }
+                            else
+                            {
+                                var gridEntity = new GridDataEntity
+                                {
+                                    Id = snapshotGridId,
+                                    CoordX = finalX,
+                                    CoordY = finalY,
+                                    Map = finalMapId,
+                                    NextUpdate = DateTime.UtcNow,
+                                    TenantId = targetTenantId
+                                };
+                                _db.Grids.Add(gridEntity);
+                                createdGridEntities.Add(gridEntity);
+                                existingTenantGridIds.Add(snapshotGridId);
+                                result.CreatedGridIds.Add(snapshotGridId);
+                                occupiedCellOwners[(finalX, finalY)] = snapshotGridId;
+                            }
                         }
 
                         var tileEntity = new TileDataEntity
@@ -393,10 +420,17 @@ public class PublicMapTenantImportService : IPublicMapTenantImportService
             result.Success = true;
             result.Duration = stopwatch.Elapsed;
 
+            if (result.GridRowsSkippedOccupiedCell > 0)
+            {
+                _logger.LogWarning(
+                    "PUBLIC map import into tenant {Tenant} map {Map}: skipped {Count} grid rows whose destination cells were already owned by different grid ids (tiles still written)",
+                    targetTenantId, finalMapId, result.GridRowsSkippedOccupiedCell);
+            }
+
             _logger.LogInformation(
-                "PUBLIC map import into tenant {Tenant} map {Map}: +{TilesAdded}/-{TilesSkipped} tiles, +{MarkersAdded}/-{MarkersSkipped} markers, {Bytes}B, {Duration:F1}s",
+                "PUBLIC map import into tenant {Tenant} map {Map}: +{TilesAdded}/-{TilesSkipped} tiles, +{MarkersAdded}/-{MarkersSkipped} markers, {SkippedGridRows} occupied-cell grid rows skipped, {Bytes}B, {Duration:F1}s",
                 targetTenantId, finalMapId, result.TilesAdded, result.TilesSkipped,
-                result.MarkersAdded, result.MarkersSkipped, bytesAdded, result.Duration.TotalSeconds);
+                result.MarkersAdded, result.MarkersSkipped, result.GridRowsSkippedOccupiedCell, bytesAdded, result.Duration.TotalSeconds);
 
             return result;
         }

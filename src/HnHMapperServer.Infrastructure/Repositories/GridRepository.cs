@@ -139,6 +139,27 @@ public class GridRepository : IGridRepository
         return entities.Select(MapToDomain).ToList();
     }
 
+    public async Task<List<GridData>> GetGridsByMapInAreaAsync(int mapId, int minX, int minY, int maxX, int maxY)
+    {
+        // Explicit tenant filtering for defense-in-depth
+        var currentTenantId = _tenantContext.GetCurrentTenantId();
+
+        // Range predicate rides IX_Grids_Map_CoordX_CoordY; bounds are inclusive.
+        var query = _context.Grids.AsNoTracking()
+            .Where(g => g.Map == mapId
+                        && g.CoordX >= minX && g.CoordX <= maxX
+                        && g.CoordY >= minY && g.CoordY <= maxY);
+
+        // If tenant context is available, add explicit filter
+        if (!string.IsNullOrEmpty(currentTenantId))
+        {
+            query = query.Where(g => g.TenantId == currentTenantId);
+        }
+
+        var entities = await query.ToListAsync();
+        return entities.Select(MapToDomain).ToList();
+    }
+
     public async Task DeleteGridsByMapAsync(int mapId)
     {
         // Explicit tenant filtering for defense-in-depth

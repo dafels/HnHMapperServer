@@ -122,6 +122,15 @@ public static class SuperadminEndpoints
         // POST /api/superadmin/tenants/{tenantId}/purge-data - Wipe tenant content, keep users
         group.MapPost("/tenants/{tenantId}/purge-data", PurgeTenantData);
 
+        // GET /api/superadmin/integrity/scan - Cross-tenant map integrity scan (contested cells)
+        group.MapGet("/integrity/scan", ScanMapIntegrity);
+
+        // GET /api/superadmin/tenants/{tenantId}/maps/{mapId}/wipe-region/preview - Blast-radius preview
+        group.MapGet("/tenants/{tenantId}/maps/{mapId}/wipe-region/preview", PreviewWipeMapRegion);
+
+        // POST /api/superadmin/tenants/{tenantId}/maps/{mapId}/wipe-region - Surgically wipe a map region
+        group.MapPost("/tenants/{tenantId}/maps/{mapId}/wipe-region", WipeMapRegion);
+
         // === Cross-Tenant Map Viewing ===
 
         // GET /api/superadmin/tenants/{tenantId}/map-view-data - Get all map view data for tenant
@@ -1832,6 +1841,148 @@ public static class SuperadminEndpoints
         {
             logger.LogError(ex, "Error purging data for tenant {TenantId}", tenantId);
             return Results.Problem("Failed to purge tenant data");
+        }
+    }
+
+    /// <summary>
+    /// GET /api/superadmin/integrity/scan
+    /// Read-only cross-tenant scan for map corruption fingerprints: cells claimed by more than
+    /// one grid id (per tenant/map with bounding box + sample owners) and legacy placeholder
+    /// ("0") grid rows. Feeds the wipe-region repair tool.
+    /// </summary>
+    private static async Task<IResult> ScanMapIntegrity(
+        IMapIntegrityService integrityService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            return Results.Ok(await integrityService.ScanAsync());
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error running map integrity scan");
+            return Results.Problem("Failed to run map integrity scan");
+        }
+    }
+
+    /// <summary>
+    /// GET /api/superadmin/tenants/{tenantId}/maps/{mapId}/wipe-region/preview?x1=&amp;x2=&amp;y1=&amp;y2=
+    /// Read-only blast-radius preview for a region wipe: row counts, percent of the map, and the
+    /// map's full extent, so the operator can verify the box before committing.
+    /// </summary>
+    private static async Task<IResult> PreviewWipeMapRegion(
+        string tenantId,
+        int mapId,
+        int x1,
+        int x2,
+        int y1,
+        int y2,
+        IMapRegionWipeService wipeService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var preview = await wipeService.PreviewAsync(tenantId, mapId, x1, y1, x2, y2);
+            return Results.Ok(preview);
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error previewing region wipe for tenant {TenantId} map {MapId}", tenantId, mapId);
+            return Results.Problem("Failed to preview region wipe");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/tenants/{tenantId}/maps/{mapId}/wipe-region
+    /// Surgical repair for coordinate-corrupted regions: deletes the box's grids, the markers
+    /// hanging on them (plus marker-attached timers), zoom-0 tile rows and files, and overlay
+    /// rows, then bumps the map revision so live viewers drop their tile caches. Zoom 1-6 tiles
+    /// are deliberately left in place — stale imagery heals as later uploads regenerate the
+    /// pyramid. CustomMarkers, Roads and Pings are not touched. Irreversible; the request body
+    /// must echo the map id back.
+    /// </summary>
+    private static async Task<IResult> WipeMapRegion(
+        string tenantId,
+        int mapId,
+        WipeMapRegionRequestDto dto,
+        ApplicationDbContext db,
+        IMapRegionWipeService wipeService,
+        HnHMapperServer.Api.Services.MapRevisionCache revisionCache,
+        IUpdateNotificationService notificationService,
+        HnHMapperServer.Services.Services.TileCacheService tileCacheService,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        if (dto == null || dto.ConfirmMapId != mapId)
+        {
+            return Results.BadRequest(new { error = "confirmMapId must match the map being wiped" });
+        }
+
+        var mapExists = await db.Maps
+            .IgnoreQueryFilters()
+            .AnyAsync(m => m.Id == mapId && m.TenantId == tenantId);
+        if (!mapExists)
+        {
+            return Results.NotFound(new { error = "Map not found in this tenant" });
+        }
+
+        var adminUsername = context.User.Identity?.Name ?? "Unknown";
+
+        try
+        {
+            var result = await wipeService.WipeAsync(tenantId, mapId, dto.X1, dto.Y1, dto.X2, dto.Y2);
+
+            // Live viewers drop their tile caches and refetch the (now blank) region.
+            var newRevision = revisionCache.Increment(mapId);
+            notificationService.NotifyMapRevision(mapId, newRevision);
+            await tileCacheService.InvalidateCacheAsync(tenantId);
+
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = tenantId,
+                UserId = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? adminUsername,
+                Action = "SuperAdminWipedMapRegion",
+                EntityType = "Map",
+                EntityId = mapId.ToString(),
+                OldValue = JsonSerializer.Serialize(new
+                {
+                    result.X1,
+                    result.Y1,
+                    result.X2,
+                    result.Y2,
+                    result.Grids,
+                    result.Markers,
+                    result.Timers,
+                    result.Zoom0Tiles,
+                    result.Overlays,
+                    result.FilesDeleted,
+                    result.BytesFreed
+                }),
+                NewValue = $"Region [{result.X1},{result.Y1}]..[{result.X2},{result.Y2}] of map {mapId} wiped by {adminUsername}; zoom 1-6 tiles retained"
+            });
+
+            logger.LogWarning(
+                "SuperAdmin {Username} wiped region [{X1},{Y1}]..[{X2},{Y2}] of map {MapId} (tenant {TenantId}): " +
+                "{Grids} grids, {Tiles} zoom-0 tiles, {MB:F2} MB freed",
+                adminUsername, result.X1, result.Y1, result.X2, result.Y2, mapId, tenantId,
+                result.Grids, result.Zoom0Tiles, result.MegabytesFreed);
+
+            return Results.Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            logger.LogWarning(ex, "Region wipe requested for unknown tenant/map {TenantId}/{MapId}", tenantId, mapId);
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error wiping region for tenant {TenantId} map {MapId}", tenantId, mapId);
+            return Results.Problem("Failed to wipe map region");
         }
     }
 

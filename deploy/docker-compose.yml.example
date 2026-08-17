@@ -19,6 +19,15 @@
 # - Self-registration disabled - new users require invitation codes
 # - Full documentation: see deploy/VPS-SETUP.md and deploy/FIRST-TIME-SETUP.md
 
+# Cap every container's stdout/stderr log — the default json-file driver grows
+# unbounded (uncapped logs once filled 52GB on the VPS). 50MB x 3 files = 150MB
+# max per service.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   # ============================================================================
   # API Service - Handles game client communication and backend operations
@@ -39,6 +48,7 @@ services:
     #     BUILD_DATE: ${BUILD_DATE:-1970-01-01T00:00:00Z}
     
     container_name: hnhm-api
+    logging: *default-logging
     
     # Restart policy: always restart unless manually stopped
     restart: unless-stopped
@@ -113,6 +123,7 @@ services:
     #     BUILD_DATE: ${BUILD_DATE:-1970-01-01T00:00:00Z}
     
     container_name: hnhm-web
+    logging: *default-logging
     
     # Restart policy: always restart unless manually stopped
     restart: unless-stopped
@@ -152,6 +163,7 @@ services:
     image: caddy:2
 
     container_name: hnhm-caddy
+    logging: *default-logging
 
     # Restart policy: always restart unless manually stopped
     restart: unless-stopped
@@ -183,6 +195,7 @@ services:
     image: containrrr/watchtower
     
     container_name: hnhm-watchtower
+    logging: *default-logging
     
     # Restart policy: always restart unless manually stopped
     restart: unless-stopped
@@ -190,7 +203,9 @@ services:
     # Watchtower configuration:
     # --interval 60: Check for updates every 60 seconds
     # --label-enable: Only update containers with watchtower.enable=true label
-    command: --interval 60 --label-enable
+    # --cleanup: Remove the replaced image after each update (without this every
+    #   deploy leaves the old image behind — 550 stale images once accumulated)
+    command: --interval 60 --label-enable --cleanup
     
     # Mount Docker socket to control containers (required for Watchtower)
     volumes:

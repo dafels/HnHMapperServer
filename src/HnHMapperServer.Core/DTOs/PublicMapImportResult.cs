@@ -80,6 +80,12 @@ public class PublicMapImportResult
     public int MarkersAdded { get; set; }
     public int MarkersSkipped { get; set; }
 
+    /// <summary>
+    /// Grid rows NOT inserted because their destination cell was already owned by a different
+    /// grid id (map-corruption guard). The tiles for those cells were still written.
+    /// </summary>
+    public int GridRowsSkippedOccupiedCell { get; set; }
+
     /// <summary>Bytes written into the target tenant's storage.</summary>
     public long BytesAdded { get; set; }
 

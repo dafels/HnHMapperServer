@@ -1,0 +1,226 @@
+@using HnHMapperServer.Core.DTOs
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject ILogger<WipeMapRegionDialog> Logger
+
+<MudDialog>
+    <DialogContent>
+        @if (Issue == null)
+        {
+            <MudAlert Severity="Severity.Error">No issue selected.</MudAlert>
+        }
+        else
+        {
+            <MudStack Spacing="3">
+                <MudAlert Severity="Severity.Info" Dense="true">
+                    The contested region plus a safety margin is deleted — grids, their markers
+                    (and marker-attached timers), zoom-0 tiles and overlays. Zoom 1-6 imagery goes
+                    stale until re-uploads regenerate it. The next player to walk the area
+                    re-registers it cleanly. Custom markers, roads and pings are not touched.
+                </MudAlert>
+
+                <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
+                    <MudNumericField T="int" @bind-Value="_padding"
+                                     Label="Padding (grids around the contested box)"
+                                     Min="0" Max="50"
+                                     Variant="Variant.Outlined"
+                                     Disabled="@_isWiping" />
+                    <MudButton Variant="Variant.Outlined"
+                               StartIcon="@Icons.Material.Filled.Refresh"
+                               OnClick="LoadPreview"
+                               Disabled="@(_isLoadingPreview || _isWiping)">
+                        Reload preview
+                    </MudButton>
+                </MudStack>
+
+                @if (_isLoadingPreview)
+                {
+                    <MudProgressLinear Indeterminate="true" />
+                }
+                else if (_preview == null)
+                {
+                    <MudAlert Severity="Severity.Warning">Could not load the preview.</MudAlert>
+                }
+                else
+                {
+                    <MudPaper Elevation="0" Class="pa-3 mud-background-gray">
+                        <MudText Typo="Typo.subtitle2" Class="mb-2">
+                            Wipe box <code>(@_preview.X1,@_preview.Y1) … (@_preview.X2,@_preview.Y2)</code>
+                            would remove:
+                        </MudText>
+                        <MudSimpleTable Dense="true" Hover="false" Elevation="0" Style="background: transparent">
+                            <tbody>
+                                <tr><td>Grids</td><td>@_preview.Grids.ToString("N0")</td></tr>
+                                <tr><td>Markers (on those grids)</td><td>@_preview.Markers.ToString("N0")</td></tr>
+                                <tr><td>Zoom-0 tiles</td><td>@_preview.Zoom0Tiles.ToString("N0")</td></tr>
+                                <tr><td>Overlay rows</td><td>@_preview.Overlays.ToString("N0")</td></tr>
+                                <tr>
+                                    <td><strong>Share of the map's @_preview.MapTotalGrids.ToString("N0") grids</strong></td>
+                                    <td><strong>@_preview.PercentOfMap.ToString("F2") %</strong></td>
+                                </tr>
+                                @if (_preview.MapExtentMinX.HasValue)
+                                {
+                                    <tr>
+                                        <td>Map extent (for comparison)</td>
+                                        <td><code>(@_preview.MapExtentMinX,@_preview.MapExtentMinY) … (@_preview.MapExtentMaxX,@_preview.MapExtentMaxY)</code></td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                    </MudPaper>
+
+                    @if (_preview.PercentOfMap > 50)
+                    {
+                        <MudAlert Severity="Severity.Error" Dense="true">
+                            This box covers more than half the map — double-check the region before wiping.
+                        </MudAlert>
+                    }
+                }
+
+                @* Immediate="true" is MudBlazor's per-keystroke update. Do NOT add
+                   @bind-Value:event="oninput" — on a component that is passed through as an
+                   unknown parameter and ValueChanged never fires, leaving the button dead. *@
+                <MudTextField @bind-Value="_confirmation"
+                              Label="@($"Type {Issue.MapId} to confirm")"
+                              Variant="Variant.Outlined"
+                              Immediate="true"
+                              Disabled="@_isWiping"
+                              HelperText="@($"Confirms wiping this region of '{Issue.MapName}' in tenant '{Issue.TenantName}'. This cannot be undone.")" />
+            </MudStack>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel" Disabled="@_isWiping">Cancel</MudButton>
+        <MudButton Color="Color.Error"
+                   Variant="Variant.Filled"
+                   StartIcon="@Icons.Material.Filled.Healing"
+                   OnClick="Wipe"
+                   Disabled="@(!IsConfirmed || _preview == null || _isWiping)">
+            @if (_isWiping)
+            {
+                <MudProgressCircular Class="ms-n1" Size="Size.Small" Indeterminate="true" />
+                <MudText Class="ms-2">Wiping...</MudText>
+            }
+            else
+            {
+                <MudText>Wipe region</MudText>
+            }
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] IMudDialogInstance? MudDialog { get; set; }
+    [Parameter] public MapIntegrityIssueDto? Issue { get; set; }
+
+    private MapRegionWipePreviewDto? _preview;
+    private int _padding = 2;
+    private string _confirmation = string.Empty;
+    private bool _isLoadingPreview = true;
+    private bool _isWiping;
+
+    private bool IsConfirmed =>
+        Issue != null
+        && (string.Equals(_confirmation.Trim(), Issue.MapId.ToString(), StringComparison.OrdinalIgnoreCase)
+            || string.Equals(_confirmation.Trim(), Issue.MapName, StringComparison.OrdinalIgnoreCase));
+
+    private int BoxX1 => Issue!.MinX - _padding;
+    private int BoxY1 => Issue!.MinY - _padding;
+    private int BoxX2 => Issue!.MaxX + _padding;
+    private int BoxY2 => Issue!.MaxY + _padding;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Issue == null)
+        {
+            _isLoadingPreview = false;
+            return;
+        }
+        await LoadPreview();
+    }
+
+    private async Task LoadPreview()
+    {
+        if (Issue == null) return;
+
+        _isLoadingPreview = true;
+        try
+        {
+            var httpClient = HttpClientFactory.CreateClient("API");
+            _preview = await httpClient.GetFromJsonAsync<MapRegionWipePreviewDto>(
+                $"/api/superadmin/tenants/{Uri.EscapeDataString(Issue.TenantId)}/maps/{Issue.MapId}/wipe-region/preview" +
+                $"?x1={BoxX1}&x2={BoxX2}&y1={BoxY1}&y2={BoxY2}");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load wipe preview for tenant {TenantId} map {MapId}", Issue.TenantId, Issue.MapId);
+            _preview = null;
+        }
+        finally
+        {
+            _isLoadingPreview = false;
+        }
+    }
+
+    private void Cancel() => MudDialog?.Cancel();
+
+    private async Task Wipe()
+    {
+        if (Issue == null || _preview == null) return;
+
+        _isWiping = true;
+        try
+        {
+            // Deleting many tile files can outlast the standard client's 10s resilience
+            // timeout — use the long-timeout client like the tenant purge does.
+            var httpClient = HttpClientFactory.CreateClient("APIUpload");
+            var response = await httpClient.PostAsJsonAsync(
+                $"/api/superadmin/tenants/{Uri.EscapeDataString(Issue.TenantId)}/maps/{Issue.MapId}/wipe-region",
+                new WipeMapRegionRequestDto
+                {
+                    X1 = BoxX1,
+                    Y1 = BoxY1,
+                    X2 = BoxX2,
+                    Y2 = BoxY2,
+                    ConfirmMapId = Issue.MapId
+                });
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<MapRegionWipeResultDto>();
+
+                Snackbar.Add(
+                    $"Wiped region of '{Issue.MapName}': {result?.Grids ?? 0:N0} grids, " +
+                    $"{result?.Zoom0Tiles ?? 0:N0} tiles, {result?.Markers ?? 0:N0} markers " +
+                    $"— {result?.MegabytesFreed ?? 0:N2} MB freed",
+                    Severity.Success);
+
+                if (result?.Warnings.Count > 0)
+                {
+                    foreach (var warning in result.Warnings.Take(3))
+                    {
+                        Snackbar.Add(warning, Severity.Warning);
+                    }
+                }
+
+                MudDialog?.Close(DialogResult.Ok(true));
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to wipe region for tenant {TenantId} map {MapId}: {StatusCode}, Body={Body}",
+                    Issue.TenantId, Issue.MapId, response.StatusCode, errorBody);
+                Snackbar.Add($"Wipe failed: HTTP {(int)response.StatusCode}", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error wiping region for tenant {TenantId} map {MapId}", Issue.TenantId, Issue.MapId);
+            Snackbar.Add($"Wipe failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isWiping = false;
+        }
+    }
+}

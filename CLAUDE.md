@@ -628,6 +628,132 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-17: Map-grid write-path hardening + region-wipe repair tool (corruption incident)
+
+**Root-caused the live map-corruption incident (tenant sketchbook-pot-u-2046, map 1953): a
+Merge-mode .hmap import planted a region in a wrong coordinate frame; live gridUpdates then
+flip-flopped between frames via silent last-wins anchoring → 39 double-claimed cells, tiles
+overwriting each other on every visit, a Thingwall marker stuck over foreign territory, player
+dots teleporting.** All three Grids write paths are now guarded; suite went 158 → 200 tests.
+- **gridUpdate (`GridService.ProcessGridUpdateAsync`):** placeholder cells (null/empty/`"0"` —
+  the client's not-yet-loaded marker) are holes — never anchor, never persisted; all-placeholder
+  matrix = no-op (previously a stored `"0"` row hijacked every partially-loaded matrix as a false
+  anchor — two tenants carried such rows). **Per-map offset-consistency vote:** known grids of one
+  map disagreeing on the implied offset → the WHOLE update is rejected with zero writes + one
+  forensic warning ("GridUpdate REJECTED …" with the full matrix and every anchor's stored
+  coord/implied offset); empty-but-shape-valid response (client just resends seconds later).
+  **Occupied-cell guard:** inserts skip destination cells owned by a different grid id (one
+  batched range query via new `GridRepository.GetGridsByMapInAreaAsync`, rides existing
+  `IX_Grids_Map_CoordX_CoordY` — no migration; built with TryAdd because corrupted DBs hold
+  duplicate cells). **Two-witness merge rule:** merges (irreversible — source map deleted) only
+  run between maps each witnessed by ≥2 agreeing grids in THAT matrix (`MIN_MERGE_WITNESSES`);
+  lone-witness merges defer to a later matrix ("Map merge deferred" warning). Single-anchor
+  frontier mapping is deliberately unaffected; pass 2 now reuses pass-1 lookups (−9 queries).
+- **Hmap import (Merge mode):** decision logic extracted to public **`HmapMergePlanner.Compute`**
+  (pure, unit-tested at HmapData level). Votes per **(map, offset) group** — the winner defines
+  target map AND offset atomically (before: offset voted across ALL maps but
+  `targetMapId = matches.First()`, so a segment could merge into map B with map A's frame). The
+  dominant segment now needs `MIN_MERGE_MATCHES = 5` agreeing matches (before: merged
+  unconditionally on any match count — the incident's seed) and, like every segment, passes a
+  **pre-plant conflict scan**: any to-be-planted grid landing on a cell owned by a different id
+  (in DB or claimed by an earlier segment of the same import) → whole segment falls back to
+  CreateNew (`CoordConflicts`). Sentinel `GridId == 0` grids never match/count/import (the second
+  `Id='0'` ingestion path). The dead zero-validation single-anchor fallback in
+  `ImportSegmentAsync` is DELETED. New `HmapImportResult` counters `BelowMinMatchesAsNewMaps` /
+  `CoordConflictsAsNewMaps` (enum-driven; reason strings no longer sniffed). Fixed in passing:
+  the old per-map coord lookup used `ToDictionary`, which THREW on the duplicate cells a
+  corrupted DB contains — Merge imports for an affected tenant would have crashed outright.
+- **Public-map import:** same occupied-cell guard before planting grid rows (~PublicMapTenantImportService
+  line 300; the tile is still written — tiles are coord-keyed); skip count exposed as
+  `PublicMapImportResult.GridRowsSkippedOccupiedCell` + summary warning.
+- **Superadmin region-wipe repair tool** (for surgically cleaning corrupted areas):
+  `GET /api/superadmin/tenants/{tenantId}/maps/{mapId}/wipe-region/preview?x1&x2&y1&y2` (counts,
+  % of map, map extent — blast radius before committing) and `POST …/wipe-region` (body must echo
+  `confirmMapId`, purge-style speed bump) → ONE transaction deleting in-box marker-attached
+  Timers (TimerWarnings cascade) → Markers (chunked by 500) → OverlayData → zoom-0 Tiles (rows +
+  best-effort file deletion with the path-containment guard) → Grids; then map-revision bump +
+  tile-cache invalidation + audit `SuperAdminWipedMapRegion`. Zoom 1–6 tile rows deliberately
+  kept (stale imagery heals as re-uploads regenerate the pyramid); CustomMarkers/Roads/Pings
+  deliberately not wiped. New `IMapRegionWipeService`/`MapRegionWipeService`
+  (TenantDataPurgeService pattern: every query `IgnoreQueryFilters()` + explicit TenantId).
+- **Migration `RemovePlaceholderGridRows`** (raw SQL, cross-tenant on purpose): deletes
+  `Markers WHERE GridId='0'` then `Grids WHERE Id='0'`. Verified by applying the real pipeline to
+  a dev-DB copy via `dotnet ef database update --connection` — exactly the 2 known rows deleted.
+- **Tests (200/200):** `GridServiceHardeningTests` (15 — placeholder/reject/occupied-cell/witness
+  gating/frontier regression), `HmapMergePlannerTests` (12 — incl. the D6 First()-map regression
+  and cave/proximity preservation), `HmapImportServiceMergeTests` (3 — end-to-end through
+  ImportAsync with synthetic binary .hmap files; version-1 grids carry no tilesets → offline),
+  `PublicMapTenantImportOccupiedCellTests` (2), `MapRegionWipeServiceTests` (10 — real SQLite
+  file, DbContext without IHttpContextAccessor like a superadmin request; Timers need a seeded
+  AspNetUsers row). Three existing `GridServiceMapMergeTests` reseeded with second witnesses —
+  one of them had internally-disagreeing witnesses and only passed because of the last-wins bug.
+- **Superadmin "Map Integrity" UI** (SuperAdmin panel, new tab before System):
+  `GET /api/superadmin/integrity/scan` (`IMapIntegrityService`/`MapIntegrityService`, read-only,
+  IgnoreQueryFilters — one GroupBy/HAVING aggregate over Grids) returns
+  `MapIntegrityReportDto`: per (tenant, map) the contested-cell count, bounding box and up to 12
+  sample cells with the grid ids fighting over each, plus any legacy placeholder ("0") rows.
+  `MapIntegrityPanel.razor` auto-scans on open (Rescan button), expandable per-row cell details,
+  and a per-issue repair action opening `WipeMapRegionDialog.razor`: padding input (default 2) →
+  live preview via the wipe-region preview endpoint (counts, % of map, extent; red warning above
+  50% of the map) → type-the-map-id confirm (purge-dialog pattern, `Immediate="true"`) → POST via
+  the `APIUpload` client → snackbar with counts + up to 3 warnings → parent rescans. DTOs in
+  `Core/DTOs/MapIntegrityDtos.cs`; `MapIntegrityServiceTests` (5, real SQLite).
+- **Ops notes:** a tenant whose stored anchors permanently disagree now REJECTS every matrix
+  touching both frames until repaired (that is what the wipe-region tool / Map Integrity tab is
+  for) — watch for "GridUpdate REJECTED" / "Skipped grid insert" / "Map merge deferred" warnings.
+  Legitimate overlaps of <5 shared grids now import as new maps instead of merging (visible via
+  the new counters). Client-side matrix hygiene (Hurricane/KamiClient around teleports) remains
+  the one unfixable-server-side seed: a matrix with exactly ONE known-but-stale grid cannot be
+  cross-checked.
+
+### 2026-08-17: VPS disk fix — Docker log caps + Watchtower --cleanup (deploy)
+
+**/var/lib/docker hit 104G on the VPS: 52GB was container json logs (no rotation anywhere — top
+offenders 7–13GB each), the rest overlay2 bloat from 550 accumulated images (Watchtower had no
+`--cleanup`, so every CI deploy left the old image behind).** Fixes in deploy/docker-compose.yml +
+docker-compose.yml.example: an `x-logging: &default-logging` anchor (json-file, max-size 50m,
+max-file 3 → ≤150MB per service) applied via `logging: *default-logging` on every service, and
+`--cleanup` added to the Watchtower command. Compose files are NOT auto-deployed (Watchtower only
+swaps images) — they must be copied to `/opt/hnhmap` on the VPS and applied with
+`docker compose up -d`, which recreates containers whose config changed; recreate Caddy separately
+at a quiet hour (it owns ports 80/443 — recreation drops all users for a few seconds). Note: the
+observability configs referenced by compose (`./observability/*.yaml` — otel-collector, prometheus,
+loki, tempo, grafana provisioning) live only on the server, not in the repo. Emergency log
+truncation used on 2026-08-17 (`truncate -s 0` on `*-json.log`) freed the 52GB immediately.
+
+### 2026-08-16: Overlay zoom gate (fixes /map browser freeze + overlay request storm)
+
+**Zoomed-out /map views with any claim/village/province overlay toggle enabled froze Chrome and
+self-DoS'd the server.** Overlay data is fetched per 100×100 grid, and one 400px canvas tile covers
+scaleFactor² grids (scaleFactor = 2^(HnHMaxZoom−z)·4 → 4 at max zoom, **256 at min zoom**), so a
+zoomed-out viewport enumerated >1M grid coords → 10,000+ fire-and-forget batches of 100 coords
+(`JsRequestOverlays` interop → Web→API HTTP each), and every response ran a per-grid-per-tile
+repaint scan (~1.3M iterations at min zoom). Billions of iterations + a flooded Blazor circuit =
+frozen tab and "10000+ hidden console messages" (per-batch `console.debug`). **Worst case was maps
+with NO overlay data** — every batch returned 0 rows and still paid the full scan. Overlay toggles
+default off but persist in localStorage, so one past toggle-on = a storm on every visit. Fixes,
+all in `Web/wwwroot/js/map/overlay-layer.js`:
+- **`MAX_OVERLAY_SCALE_FACTOR = 16` zoom gate:** `createTile` returns a blank canvas — no grid
+  enumeration, no fetching, no `activeTiles` registration — when zoomed out past the top 3 zoom
+  levels **or when no overlay types are enabled** (previously it enumerated/rendered even with all
+  types off). Toggling types / zooming triggers `redraw()`, which recreates tiles, so re-entry into
+  gated range refetches naturally. Visual trade-off: overlays simply don't render at far-out zooms
+  (a claim is <1 grid = <25px there anyway); raise the constant only with a per-map overlay index
+  (see follow-up below).
+- **`setOverlayData`:** early-return on empty responses (coords stay `_pending`, preserving the
+  don't-re-request behavior); the repaint scan now iterates the ≤100 returned overlays against each
+  tile's grid range instead of every grid of every tile.
+- **`invalidateOverlayAtCoord`** (SSE `overlayUpdated`, fires for every grid a game client
+  uploads): still invalidates the cache entry but skips the immediate refetch while the zoom gate
+  is active — zooming back in refetches via `createTile`.
+- **`MAX_PENDING_FETCH_COORDS = 3000`** safety cap in `requestOverlays`; capped coords are left
+  unmarked (not `_pending`) so later redraws can retry them.
+Follow-up (not built): a per-map "grids that have overlay data" index endpoint would make low-zoom
+overlay rendering affordable and let empty maps answer with one response instead of N batches.
+Separate issue spotted, not fixed here: maps missing webp zoom tiles (e.g. map 1896 z5/6) re-404
+the whole viewport after every `mapRevision` bump because `SmartTileLayer.setMapRevision` clears
+the map's entire negative cache before refreshing.
+
 ### 2026-08-15: Cookbook toolbar/panels no longer sticky (user request)
 
 **The /cookbook toolbar (search/filters) and panels bar now scroll away with the page.** The sticky

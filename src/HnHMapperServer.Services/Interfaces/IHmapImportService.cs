@@ -110,6 +110,12 @@ public class HmapImportResult
     /// <summary>Number of segments imported as new maps due to not being spatially proximate to existing data</summary>
     public int NotProximateAsNewMaps { get; set; }
 
+    /// <summary>Number of segments imported as new maps because the winning offset group had too few agreeing matches</summary>
+    public int BelowMinMatchesAsNewMaps { get; set; }
+
+    /// <summary>Number of segments imported as new maps because planted grids would land on cells already owned by different grid ids</summary>
+    public int CoordConflictsAsNewMaps { get; set; }
+
     /// <summary>Number of grids merged into existing maps (vs added to new maps)</summary>
     public int GridsMerged { get; set; }
 

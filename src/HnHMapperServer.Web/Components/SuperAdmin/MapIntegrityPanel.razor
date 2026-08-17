@@ -1,0 +1,235 @@
+@using HnHMapperServer.Core.DTOs
+@inject IHttpClientFactory HttpClientFactory
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@inject ILogger<MapIntegrityPanel> Logger
+
+<MudPaper Class="pa-4">
+    <MudStack Spacing="3">
+        <div class="d-flex justify-space-between align-center">
+            <MudText Typo="Typo.h5">
+                <MudIcon Icon="@Icons.Material.Filled.Rule" Class="me-2" />
+                Map Integrity
+            </MudText>
+            <MudStack Row="true" Spacing="2">
+                <MudButton Variant="Variant.Filled"
+                          Color="Color.Primary"
+                          StartIcon="@Icons.Material.Filled.Search"
+                          OnClick="RunScan"
+                          Disabled="@_isScanning">
+                    Rescan
+                </MudButton>
+            </MudStack>
+        </div>
+
+        <MudText Typo="Typo.body2" Class="mud-text-secondary">
+            Finds cells claimed by more than one grid id — the fingerprint of coordinate-frame
+            corruption (two world regions mapped onto the same coordinates, tiles overwriting each
+            other). Repair is the region wipe: the contested area is deleted so the next player to
+            walk it re-registers it cleanly.
+        </MudText>
+
+        @if (_isScanning)
+        {
+            <MudProgressLinear Indeterminate="true" />
+        }
+        else if (_report == null)
+        {
+            <MudAlert Severity="Severity.Warning">
+                Scan failed. Check the API logs and try again.
+            </MudAlert>
+        }
+        else
+        {
+            <MudText Typo="Typo.body2" Class="mud-text-secondary">
+                Scanned @_report.TenantsScanned tenants / @_report.TotalGrids.ToString("N0") grids
+                at @_report.ScannedAt.ToString("yyyy-MM-dd HH:mm:ss") UTC.
+            </MudText>
+
+            @if (_report.IsClean)
+            {
+                <MudAlert Severity="Severity.Success" Icon="@Icons.Material.Filled.CheckCircle">
+                    No integrity issues found — no contested cells and no placeholder grid rows.
+                </MudAlert>
+            }
+
+            @if (_report.ContestedMaps.Any())
+            {
+                <MudAlert Severity="Severity.Error">
+                    @_report.ContestedMaps.Count map(s) have cells claimed by more than one grid id.
+                    Players mapping these areas overwrite each other's tiles until the region is wiped.
+                </MudAlert>
+
+                <MudTable T="MapIntegrityIssueDto" Items="@_report.ContestedMaps" Hover="true" Dense="true">
+                    <HeaderContent>
+                        <MudTh>Tenant</MudTh>
+                        <MudTh>Map</MudTh>
+                        <MudTh>Contested cells</MudTh>
+                        <MudTh>Region</MudTh>
+                        <MudTh>Actions</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd DataLabel="Tenant">
+                            <MudText Typo="Typo.body2">@context.TenantName</MudText>
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary">@context.TenantId</MudText>
+                        </MudTd>
+                        <MudTd DataLabel="Map">
+                            <MudText Typo="Typo.body2">@context.MapName</MudText>
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary">map @context.MapId</MudText>
+                        </MudTd>
+                        <MudTd DataLabel="Contested cells">
+                            <MudChip T="string" Size="Size.Small" Color="Color.Error">@context.ContestedCellCount</MudChip>
+                        </MudTd>
+                        <MudTd DataLabel="Region">
+                            <code>(@context.MinX,@context.MinY) … (@context.MaxX,@context.MaxY)</code>
+                        </MudTd>
+                        <MudTd DataLabel="Actions">
+                            <MudStack Row="true" Spacing="1">
+                                <MudTooltip Text="Show the contested cells and which grid ids fight over them">
+                                    <MudIconButton Icon="@(_expandedIssue == context ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)"
+                                                  Size="Size.Small"
+                                                  OnClick="@(() => ToggleDetails(context))" />
+                                </MudTooltip>
+                                <MudTooltip Text="Preview and wipe the contested region so it can be re-mapped cleanly">
+                                    <MudIconButton Icon="@Icons.Material.Filled.Healing"
+                                                  Color="Color.Error"
+                                                  Size="Size.Small"
+                                                  OnClick="@(() => OpenWipeDialog(context))" />
+                                </MudTooltip>
+                            </MudStack>
+                        </MudTd>
+                    </RowTemplate>
+                    <ChildRowContent>
+                        @if (_expandedIssue == context)
+                        {
+                            <MudTr>
+                                <td colspan="5">
+                                    <MudPaper Elevation="0" Class="pa-3 mud-background-gray">
+                                        <MudText Typo="Typo.subtitle2" Class="mb-2">
+                                            Contested cells (showing @context.SampleCells.Count of @context.ContestedCellCount)
+                                        </MudText>
+                                        <MudSimpleTable Dense="true" Hover="false" Elevation="0" Style="background: transparent">
+                                            <thead>
+                                                <tr>
+                                                    <th>Cell</th>
+                                                    <th>Grid ids claiming it</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                @foreach (var cell in context.SampleCells)
+                                                {
+                                                    <tr>
+                                                        <td><code>(@cell.X, @cell.Y)</code></td>
+                                                        <td><code>@string.Join(", ", cell.GridIds)</code></td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </MudSimpleTable>
+                                    </MudPaper>
+                                </td>
+                            </MudTr>
+                        }
+                    </ChildRowContent>
+                </MudTable>
+            }
+
+            @if (_report.PlaceholderRows.Any())
+            {
+                <MudAlert Severity="Severity.Warning">
+                    @_report.PlaceholderRows.Count legacy placeholder ("0") grid row(s) found. The
+                    RemovePlaceholderGridRows migration deletes these at startup — seeing them here
+                    means the API has not restarted on this database since the fix was deployed.
+                </MudAlert>
+
+                <MudTable T="PlaceholderGridRowDto" Items="@_report.PlaceholderRows" Hover="true" Dense="true">
+                    <HeaderContent>
+                        <MudTh>Tenant</MudTh>
+                        <MudTh>Map</MudTh>
+                        <MudTh>Cell</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd DataLabel="Tenant">@context.TenantName</MudTd>
+                        <MudTd DataLabel="Map">map @context.MapId</MudTd>
+                        <MudTd DataLabel="Cell"><code>(@context.X, @context.Y)</code></MudTd>
+                    </RowTemplate>
+                </MudTable>
+            }
+        }
+    </MudStack>
+</MudPaper>
+
+@code {
+    private MapIntegrityReportDto? _report;
+    private bool _isScanning = true;
+    private MapIntegrityIssueDto? _expandedIssue;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RunScan();
+    }
+
+    private async Task RunScan()
+    {
+        _isScanning = true;
+        _expandedIssue = null;
+        try
+        {
+            var httpClient = HttpClientFactory.CreateClient("API");
+            var response = await httpClient.GetAsync("/api/superadmin/integrity/scan");
+
+            if (response.IsSuccessStatusCode)
+            {
+                _report = await response.Content.ReadFromJsonAsync<MapIntegrityReportDto>();
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Integrity scan failed: {StatusCode}, Body={Body}", response.StatusCode, errorBody);
+                _report = null;
+                Snackbar.Add("Integrity scan failed. Please try again.", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error running integrity scan");
+            _report = null;
+            Snackbar.Add("Integrity scan failed. Please try again.", Severity.Error);
+        }
+        finally
+        {
+            _isScanning = false;
+        }
+    }
+
+    private void ToggleDetails(MapIntegrityIssueDto issue)
+    {
+        _expandedIssue = _expandedIssue == issue ? null : issue;
+    }
+
+    private async Task OpenWipeDialog(MapIntegrityIssueDto issue)
+    {
+        var parameters = new DialogParameters<WipeMapRegionDialog>
+        {
+            { x => x.Issue, issue }
+        };
+
+        var dialog = await DialogService.ShowAsync<WipeMapRegionDialog>(
+            $"Wipe contested region on '{issue.MapName}' ({issue.TenantName})",
+            parameters,
+            new DialogOptions
+            {
+                MaxWidth = MaxWidth.Medium,
+                FullWidth = true,
+                CloseButton = true,
+                BackdropClick = false
+            });
+
+        var result = await dialog.Result;
+
+        if (result is { Canceled: false })
+        {
+            // The region is gone; rescan so the issue disappears from the list.
+            await RunScan();
+        }
+    }
+}

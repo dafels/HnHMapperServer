@@ -40,28 +40,91 @@ public class GridService : IGridService
         _logger = logger;
     }
 
+    /// <summary>
+    /// Merges (which delete the source map — irreversible) only run when each involved map is
+    /// witnessed by at least this many agreeing grids in the current matrix. A single witness may
+    /// itself be a misplaced grid.
+    /// </summary>
+    private const int MIN_MERGE_WITNESSES = 2;
+
+    /// <summary>
+    /// Client matrices mark not-yet-loaded cells with id "0" (or leave them empty). Treating those
+    /// as real grids is what let a stored "0" row anchor unrelated world regions together.
+    /// </summary>
+    private static bool IsPlaceholderGridId(string? gridId) =>
+        string.IsNullOrWhiteSpace(gridId) || gridId.Trim() == "0";
+
+    /// <summary>Known grids of one map observed in the current matrix.</summary>
+    private sealed class MapWitness
+    {
+        public HashSet<Coord> Offsets { get; } = new();
+        public List<(string GridId, int X, int Y, Coord Stored)> Grids { get; } = new();
+    }
+
+    private static GridRequestDto EmptyResponse() => new()
+    {
+        GridRequests = new List<string>(),
+        Map = 0,
+        Coords = new Coord(0, 0)
+    };
+
     public async Task<GridRequestDto> ProcessGridUpdateAsync(GridUpdateDto gridUpdate, string gridStorage)
     {
         var gridRequests = new List<string>();
-        var maps = new Dictionary<int, (int X, int Y)>();
+        var knownByPos = new Dictionary<(int X, int Y), GridData>();
+        var anchors = new Dictionary<int, MapWitness>();
+        var hasRealCell = false;
 
-        // First pass: find which maps these grids belong to
+        // First pass: find which maps these grids belong to. Placeholder cells are holes — they
+        // never anchor and are never inserted.
         for (int x = 0; x < gridUpdate.Grids.Count; x++)
         {
             for (int y = 0; y < gridUpdate.Grids[x].Count; y++)
             {
                 var gridId = gridUpdate.Grids[x][y];
+                if (IsPlaceholderGridId(gridId))
+                    continue;
+
+                hasRealCell = true;
                 var gridData = await _gridRepository.GetGridAsync(gridId);
-                if (gridData != null)
+                if (gridData == null)
+                    continue;
+
+                knownByPos[(x, y)] = gridData;
+                if (!anchors.TryGetValue(gridData.Map, out var witness))
                 {
-                    maps[gridData.Map] = (gridData.Coord.X - x, gridData.Coord.Y - y);
+                    witness = new MapWitness();
+                    anchors[gridData.Map] = witness;
                 }
+                witness.Offsets.Add(new Coord(gridData.Coord.X - x, gridData.Coord.Y - y));
+                witness.Grids.Add((gridId, x, y, gridData.Coord));
             }
         }
 
-        // No existing maps - create a new one
-        if (maps.Count == 0)
+        // All known grids of one map must imply the same matrix offset. A contradiction means the
+        // matrix mixes coordinate frames (client glitch or already-corrupted anchors) — writing
+        // anything would spread the corruption, so the whole update is rejected.
+        if (anchors.Any(kv => kv.Value.Offsets.Count > 1))
         {
+            var matrix = "[" + string.Join(",", gridUpdate.Grids.Select(row => "[" + string.Join(",", row) + "]")) + "]";
+            var anchorDump = string.Join("; ", anchors.SelectMany(kv => kv.Value.Grids.Select(g =>
+                $"{g.GridId}@matrix({g.X},{g.Y}) -> map {kv.Key} stored({g.Stored.X},{g.Stored.Y}) offset({g.Stored.X - g.X},{g.Stored.Y - g.Y})")));
+            _logger.LogWarning(
+                "GridUpdate REJECTED for tenant {TenantId}: conflicting offsets within one matrix. Matrix={Matrix}. Anchors={Anchors}",
+                _tenantContext.GetRequiredTenantId(), matrix, anchorDump);
+            return EmptyResponse();
+        }
+
+        // No existing maps - create a new one
+        if (anchors.Count == 0)
+        {
+            if (!hasRealCell)
+            {
+                _logger.LogInformation("GridUpdate no-op for tenant {TenantId}: matrix contains only placeholder ids",
+                    _tenantContext.GetRequiredTenantId());
+                return EmptyResponse();
+            }
+
             var config = await _configRepository.GetConfigAsync();
             var tenantId = _tenantContext.GetRequiredTenantId();
 
@@ -100,6 +163,9 @@ public class GridService : IGridService
                 for (int y = 0; y < gridUpdate.Grids[x].Count; y++)
                 {
                     var gridId = gridUpdate.Grids[x][y];
+                    if (IsPlaceholderGridId(gridId))
+                        continue;
+
                     var gridData = new GridData
                     {
                         Id = gridId,
@@ -138,9 +204,11 @@ public class GridService : IGridService
         (int X, int Y) offset = (0, 0);
 
         int maxPriority = -1;
-        foreach (var (mapId, off) in maps)
+        foreach (var (mapId, witness) in anchors)
         {
             var mapInfo = await _mapRepository.GetMapAsync(mapId);
+            var single = witness.Offsets.Single(); // guaranteed by the consistency guard above
+            var off = (single.X, single.Y);
             // Choose map with highest priority value (if any have priority > 0)
             if (mapInfo != null && mapInfo.Priority > 0 && mapInfo.Priority > maxPriority)
             {
@@ -158,15 +226,27 @@ public class GridService : IGridService
 
         _logger.LogInformation("Client in map {MapId}", targetMapId);
 
+        // One batched lookup of every cell this matrix could claim on the target map, so inserts
+        // can refuse cells already owned by a different grid id. TryAdd, not ToDictionary: a
+        // previously corrupted database may hold several grids on one cell.
+        var rowCount = gridUpdate.Grids.Count;
+        var colCount = gridUpdate.Grids.Max(row => row.Count);
+        var occupants = await _gridRepository.GetGridsByMapInAreaAsync(
+            targetMapId, offset.X, offset.Y, offset.X + rowCount - 1, offset.Y + colCount - 1);
+        var ownerByCell = new Dictionary<Coord, string>();
+        foreach (var occupant in occupants)
+            ownerByCell.TryAdd(occupant.Coord, occupant.Id);
+
         // Process grids
         for (int x = 0; x < gridUpdate.Grids.Count; x++)
         {
             for (int y = 0; y < gridUpdate.Grids[x].Count; y++)
             {
                 var gridId = gridUpdate.Grids[x][y];
-                var existing = await _gridRepository.GetGridAsync(gridId);
+                if (IsPlaceholderGridId(gridId))
+                    continue;
 
-                if (existing != null)
+                if (knownByPos.TryGetValue((x, y), out var existing))
                 {
                     if (DateTime.UtcNow >= existing.NextUpdate)
                     {
@@ -175,15 +255,25 @@ public class GridService : IGridService
                     continue;
                 }
 
+                var dest = new Coord(x + offset.X, y + offset.Y);
+                if (ownerByCell.TryGetValue(dest, out var ownerId) && ownerId != gridId)
+                {
+                    _logger.LogWarning(
+                        "Skipped grid insert for tenant {TenantId}: cell ({X},{Y}) on map {MapId} already owned by grid {OwnerGridId}; incoming grid {GridId} not inserted",
+                        _tenantContext.GetRequiredTenantId(), dest.X, dest.Y, targetMapId, ownerId, gridId);
+                    continue;
+                }
+
                 var gridData = new GridData
                 {
                     Id = gridId,
                     Map = targetMapId,
-                    Coord = new Coord(x + offset.X, y + offset.Y),
+                    Coord = dest,
                     NextUpdate = DateTime.UtcNow.AddMinutes(-1) // Set to past so grid is immediately requestable
                 };
 
                 await _gridRepository.SaveGridAsync(gridData);
+                ownerByCell[dest] = gridId;
                 gridRequests.Add(gridId);
 
                 // Process any pending markers waiting for this grid
@@ -196,25 +286,48 @@ public class GridService : IGridService
             }
         }
 
-        // Get center grid for response
-        var centerGridId = gridUpdate.Grids[1][1];
-        var centerGrid = await _gridRepository.GetGridAsync(centerGridId);
+        // Center grid for response — pass-1 result when known, else the cell this update would
+        // have placed it at (strictly better than the old (0,0) fallback).
+        knownByPos.TryGetValue((1, 1), out var centerGrid);
 
         var response = new GridRequestDto
         {
             GridRequests = gridRequests,
             Map = centerGrid?.Map ?? targetMapId,
-            Coords = centerGrid?.Coord ?? new Coord(0, 0)
+            Coords = centerGrid?.Coord ?? new Coord(1 + offset.X, 1 + offset.Y)
         };
 
         _logger.LogInformation("GridUpdate response (existing map): {GridCount} grids requested for map {MapId}, coords {Coords}",
             response.GridRequests.Count, response.Map, response.Coords);
 
-        // Handle map merging if multiple maps detected
-        if (maps.Count > 1)
+        // Handle map merging if multiple maps detected — but only between maps that are each
+        // witnessed by at least MIN_MERGE_WITNESSES agreeing grids in THIS matrix. Merges delete
+        // the source map, so a single (possibly misplaced) witness is not enough evidence; a
+        // deferred merge simply lands on a later matrix with more witnesses.
+        if (anchors.Count > 1)
         {
-            _logger.LogInformation("Merging {MapCount} maps into target map {TargetMapId}", maps.Count, targetMapId);
-            await MergeMapsAsync(maps, targetMapId, offset, gridStorage);
+            var eligible = new Dictionary<int, (int X, int Y)>();
+            foreach (var (mapId, witness) in anchors)
+            {
+                if (witness.Grids.Count >= MIN_MERGE_WITNESSES)
+                {
+                    var single = witness.Offsets.Single();
+                    eligible[mapId] = (single.X, single.Y);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Map merge deferred for tenant {TenantId}: map {MapId} witnessed by only {Count} grid(s) in this matrix (need >= {Min} agreeing); maps in matrix: {AllMapIds}",
+                        _tenantContext.GetRequiredTenantId(), mapId, witness.Grids.Count, MIN_MERGE_WITNESSES,
+                        string.Join(",", anchors.Keys));
+                }
+            }
+
+            if (eligible.ContainsKey(targetMapId) && eligible.Count > 1)
+            {
+                _logger.LogInformation("Merging {MapCount} maps into target map {TargetMapId}", eligible.Count, targetMapId);
+                await MergeMapsAsync(eligible, targetMapId, offset, gridStorage);
+            }
         }
 
         return response;

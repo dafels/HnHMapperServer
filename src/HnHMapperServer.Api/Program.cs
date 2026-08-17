@@ -141,6 +141,8 @@ builder.Services.AddScoped<ITenantContextAccessor, TenantContextAccessor>();
 builder.Services.AddScoped<IStorageQuotaService, StorageQuotaService>();
 builder.Services.AddScoped<ITenantFilePathService, TenantFilePathService>();
 builder.Services.AddScoped<ITenantDataPurgeService, TenantDataPurgeService>();  // Superadmin: wipe tenant content, keep users
+builder.Services.AddScoped<IMapRegionWipeService, MapRegionWipeService>();  // Superadmin: surgical region wipe inside one map
+builder.Services.AddScoped<IMapIntegrityService, MapIntegrityService>();  // Superadmin: cross-tenant contested-cell scan
 builder.Services.AddScoped<IAuditService, AuditService>();  // Phase 6: Audit logging service
 builder.Services.AddScoped<INotificationService, NotificationService>();  // Notification system
 builder.Services.AddScoped<ICookbookNotificationService, CookbookNotificationService>();  // "New foods" digest coalescing

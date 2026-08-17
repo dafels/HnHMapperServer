@@ -152,11 +152,7 @@ public class HmapImportService : IHmapImportService
     // Only one .hmap import can run at a time to prevent server overload
     private static readonly SemaphoreSlim _globalImportLock = new(1, 1);
 
-    // Merge validation constants
-    private const int PROXIMITY_THRESHOLD = 10;        // Manhattan distance for spatial proximity check
-    private const int MIN_PROXIMATE_MATCHES = 5;       // Minimum Grid ID matches near merged area to trust offset
-    private const double CAVE_OVERLAP_THRESHOLD = 50.0;  // % coord overlap to trigger cave detection
-    private const double CAVE_CONTENT_THRESHOLD = 10.0;  // % content match below this = cave (different terrain)
+    // Merge validation constants and logic live in HmapMergePlanner (unit-tested).
 
     public HmapImportService(
         IGridRepository gridRepository,
@@ -350,158 +346,19 @@ public class HmapImportService : IHmapImportService
             }
 
             // ===== MERGE VALIDATION (only in Merge mode) =====
-            // Calculate per-segment offsets and validate which segments should merge vs create new maps
-            var segmentMergeDecisions = new Dictionary<long, (bool shouldMerge, int? targetMapId, int offsetX, int offsetY, string reason)>();
+            // Voting and validation live in HmapMergePlanner (unit-tested): per-(map,offset)
+            // group voting so a segment can't merge into map B with map A's frame, a minimum
+            // match count for the dominant segment, proximity/cave checks for secondaries, and
+            // a pre-plant conflict scan so planted grids never double-claim occupied cells.
+            var segmentMergeDecisions = new Dictionary<long, SegmentMergeDecision>();
 
             if (mode == HmapImportMode.Merge)
             {
-                // Build lookup tables from existing grids in tenant
                 var existingGrids = await _gridRepository.GetAllGridsAsync();
-
-                // Unique Grid ID -> Coord (only grids that appear once - unique content)
-                var uniqueGridById = existingGrids
-                    .GroupBy(g => g.Id)
-                    .Where(grp => grp.Count() == 1)
-                    .ToDictionary(grp => grp.Key, grp => grp.First());
-
-                // MapId -> (Coord -> Grid ID) for cave detection per target map
-                var gridIdByMapAndCoord = existingGrids
-                    .GroupBy(g => g.Map)
-                    .ToDictionary(
-                        mapGrp => mapGrp.Key,
-                        mapGrp => mapGrp.ToDictionary(g => g.Coord, g => g.Id));
-
-                _logger.LogInformation("Merge validation: {TotalGrids} existing grids, {UniqueGrids} unique Grid IDs",
-                    existingGrids.Count, uniqueGridById.Count);
-
-                // Calculate per-segment offsets
-                var segmentOffsets = new Dictionary<long, (int offsetX, int offsetY, int matchCount, List<HmapGridData> grids, int? targetMapId)>();
-
-                foreach (var segmentId in segments)
-                {
-                    var segmentGrids = hmapData.GetGridsForSegment(segmentId);
-
-                    // Find unique Grid ID matches between file and DB
-                    var matches = segmentGrids
-                        .Where(g => uniqueGridById.ContainsKey(g.GridIdString))
-                        .Select(g => (
-                            FileGrid: g,
-                            DbGrid: uniqueGridById[g.GridIdString],
-                            OffsetX: uniqueGridById[g.GridIdString].Coord.X - g.TileX,
-                            OffsetY: uniqueGridById[g.GridIdString].Coord.Y - g.TileY
-                        ))
-                        .ToList();
-
-                    if (matches.Count == 0)
-                    {
-                        // No Grid ID matches - will create new map
-                        segmentMergeDecisions[segmentId] = (false, null, 0, 0, "no Grid ID matches");
-                        _logger.LogInformation("Segment {SegId:X}: No Grid ID matches - will create new map", segmentId);
-                        continue;
-                    }
-
-                    // Group by offset, find dominant
-                    var offsetGroups = matches
-                        .GroupBy(m => (m.OffsetX, m.OffsetY))
-                        .OrderByDescending(g => g.Count())
-                        .ToList();
-
-                    var (offsetX, offsetY) = offsetGroups.First().Key;
-                    var matchCount = offsetGroups.First().Count();
-                    var targetMapId = matches.First().DbGrid.Map;
-
-                    segmentOffsets[segmentId] = (offsetX, offsetY, matchCount, segmentGrids, targetMapId);
-
-                    _logger.LogInformation("Segment {SegId:X}: {MatchCount} Grid ID matches, offset ({OffsetX},{OffsetY}), target map {MapId}",
-                        segmentId, matchCount, offsetX, offsetY, targetMapId);
-                }
-
-                // Validate segments with offsets
-                if (segmentOffsets.Count > 0)
-                {
-                    // Start with dominant segment (most matches)
-                    var dominant = segmentOffsets.OrderByDescending(s => s.Value.matchCount).First();
-                    var mergedCoords = new HashSet<(int, int)>();
-
-                    // Dominant segment always merges
-                    foreach (var grid in dominant.Value.grids)
-                        mergedCoords.Add((grid.TileX + dominant.Value.offsetX, grid.TileY + dominant.Value.offsetY));
-
-                    segmentMergeDecisions[dominant.Key] = (true, dominant.Value.targetMapId, dominant.Value.offsetX, dominant.Value.offsetY,
-                        $"{dominant.Value.matchCount} Grid ID matches (dominant)");
-
-                    _logger.LogInformation("Segment {SegId:X}: MERGE (dominant) - {MatchCount} Grid ID matches",
-                        dominant.Key, dominant.Value.matchCount);
-
-                    // Validate other segments
-                    foreach (var (segId, offset) in segmentOffsets.Where(s => s.Key != dominant.Key))
-                    {
-                        // SPATIAL PROXIMITY CHECK
-                        int proximateMatches = 0;
-                        foreach (var grid in offset.grids)
-                        {
-                            if (uniqueGridById.TryGetValue(grid.GridIdString, out var dbGrid))
-                            {
-                                bool isProximate = mergedCoords.Any(mc =>
-                                    Math.Abs(dbGrid.Coord.X - mc.Item1) + Math.Abs(dbGrid.Coord.Y - mc.Item2) <= PROXIMITY_THRESHOLD);
-                                if (isProximate)
-                                    proximateMatches++;
-                            }
-                        }
-
-                        if (proximateMatches < MIN_PROXIMATE_MATCHES)
-                        {
-                            segmentMergeDecisions[segId] = (false, null, 0, 0,
-                                $"not proximate: only {proximateMatches}/{MIN_PROXIMATE_MATCHES} matches near merged area");
-                            _logger.LogInformation("Segment {SegId:X}: NEW MAP (not proximate) - only {Count} matches near merged area",
-                                segId, proximateMatches);
-                            continue;
-                        }
-
-                        // CAVE DETECTION - check against target map's grids only
-                        int coordOverlapCount = 0, contentMatchCount = 0;
-                        if (offset.targetMapId.HasValue && gridIdByMapAndCoord.TryGetValue(offset.targetMapId.Value, out var targetMapCoords))
-                        {
-                            foreach (var grid in offset.grids)
-                            {
-                                var adjustedCoord = new Coord(grid.TileX + offset.offsetX, grid.TileY + offset.offsetY);
-                                if (targetMapCoords.TryGetValue(adjustedCoord, out var dbGridId))
-                                {
-                                    coordOverlapCount++;
-                                    if (grid.GridIdString == dbGridId)
-                                        contentMatchCount++;
-                                }
-                            }
-                        }
-
-                        double coordOverlapPct = offset.grids.Count > 0 ? (double)coordOverlapCount / offset.grids.Count * 100 : 0;
-                        double contentMatchRate = coordOverlapCount > 0 ? (double)contentMatchCount / coordOverlapCount * 100 : 0;
-
-                        if (coordOverlapPct >= CAVE_OVERLAP_THRESHOLD && contentMatchRate < CAVE_CONTENT_THRESHOLD)
-                        {
-                            segmentMergeDecisions[segId] = (false, null, 0, 0,
-                                $"cave detected: {coordOverlapPct:F0}% overlap, {contentMatchRate:F0}% content match");
-                            _logger.LogInformation("Segment {SegId:X}: NEW MAP (cave) - {Overlap:F0}% coord overlap, {Content:F0}% content match",
-                                segId, coordOverlapPct, contentMatchRate);
-                            continue;
-                        }
-
-                        // Passed validation - will merge
-                        segmentMergeDecisions[segId] = (true, offset.targetMapId, offset.offsetX, offset.offsetY,
-                            $"{offset.matchCount} Grid ID matches, {proximateMatches} proximate");
-
-                        foreach (var grid in offset.grids)
-                            mergedCoords.Add((grid.TileX + offset.offsetX, grid.TileY + offset.offsetY));
-
-                        _logger.LogInformation("Segment {SegId:X}: MERGE - {MatchCount} Grid ID matches, {Proximate} proximate",
-                            segId, offset.matchCount, proximateMatches);
-                    }
-                }
-
-                // Clear large collections to reduce GC pressure during grid import
-                uniqueGridById.Clear();
-                gridIdByMapAndCoord.Clear();
-                segmentOffsets.Clear();
+                segmentMergeDecisions = HmapMergePlanner.Compute(
+                    segments.Select(id => (id, (IReadOnlyList<HmapGridData>)hmapData.GetGridsForSegment(id))).ToList(),
+                    existingGrids,
+                    _logger);
             }
 
             // Phase 3: Import grids from each segment
@@ -515,7 +372,7 @@ public class HmapImportService : IHmapImportService
                 var segmentGrids = hmapData.GetGridsForSegment(segmentId);
 
                 // Get pre-calculated merge decision (if available)
-                (bool shouldMerge, int? targetMapId, int offsetX, int offsetY, string reason)? mergeDecision = null;
+                SegmentMergeDecision? mergeDecision = null;
                 if (segmentMergeDecisions.TryGetValue(segmentId, out var decision))
                 {
                     mergeDecision = decision;
@@ -537,12 +394,23 @@ public class HmapImportService : IHmapImportService
                         {
                             result.MapsCreated++;
                             // Track reason for new map creation
-                            if (mergeDecision.HasValue && !mergeDecision.Value.shouldMerge)
+                            if (mergeDecision != null && !mergeDecision.ShouldMerge)
                             {
-                                if (mergeDecision.Value.reason.Contains("cave"))
-                                    result.CavesAsNewMaps++;
-                                else if (mergeDecision.Value.reason.Contains("not proximate"))
-                                    result.NotProximateAsNewMaps++;
+                                switch (mergeDecision.FallbackReason)
+                                {
+                                    case SegmentFallbackReason.CaveDetected:
+                                        result.CavesAsNewMaps++;
+                                        break;
+                                    case SegmentFallbackReason.NotProximate:
+                                        result.NotProximateAsNewMaps++;
+                                        break;
+                                    case SegmentFallbackReason.BelowMinMatches:
+                                        result.BelowMinMatchesAsNewMaps++;
+                                        break;
+                                    case SegmentFallbackReason.CoordConflicts:
+                                        result.CoordConflictsAsNewMaps++;
+                                        break;
+                                }
                             }
                         }
                     }
@@ -674,9 +542,11 @@ public class HmapImportService : IHmapImportService
             result.Duration = stopwatch.Elapsed;
 
             _logger.LogInformation(
-                "Import completed: {MapsCreated} maps ({GridsMerged} grids merged, {CavesAsNewMaps} caves, {NotProximate} not proximate), " +
+                "Import completed: {MapsCreated} maps ({GridsMerged} grids merged, {CavesAsNewMaps} caves, {NotProximate} not proximate, " +
+                "{BelowMin} below-min-matches, {CoordConflicts} coord conflicts), " +
                 "{GridsImported} grids imported, {GridsSkipped} skipped, {MarkersImported} markers, {Duration}ms",
                 result.MapsCreated, result.GridsMerged, result.CavesAsNewMaps, result.NotProximateAsNewMaps,
+                result.BelowMinMatchesAsNewMaps, result.CoordConflictsAsNewMaps,
                 result.GridsImported, result.GridsSkipped, result.MarkersImported, result.Duration.TotalMilliseconds);
 
             return result;
@@ -805,7 +675,7 @@ public class HmapImportService : IHmapImportService
         int processedSoFar,
         int totalGridsOverall,
         CancellationToken cancellationToken,
-        (bool shouldMerge, int? targetMapId, int offsetX, int offsetY, string reason)? mergeDecision = null)
+        SegmentMergeDecision? mergeDecision = null)
     {
         int mapId = 0;
         bool isNewMap = false;
@@ -824,118 +694,63 @@ public class HmapImportService : IHmapImportService
         if (mode == HmapImportMode.CreateNew)
         {
             // Always create new map and import all grids
-            // Deduplicate by GridIdString to prevent UNIQUE constraint violations if source file has duplicates
+            // Deduplicate by GridIdString to prevent UNIQUE constraint violations if source file has duplicates.
+            // Sentinel grids (GridId == 0 — the client's not-yet-loaded placeholder) are never imported.
             mapId = await CreateNewMapAsync(tenantId);
             isNewMap = true;
-            gridsToImport = grids.DistinctBy(g => g.GridIdString).ToList();
+            gridsToImport = grids
+                .Where(g => g.GridId != 0)
+                .DistinctBy(g => g.GridIdString)
+                .ToList();
             gridsSkipped = grids.Count - gridsToImport.Count;
             _logger.LogInformation("Created new map {MapId} for segment {SegmentId:X}", mapId, segmentId);
         }
         else // Merge mode
         {
-            // Use pre-calculated merge decision if available
-            if (mergeDecision.HasValue)
+            if (mergeDecision == null)
             {
-                var decision = mergeDecision.Value;
+                // HmapMergePlanner.Compute returns a decision for EVERY segment; a missing one is
+                // a programming error. (The old single-anchor fallback that lived here anchored a
+                // whole segment on one arbitrary grid with zero validation — deliberately removed.)
+                throw new InvalidOperationException($"Merge decision missing for segment {segmentId:X}");
+            }
 
-                if (decision.shouldMerge && decision.targetMapId.HasValue)
-                {
-                    // Merge into existing map with pre-calculated offset
-                    mapId = decision.targetMapId.Value;
-                    isNewMap = false;
-                    coordOffsetX = decision.offsetX;
-                    coordOffsetY = decision.offsetY;
-                    _logger.LogInformation("Merging segment {SegmentId:X} into map {MapId} (offset {OffsetX},{OffsetY}) - {Reason}",
-                        segmentId, mapId, coordOffsetX, coordOffsetY, decision.reason);
-                }
-                else
-                {
-                    // Create new map (failed validation: cave, not proximate, or no matches)
-                    mapId = await CreateNewMapAsync(tenantId);
-                    isNewMap = true;
-                    // No coordinate offset for new maps
-                    _logger.LogInformation("Created new map {MapId} for segment {SegmentId:X} - {Reason}",
-                        mapId, segmentId, decision.reason);
-                }
-
-                // In merge mode with pre-calculated decision, filter out existing grids
-                var allGridIds = grids.Select(g => g.GridIdString).ToList();
-                var existingGridIds = await _gridRepository.GetExistingGridIdsAsync(allGridIds);
-                // Filter out existing grids and deduplicate by GridIdString to prevent UNIQUE constraint violations
-                // when the same grid ID appears multiple times in the source file
-                gridsToImport = grids
-                    .Where(g => !existingGridIds.Contains(g.GridIdString))
-                    .DistinctBy(g => g.GridIdString)
-                    .ToList();
-                gridsSkipped = grids.Count - gridsToImport.Count;
-
-                if (gridsSkipped > 0)
-                {
-                    _logger.LogInformation("Skipping {SkippedCount} existing grids in segment {SegmentId:X}",
-                        gridsSkipped, segmentId);
-                }
+            if (mergeDecision.ShouldMerge && mergeDecision.TargetMapId.HasValue)
+            {
+                // Merge into existing map with pre-calculated offset
+                mapId = mergeDecision.TargetMapId.Value;
+                isNewMap = false;
+                coordOffsetX = mergeDecision.OffsetX;
+                coordOffsetY = mergeDecision.OffsetY;
+                _logger.LogInformation("Merging segment {SegmentId:X} into map {MapId} (offset {OffsetX},{OffsetY}) - {Reason}",
+                    segmentId, mapId, coordOffsetX, coordOffsetY, mergeDecision.Reason);
             }
             else
             {
-                // Fallback: original merge logic (for backwards compatibility)
-                // Batch check for existing grids (single query instead of N queries)
-                var allGridIds = grids.Select(g => g.GridIdString).ToList();
-                var existingGridIds = await _gridRepository.GetExistingGridIdsAsync(allGridIds);
+                // Create new map (failed validation: below minimum matches, cave, not proximate,
+                // coordinate conflicts, or no matches)
+                mapId = await CreateNewMapAsync(tenantId);
+                isNewMap = true;
+                // No coordinate offset for new maps
+                _logger.LogInformation("Created new map {MapId} for segment {SegmentId:X} - {Reason}",
+                    mapId, segmentId, mergeDecision.Reason);
+            }
 
-                // Find existing map from any existing grid
-                int? existingMapId = null;
-                if (existingGridIds.Count > 0)
-                {
-                    var firstExistingId = existingGridIds.First();
-                    var existingGrid = await _gridRepository.GetGridAsync(firstExistingId);
-                    existingMapId = existingGrid?.Map;
+            // Filter out sentinel + existing grids and deduplicate by GridIdString to prevent
+            // UNIQUE constraint violations when the same grid ID appears multiple times in the file
+            var allGridIds = grids.Where(g => g.GridId != 0).Select(g => g.GridIdString).ToList();
+            var existingGridIds = await _gridRepository.GetExistingGridIdsAsync(allGridIds);
+            gridsToImport = grids
+                .Where(g => g.GridId != 0)
+                .Where(g => !existingGridIds.Contains(g.GridIdString))
+                .DistinctBy(g => g.GridIdString)
+                .ToList();
+            gridsSkipped = grids.Count - gridsToImport.Count;
 
-                    // ===== COORDINATE OFFSET CALCULATION =====
-                    // Different .hmap files can use different coordinate systems for the same physical area.
-                    // Calculate the offset between existing grid coords and file grid coords.
-                    if (existingGrid != null)
-                    {
-                        var fileGrid = grids.FirstOrDefault(g => g.GridIdString == firstExistingId);
-                        if (fileGrid != null)
-                        {
-                            coordOffsetX = existingGrid.Coord.X - fileGrid.TileX;
-                            coordOffsetY = existingGrid.Coord.Y - fileGrid.TileY;
-
-                            if (coordOffsetX != 0 || coordOffsetY != 0)
-                            {
-                                _logger.LogInformation(
-                                    "Detected coordinate offset for segment {SegmentId:X}: ({OffsetX}, {OffsetY})",
-                                    segmentId, coordOffsetX, coordOffsetY);
-                            }
-                        }
-                    }
-                }
-
-                if (existingMapId.HasValue)
-                {
-                    mapId = existingMapId.Value;
-                    isNewMap = false;
-                    _logger.LogInformation("Merging segment {SegmentId:X} into existing map {MapId}", segmentId, mapId);
-                }
-                else
-                {
-                    mapId = await CreateNewMapAsync(tenantId);
-                    isNewMap = true;
-                    _logger.LogInformation("Created new map {MapId} for segment {SegmentId:X} (no existing grids)", mapId, segmentId);
-                }
-
-                // Filter to only new grids and deduplicate by GridIdString to prevent UNIQUE constraint violations
-                gridsToImport = grids
-                    .Where(g => !existingGridIds.Contains(g.GridIdString))
-                    .DistinctBy(g => g.GridIdString)
-                    .ToList();
-                gridsSkipped = grids.Count - gridsToImport.Count;
-
-                if (gridsSkipped > 0)
-                {
-                    _logger.LogInformation("Skipping {SkippedCount} existing grids in segment {SegmentId:X}",
-                        gridsSkipped, segmentId);
-                }
+            if (gridsSkipped > 0)
+            {
+                _logger.LogInformation("Skipping {SkippedCount} existing/sentinel grids in segment {SegmentId:X}",
+                    gridsSkipped, segmentId);
             }
         }
 

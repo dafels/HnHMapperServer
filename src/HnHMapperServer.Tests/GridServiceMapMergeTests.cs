@@ -146,19 +146,21 @@ public class GridServiceMapMergeTests : IDisposable
         await _mapRepository.SaveMapAsync(map1);
 
         var grid1a = new GridData { Id = "grid1a", Map = 1, Coord = new Coord(0, 0), NextUpdate = DateTime.UtcNow.AddMinutes(-1) };
+        var grid1b = new GridData { Id = "grid1b", Map = 1, Coord = new Coord(0, 1), NextUpdate = DateTime.UtcNow.AddMinutes(-1) };
         await _gridRepository.SaveGridAsync(grid1a);
+        await _gridRepository.SaveGridAsync(grid1b);
 
         // Create test tile for map 1 (red color)
         var tile1aPath = await CreateTestTileAsync("grid1a", 255, 0, 0);
         await _tileService.SaveTileAsync(1, new Coord(0, 0), 0, tile1aPath, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), TestTenantId, 0);
 
-        // Map 2: Contains grids at (100,100) and (101,100) - will be MERGED into map 1
+        // Map 2: Contains grids at (100,100) and (100,101) - will be MERGED into map 1
         // Using high coordinates to ensure no overlap after shift
         var map2 = new MapInfo { Id = 2, Name = "Map2", Hidden = false, Priority = 0 };
         await _mapRepository.SaveMapAsync(map2);
 
         var grid2a = new GridData { Id = "grid2a", Map = 2, Coord = new Coord(100, 100), NextUpdate = DateTime.UtcNow.AddMinutes(-1) };
-        var grid2b = new GridData { Id = "grid2b", Map = 2, Coord = new Coord(101, 100), NextUpdate = DateTime.UtcNow.AddMinutes(-1) };
+        var grid2b = new GridData { Id = "grid2b", Map = 2, Coord = new Coord(100, 101), NextUpdate = DateTime.UtcNow.AddMinutes(-1) };
         await _gridRepository.SaveGridAsync(grid2a);
         await _gridRepository.SaveGridAsync(grid2b);
 
@@ -166,23 +168,24 @@ public class GridServiceMapMergeTests : IDisposable
         var tile2aPath = await CreateTestTileAsync("grid2a", 0, 255, 0);
         var tile2bPath = await CreateTestTileAsync("grid2b", 0, 255, 0);
         await _tileService.SaveTileAsync(2, new Coord(100, 100), 0, tile2aPath, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), TestTenantId, 0);
-        await _tileService.SaveTileAsync(2, new Coord(101, 100), 0, tile2bPath, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), TestTenantId, 0);
+        await _tileService.SaveTileAsync(2, new Coord(100, 101), 0, tile2bPath, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), TestTenantId, 0);
 
         // Act: Send gridUpdate that spans BOTH maps (this will trigger merge)
-        // In the grid update layout:
-        // - grid1a is at position (row=1, col=1) -> x=1, y=1
-        //   grid1a actual coord (0,0), offset = (0-1, 0-1) = (-1, -1)
-        // - grid2a is at position (row=2, col=1) -> x=2, y=1
-        //   grid2a actual coord (100,100), offset = (100-2, 100-1) = (98, 99)
+        // In the grid update layout (each map witnessed by TWO agreeing grids — merges only run
+        // with >= MIN_MERGE_WITNESSES per map, and all witnesses of a map must agree on offset):
+        // - grid1a at (x=1, y=1): coord (0,0), offset = (0-1, 0-1) = (-1, -1)
+        // - grid1b at (x=1, y=2): coord (0,1), offset = (0-1, 1-2) = (-1, -1)  [agrees]
+        // - grid2a at (x=2, y=1): coord (100,100), offset = (100-2, 100-1) = (98, 99)
+        // - grid2b at (x=2, y=2): coord (100,101), offset = (100-2, 101-2) = (98, 99)  [agrees]
         // Map 1 (lower ID) is target. Shift = targetOffset - sourceOffset = (-1,-1) - (98,99) = (-99, -100)
         // grid2a moves to (100 + -99, 100 + -100) = (1, 0)
-        // grid2b moves to (101 + -99, 100 + -100) = (2, 0)
+        // grid2b moves to (100 + -99, 101 + -100) = (1, 1)
         var gridUpdate = new GridUpdateDto
         {
             Grids = new List<List<string>>
             {
                 new List<string> { "new1", "new2", "new3" },       // Row 0
-                new List<string> { "new4", "grid1a", "new6" },     // Row 1: map 1 grid at (1,1)
+                new List<string> { "new4", "grid1a", "grid1b" },   // Row 1: map 1 grids at (1,1) and (1,2)
                 new List<string> { "new7", "grid2a", "grid2b" }    // Row 2: map 2 grids at (2,1) and (2,2) - triggers merge!
             }
         };
@@ -260,6 +263,14 @@ public class GridServiceMapMergeTests : IDisposable
             NextUpdate = DateTime.UtcNow.AddMinutes(-1)
         };
         await _gridRepository.SaveGridAsync(sourceGrid);
+        // Second agreeing witness for map 10 — merges need >= MIN_MERGE_WITNESSES per map
+        await _gridRepository.SaveGridAsync(new GridData
+        {
+            Id = "sourceGrid2",
+            Map = 10,
+            Coord = new Coord(3, 5),
+            NextUpdate = DateTime.UtcNow.AddMinutes(-1)
+        });
 
         // Create a blue test tile
         var sourceTilePath = await CreateTestTileAsync("sourceGrid", 0, 0, 255);
@@ -277,14 +288,24 @@ public class GridServiceMapMergeTests : IDisposable
             NextUpdate = DateTime.UtcNow.AddMinutes(-1)
         };
         await _gridRepository.SaveGridAsync(targetGrid);
+        // Second agreeing witness for map 20
+        await _gridRepository.SaveGridAsync(new GridData
+        {
+            Id = "targetGrid2",
+            Map = 20,
+            Coord = new Coord(0, 1),
+            NextUpdate = DateTime.UtcNow.AddMinutes(-1)
+        });
 
         // Act: Trigger merge by sending gridUpdate spanning both maps
+        // targetGrid @(0,0) offset (0,0); targetGrid2 @(0,1) offset (0,0) — agree
+        // sourceGrid @(1,0) offset (2,4); sourceGrid2 @(1,1) offset (2,4) — agree
         var gridUpdate = new GridUpdateDto
         {
             Grids = new List<List<string>>
             {
-                new List<string> { "targetGrid", "new2", "new3" },
-                new List<string> { "sourceGrid", "new5", "new6" },  // This will cause sourceGrid to shift
+                new List<string> { "targetGrid", "targetGrid2", "new3" },
+                new List<string> { "sourceGrid", "sourceGrid2", "new6" },  // This will cause sourceGrid to shift
                 new List<string> { "new7", "new8", "new9" }
             }
         };
@@ -321,15 +342,18 @@ public class GridServiceMapMergeTests : IDisposable
         await _mapRepository.SaveMapAsync(map2);
 
         await _gridRepository.SaveGridAsync(new GridData { Id = "t1", Map = 1, Coord = new Coord(0, 0), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "t2", Map = 1, Coord = new Coord(0, 1), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
         await _gridRepository.SaveGridAsync(new GridData { Id = "s1", Map = 2, Coord = new Coord(50, 50), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "s2", Map = 2, Coord = new Coord(50, 51), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
 
-        // Act: gridUpdate spanning both maps triggers the merge (target = lower id)
+        // Act: gridUpdate spanning both maps triggers the merge (target = lower id).
+        // Two agreeing witnesses per map: t1@(0,0)/t2@(0,1) offset (0,0); s1@(1,0)/s2@(1,1) offset (49,50).
         var gridUpdate = new GridUpdateDto
         {
             Grids = new List<List<string>>
             {
-                new List<string> { "t1", "x2", "x3" },
-                new List<string> { "s1", "x5", "x6" },
+                new List<string> { "t1", "t2", "x3" },
+                new List<string> { "s1", "s2", "x6" },
                 new List<string> { "x7", "x8", "x9" }
             }
         };
