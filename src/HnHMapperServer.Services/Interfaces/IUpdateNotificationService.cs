@@ -1,35 +1,40 @@
 using HnHMapperServer.Core.Models;
 using HnHMapperServer.Core.DTOs;
-using System.Threading.Channels;
 
 namespace HnHMapperServer.Services.Interfaces;
 
+/// <summary>
+/// In-memory broadcast hub for SSE. Every Subscribe method returns an
+/// <see cref="IChannelSubscription{T}"/> that the caller MUST dispose when its
+/// connection ends — disposal is the only unsubscribe, and an undisposed
+/// subscription keeps buffering events (up to the channel bound) forever.
+/// </summary>
 public interface IUpdateNotificationService
 {
     /// <summary>
     /// Subscribes to tile update notifications
     /// </summary>
-    ChannelReader<TileData> SubscribeToTileUpdates();
+    IChannelSubscription<TileData> SubscribeToTileUpdates();
 
     /// <summary>
     /// Subscribes to map merge notifications
     /// </summary>
-    ChannelReader<MergeDto> SubscribeToMergeUpdates();
+    IChannelSubscription<MergeDto> SubscribeToMergeUpdates();
 
     /// <summary>
     /// Subscribes to map metadata update notifications (rename, hidden, priority changes)
     /// </summary>
-    ChannelReader<MapInfo> SubscribeToMapUpdates();
+    IChannelSubscription<MapInfo> SubscribeToMapUpdates();
 
     /// <summary>
     /// Subscribes to map deletion notifications
     /// </summary>
-    ChannelReader<int> SubscribeToMapDeletes();
+    IChannelSubscription<int> SubscribeToMapDeletes();
 
     /// <summary>
     /// Subscribes to map revision notifications (for cache busting)
     /// </summary>
-    ChannelReader<MapRevisionDto> SubscribeToMapRevisions();
+    IChannelSubscription<MapRevisionDto> SubscribeToMapRevisions();
 
     /// <summary>
     /// Notifies all subscribers of a tile update
@@ -59,17 +64,17 @@ public interface IUpdateNotificationService
     /// <summary>
     /// Subscribes to custom marker creation notifications
     /// </summary>
-    ChannelReader<CustomMarkerEventDto> SubscribeToCustomMarkerCreated();
+    IChannelSubscription<CustomMarkerEventDto> SubscribeToCustomMarkerCreated();
 
     /// <summary>
     /// Subscribes to custom marker update notifications
     /// </summary>
-    ChannelReader<CustomMarkerEventDto> SubscribeToCustomMarkerUpdated();
+    IChannelSubscription<CustomMarkerEventDto> SubscribeToCustomMarkerUpdated();
 
     /// <summary>
     /// Subscribes to custom marker deletion notifications
     /// </summary>
-    ChannelReader<CustomMarkerDeleteEventDto> SubscribeToCustomMarkerDeleted();
+    IChannelSubscription<CustomMarkerDeleteEventDto> SubscribeToCustomMarkerDeleted();
 
     /// <summary>
     /// Notifies all subscribers of a custom marker creation
@@ -89,7 +94,7 @@ public interface IUpdateNotificationService
     /// <summary>
     /// Subscribes to character delta notifications (incremental updates)
     /// </summary>
-    ChannelReader<CharacterDeltaDto> SubscribeToCharacterDelta();
+    IChannelSubscription<CharacterDeltaDto> SubscribeToCharacterDelta();
 
     /// <summary>
     /// Notifies all subscribers of character deltas (incremental changes)
@@ -99,12 +104,12 @@ public interface IUpdateNotificationService
     /// <summary>
     /// Subscribes to ping creation notifications
     /// </summary>
-    ChannelReader<PingEventDto> SubscribeToPingCreated();
+    IChannelSubscription<PingEventDto> SubscribeToPingCreated();
 
     /// <summary>
     /// Subscribes to ping deletion notifications
     /// </summary>
-    ChannelReader<PingDeleteEventDto> SubscribeToPingDeleted();
+    IChannelSubscription<PingDeleteEventDto> SubscribeToPingDeleted();
 
     /// <summary>
     /// Notifies all subscribers of a ping creation
@@ -119,17 +124,17 @@ public interface IUpdateNotificationService
     /// <summary>
     /// Subscribes to road creation notifications
     /// </summary>
-    ChannelReader<RoadEventDto> SubscribeToRoadCreated();
+    IChannelSubscription<RoadEventDto> SubscribeToRoadCreated();
 
     /// <summary>
     /// Subscribes to road update notifications
     /// </summary>
-    ChannelReader<RoadEventDto> SubscribeToRoadUpdated();
+    IChannelSubscription<RoadEventDto> SubscribeToRoadUpdated();
 
     /// <summary>
     /// Subscribes to road deletion notifications
     /// </summary>
-    ChannelReader<RoadDeleteEventDto> SubscribeToRoadDeleted();
+    IChannelSubscription<RoadDeleteEventDto> SubscribeToRoadDeleted();
 
     /// <summary>
     /// Notifies all subscribers of a road creation
@@ -149,7 +154,7 @@ public interface IUpdateNotificationService
     /// <summary>
     /// Subscribes to overlay update notifications
     /// </summary>
-    ChannelReader<OverlayEventDto> SubscribeToOverlayUpdated();
+    IChannelSubscription<OverlayEventDto> SubscribeToOverlayUpdated();
 
     /// <summary>
     /// Notifies all subscribers of an overlay update
@@ -159,22 +164,22 @@ public interface IUpdateNotificationService
     /// <summary>
     /// Subscribes to notification creation events
     /// </summary>
-    ChannelReader<NotificationEventDto> SubscribeToNotificationCreated();
+    IChannelSubscription<NotificationEventDto> SubscribeToNotificationCreated();
 
     /// <summary>
     /// Subscribes to notification in-place update events (e.g. a coalesced digest changed)
     /// </summary>
-    ChannelReader<NotificationEventDto> SubscribeToNotificationUpdated();
+    IChannelSubscription<NotificationEventDto> SubscribeToNotificationUpdated();
 
     /// <summary>
     /// Subscribes to notification read events
     /// </summary>
-    ChannelReader<int> SubscribeToNotificationRead();
+    IChannelSubscription<int> SubscribeToNotificationRead();
 
     /// <summary>
     /// Subscribes to notification dismiss events
     /// </summary>
-    ChannelReader<int> SubscribeToNotificationDismissed();
+    IChannelSubscription<int> SubscribeToNotificationDismissed();
 
     /// <summary>
     /// Notifies all subscribers of a notification creation
@@ -199,22 +204,22 @@ public interface IUpdateNotificationService
     /// <summary>
     /// Subscribes to timer creation events
     /// </summary>
-    ChannelReader<TimerEventDto> SubscribeToTimerCreated();
+    IChannelSubscription<TimerEventDto> SubscribeToTimerCreated();
 
     /// <summary>
     /// Subscribes to timer update events
     /// </summary>
-    ChannelReader<TimerEventDto> SubscribeToTimerUpdated();
+    IChannelSubscription<TimerEventDto> SubscribeToTimerUpdated();
 
     /// <summary>
     /// Subscribes to timer completion events
     /// </summary>
-    ChannelReader<TimerEventDto> SubscribeToTimerCompleted();
+    IChannelSubscription<TimerEventDto> SubscribeToTimerCompleted();
 
     /// <summary>
     /// Subscribes to timer deletion events
     /// </summary>
-    ChannelReader<int> SubscribeToTimerDeleted();
+    IChannelSubscription<int> SubscribeToTimerDeleted();
 
     /// <summary>
     /// Notifies all subscribers of a timer creation
@@ -239,17 +244,17 @@ public interface IUpdateNotificationService
     /// <summary>
     /// Subscribes to game marker creation notifications
     /// </summary>
-    ChannelReader<MarkerEventDto> SubscribeToMarkerCreated();
+    IChannelSubscription<MarkerEventDto> SubscribeToMarkerCreated();
 
     /// <summary>
     /// Subscribes to game marker update notifications
     /// </summary>
-    ChannelReader<MarkerEventDto> SubscribeToMarkerUpdated();
+    IChannelSubscription<MarkerEventDto> SubscribeToMarkerUpdated();
 
     /// <summary>
     /// Subscribes to game marker deletion notifications
     /// </summary>
-    ChannelReader<MarkerDeleteEventDto> SubscribeToMarkerDeleted();
+    IChannelSubscription<MarkerDeleteEventDto> SubscribeToMarkerDeleted();
 
     /// <summary>
     /// Notifies all subscribers of a game marker creation

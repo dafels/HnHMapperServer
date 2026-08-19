@@ -67,8 +67,8 @@ public class CookbookNotificationServiceTests : IDisposable
     [Fact]
     public async Task FirstBurst_CreatesDigest_WithActionDataAndCreatedEvent()
     {
-        var created = _updateSvc.SubscribeToNotificationCreated();
-        var updated = _updateSvc.SubscribeToNotificationUpdated();
+        var created = _updateSvc.SubscribeToNotificationCreated().Reader;
+        var updated = _updateSvc.SubscribeToNotificationUpdated().Reader;
 
         await _service.NotifyNewFoodsAsync(
             TenantA, "user-1",
@@ -115,8 +115,8 @@ public class CookbookNotificationServiceTests : IDisposable
     [Fact]
     public async Task SecondBurstWithinWindow_MergesInPlace_AndBroadcastsUpdated()
     {
-        var created = _updateSvc.SubscribeToNotificationCreated();
-        var updated = _updateSvc.SubscribeToNotificationUpdated();
+        var created = _updateSvc.SubscribeToNotificationCreated().Reader;
+        var updated = _updateSvc.SubscribeToNotificationUpdated().Reader;
 
         await _service.NotifyNewFoodsAsync(TenantA, "user-1", new[] { Food(1, "Stew", W162) }, 1);
         var firstCreatedAt = (await AllRowsAsync(TenantA)).Single().CreatedAt;

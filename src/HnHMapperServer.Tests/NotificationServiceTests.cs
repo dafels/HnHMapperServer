@@ -61,7 +61,7 @@ public class NotificationServiceTests : IDisposable
     [Fact]
     public async Task CreateAsync_BroadcastsCreatedEvent()
     {
-        var created = _updateSvc.SubscribeToNotificationCreated();
+        var created = _updateSvc.SubscribeToNotificationCreated().Reader;
 
         var dto = await _service.CreateAsync(new CreateNotificationDto
         {

@@ -81,10 +81,17 @@ public static class NotificationEndpoints
             minResponseDataRateFeature.MinDataRate = null;
         }
 
-        var created = updateNotificationService.SubscribeToNotificationCreated();
-        var updated = updateNotificationService.SubscribeToNotificationUpdated();
-        var read = updateNotificationService.SubscribeToNotificationRead();
-        var dismissed = updateNotificationService.SubscribeToNotificationDismissed();
+        // `using var` is load-bearing: disposal is the only unsubscribe — an
+        // undisposed subscription buffers events forever (see /map/updates).
+        using var createdSub = updateNotificationService.SubscribeToNotificationCreated();
+        using var updatedSub = updateNotificationService.SubscribeToNotificationUpdated();
+        using var readSub = updateNotificationService.SubscribeToNotificationRead();
+        using var dismissedSub = updateNotificationService.SubscribeToNotificationDismissed();
+
+        var created = createdSub.Reader;
+        var updated = updatedSub.Reader;
+        var read = readSub.Reader;
+        var dismissed = dismissedSub.Reader;
 
         try
         {

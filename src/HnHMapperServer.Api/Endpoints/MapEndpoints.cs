@@ -613,33 +613,62 @@ public static class MapEndpoints
             logger.LogWarning("SSE: User lacks Pointer auth, not sending character snapshot");
         }
 
-        // Subscribe to updates
-        var tileUpdates = updateNotificationService.SubscribeToTileUpdates();
-        var mergeUpdates = updateNotificationService.SubscribeToMergeUpdates();
-        var mapUpdates = updateNotificationService.SubscribeToMapUpdates();
-        var mapDeletes = updateNotificationService.SubscribeToMapDeletes();
-        var mapRevisions = updateNotificationService.SubscribeToMapRevisions();
-        var customMarkerCreated = updateNotificationService.SubscribeToCustomMarkerCreated();
-        var customMarkerUpdated = updateNotificationService.SubscribeToCustomMarkerUpdated();
-        var customMarkerDeleted = updateNotificationService.SubscribeToCustomMarkerDeleted();
-        var pingCreated = updateNotificationService.SubscribeToPingCreated();
-        var pingDeleted = updateNotificationService.SubscribeToPingDeleted();
-        var roadCreated = updateNotificationService.SubscribeToRoadCreated();
-        var roadUpdated = updateNotificationService.SubscribeToRoadUpdated();
-        var roadDeleted = updateNotificationService.SubscribeToRoadDeleted();
-        var overlayUpdated = updateNotificationService.SubscribeToOverlayUpdated();
-        var notificationCreated = updateNotificationService.SubscribeToNotificationCreated();
-        var notificationUpdated = updateNotificationService.SubscribeToNotificationUpdated();
-        var notificationRead = updateNotificationService.SubscribeToNotificationRead();
-        var notificationDismissed = updateNotificationService.SubscribeToNotificationDismissed();
-        var timerCreated = updateNotificationService.SubscribeToTimerCreated();
-        var timerUpdated = updateNotificationService.SubscribeToTimerUpdated();
-        var timerCompleted = updateNotificationService.SubscribeToTimerCompleted();
-        var timerDeleted = updateNotificationService.SubscribeToTimerDeleted();
-        var markerCreated = updateNotificationService.SubscribeToMarkerCreated();
-        var markerUpdated = updateNotificationService.SubscribeToMarkerUpdated();
-        var markerDeleted = updateNotificationService.SubscribeToMarkerDeleted();
-        var characterDeltas = hasPointerAuth ? updateNotificationService.SubscribeToCharacterDelta() : null;
+        // Subscribe to updates. `using var` is load-bearing: disposal is the only
+        // thing that unregisters a subscription — an undisposed one stays in the
+        // service forever, buffering every future event after this connection dies.
+        using var tileUpdatesSub = updateNotificationService.SubscribeToTileUpdates();
+        using var mergeUpdatesSub = updateNotificationService.SubscribeToMergeUpdates();
+        using var mapUpdatesSub = updateNotificationService.SubscribeToMapUpdates();
+        using var mapDeletesSub = updateNotificationService.SubscribeToMapDeletes();
+        using var mapRevisionsSub = updateNotificationService.SubscribeToMapRevisions();
+        using var customMarkerCreatedSub = updateNotificationService.SubscribeToCustomMarkerCreated();
+        using var customMarkerUpdatedSub = updateNotificationService.SubscribeToCustomMarkerUpdated();
+        using var customMarkerDeletedSub = updateNotificationService.SubscribeToCustomMarkerDeleted();
+        using var pingCreatedSub = updateNotificationService.SubscribeToPingCreated();
+        using var pingDeletedSub = updateNotificationService.SubscribeToPingDeleted();
+        using var roadCreatedSub = updateNotificationService.SubscribeToRoadCreated();
+        using var roadUpdatedSub = updateNotificationService.SubscribeToRoadUpdated();
+        using var roadDeletedSub = updateNotificationService.SubscribeToRoadDeleted();
+        using var overlayUpdatedSub = updateNotificationService.SubscribeToOverlayUpdated();
+        using var notificationCreatedSub = updateNotificationService.SubscribeToNotificationCreated();
+        using var notificationUpdatedSub = updateNotificationService.SubscribeToNotificationUpdated();
+        using var notificationReadSub = updateNotificationService.SubscribeToNotificationRead();
+        using var notificationDismissedSub = updateNotificationService.SubscribeToNotificationDismissed();
+        using var timerCreatedSub = updateNotificationService.SubscribeToTimerCreated();
+        using var timerUpdatedSub = updateNotificationService.SubscribeToTimerUpdated();
+        using var timerCompletedSub = updateNotificationService.SubscribeToTimerCompleted();
+        using var timerDeletedSub = updateNotificationService.SubscribeToTimerDeleted();
+        using var markerCreatedSub = updateNotificationService.SubscribeToMarkerCreated();
+        using var markerUpdatedSub = updateNotificationService.SubscribeToMarkerUpdated();
+        using var markerDeletedSub = updateNotificationService.SubscribeToMarkerDeleted();
+        using var characterDeltasSub = hasPointerAuth ? updateNotificationService.SubscribeToCharacterDelta() : null;
+
+        var tileUpdates = tileUpdatesSub.Reader;
+        var mergeUpdates = mergeUpdatesSub.Reader;
+        var mapUpdates = mapUpdatesSub.Reader;
+        var mapDeletes = mapDeletesSub.Reader;
+        var mapRevisions = mapRevisionsSub.Reader;
+        var customMarkerCreated = customMarkerCreatedSub.Reader;
+        var customMarkerUpdated = customMarkerUpdatedSub.Reader;
+        var customMarkerDeleted = customMarkerDeletedSub.Reader;
+        var pingCreated = pingCreatedSub.Reader;
+        var pingDeleted = pingDeletedSub.Reader;
+        var roadCreated = roadCreatedSub.Reader;
+        var roadUpdated = roadUpdatedSub.Reader;
+        var roadDeleted = roadDeletedSub.Reader;
+        var overlayUpdated = overlayUpdatedSub.Reader;
+        var notificationCreated = notificationCreatedSub.Reader;
+        var notificationUpdated = notificationUpdatedSub.Reader;
+        var notificationRead = notificationReadSub.Reader;
+        var notificationDismissed = notificationDismissedSub.Reader;
+        var timerCreated = timerCreatedSub.Reader;
+        var timerUpdated = timerUpdatedSub.Reader;
+        var timerCompleted = timerCompletedSub.Reader;
+        var timerDeleted = timerDeletedSub.Reader;
+        var markerCreated = markerCreatedSub.Reader;
+        var markerUpdated = markerUpdatedSub.Reader;
+        var markerDeleted = markerDeletedSub.Reader;
+        var characterDeltas = characterDeltasSub?.Reader;
 
         var tileBatch = new List<TileCacheDto>();
         // Character delta coalescing: accumulate latest state per character ID for 500ms batching

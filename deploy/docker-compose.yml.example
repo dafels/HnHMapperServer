@@ -49,6 +49,12 @@ services:
     
     container_name: hnhm-api
     logging: *default-logging
+
+    # Hard memory cap. .NET reads the cgroup limit and keeps its GC heap under
+    # ~75% of it; if memory ever runs away again the kernel kills just this
+    # container (the restart policy brings it back) instead of starving the
+    # whole VPS — the host has no swap.
+    mem_limit: 3g
     
     # Restart policy: always restart unless manually stopped
     restart: unless-stopped
@@ -124,6 +130,11 @@ services:
     
     container_name: hnhm-web
     logging: *default-logging
+
+    # Hard memory cap (same rationale as the api service). Baseline is ~1.2GB:
+    # PublicTileCacheService preloads every public-map tile PNG into memory at
+    # startup (the exact MB is logged on boot) + Blazor Server circuit state.
+    mem_limit: 3g
     
     # Restart policy: always restart unless manually stopped
     restart: unless-stopped
