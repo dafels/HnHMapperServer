@@ -224,10 +224,13 @@ public class MapIntegrityService : IMapIntegrityService
                     MapId = map.Id,
                     MapName = map.Name
                 };
-                var zoom0Files = new HashSet<(int X, int Y)>();
+
+                // File mtimes per zoom level — needed for the derivation check below.
+                var fileTimes = new Dictionary<(int X, int Y), DateTime>[7];
 
                 for (int z = 0; z <= 6; z++)
                 {
+                    fileTimes[z] = new Dictionary<(int X, int Y), DateTime>();
                     var zoomDir = Path.Combine(largeDir, z.ToString());
                     if (!Directory.Exists(zoomDir))
                         continue;
@@ -238,8 +241,7 @@ public class MapIntegrityService : IMapIntegrityService
                             continue;
 
                         drift.FilesChecked++;
-                        if (z == 0)
-                            zoom0Files.Add((x, y));
+                        fileTimes[z][(x, y)] = file.LastWriteTimeUtc;
 
                         if (!levels[z].TryGetValue((x, y), out var newestData))
                         {
@@ -252,10 +254,19 @@ public class MapIntegrityService : IMapIntegrityService
                             drift.StaleFiles++;
                             AddDriftSample(drift, z, x, y, "stale");
                         }
+                        else if (z > 0 && IsStaleByDerivation(fileTimes[z - 1], x, y, file.LastWriteTimeUtc))
+                        {
+                            // Derivation rule: a parent composed BEFORE one of its children changed
+                            // cannot reflect that child — even when its mtime beats the raw data
+                            // (pre-fix chain regens baked ghost content from stale siblings into
+                            // parents with fresh mtimes; only the child comparison exposes them).
+                            drift.StaleFiles++;
+                            AddDriftSample(drift, z, x, y, "stale (older than child)");
+                        }
                     }
                 }
 
-                drift.MissingZoom0Cells = levels[0].Keys.Count(c => !zoom0Files.Contains(c));
+                drift.MissingZoom0Cells = levels[0].Keys.Count(c => !fileTimes[0].ContainsKey(c));
 
                 if (drift.GhostFiles > 0 || drift.StaleFiles > 0)
                 {
@@ -267,6 +278,27 @@ public class MapIntegrityService : IMapIntegrityService
         report.WebpDrift = report.WebpDrift
             .OrderByDescending(d => d.GhostFiles + d.StaleFiles)
             .ToList();
+    }
+
+    /// <summary>
+    /// True when any of the four child files at zoom-1 coords (2x+dx, 2y+dy) was written after
+    /// the parent (beyond slack) — the parent's composite predates its own inputs.
+    /// </summary>
+    private static bool IsStaleByDerivation(
+        Dictionary<(int X, int Y), DateTime> childTimes, int x, int y, DateTime parentMtimeUtc)
+    {
+        for (int dx = 0; dx <= 1; dx++)
+        {
+            for (int dy = 0; dy <= 1; dy++)
+            {
+                if (childTimes.TryGetValue((x * 2 + dx, y * 2 + dy), out var childMtime)
+                    && parentMtimeUtc + StaleSlack < childMtime)
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static void AddDriftSample(WebpPyramidDriftDto drift, int zoom, int x, int y, string kind)

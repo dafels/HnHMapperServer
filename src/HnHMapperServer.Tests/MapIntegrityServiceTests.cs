@@ -359,6 +359,27 @@ public class MapIntegrityServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ScanAsync_WebpDrift_FlagsParentOlderThanChild()
+    {
+        // The laundering case: a parent regenerated during the broken era has ghost content baked
+        // in from stale siblings but a plausible mtime — only comparing against its own child
+        // files exposes it. Data here is old (Cache=1), so the raw data check stays silent.
+        SeedMap(700, TenantA, "Launderer");
+        SeedTileRow(TenantA, 700, 0, 0, 0, $"tenants/{TenantA}/grids/e.png");
+
+        WriteWebp(700, 0, 0, 0);                                  // child: fresh
+        WriteWebp(700, 1, 0, 0, DateTime.UtcNow.AddHours(-2));    // parent: older than its child
+
+        var report = await _service.ScanAsync();
+
+        var drift = Assert.Single(report.WebpDrift);
+        Assert.Equal(700, drift.MapId);
+        Assert.Equal(0, drift.GhostFiles);
+        Assert.Equal(1, drift.StaleFiles);
+        Assert.Contains(drift.SampleDriftTiles, s => s.Contains("older than child"));
+    }
+
+    [Fact]
     public async Task PurgeOrphanedMapData_KeepsDeadDirectoryReferencedByLiveRows()
     {
         // Public-map imports write zoom-0 tiles into per-map dirs; a merge copies the rows (File
