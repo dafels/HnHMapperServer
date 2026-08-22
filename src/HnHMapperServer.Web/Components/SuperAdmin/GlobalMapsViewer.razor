@@ -108,6 +108,13 @@
                                               Size="Size.Small"
                                               Href="@($"/superadmin/map/{context.TenantId}")" />
                             </MudTooltip>
+                            <MudTooltip Text="Rebuild WebP tiles (repairs stale/ghost zoom imagery)">
+                                <MudIconButton Icon="@Icons.Material.Filled.AutoFixHigh"
+                                              Color="Color.Warning"
+                                              Size="Size.Small"
+                                              Disabled="@(_rebuildingMapId == context.Id)"
+                                              OnClick="@(() => RebuildWebpTiles(context))" />
+                            </MudTooltip>
                             <MudTooltip Text="Delete map">
                                 <MudIconButton Icon="@Icons.Material.Filled.Delete"
                                               Color="Color.Error"
@@ -225,6 +232,60 @@
         public int TotalCount { get; set; }
         public int TotalPages { get; set; }
         public List<GlobalMapDto> Maps { get; set; } = new();
+    }
+
+    private int? _rebuildingMapId;
+
+    private async Task RebuildWebpTiles(GlobalMapDto map)
+    {
+        var confirmed = await DialogService.ShowMessageBox(
+            "Rebuild WebP tiles",
+            $"Rebuild the viewer tile pyramid of map '{map.Name}' (ID: {map.Id}, tenant '{map.TenantName}')? " +
+            "All its WebP zoom tiles are deleted and regenerated from the current map data. " +
+            "This repairs stale or ghost imagery; areas whose underlying data no longer exists will " +
+            "show as unexplored at every zoom level until players re-map them. " +
+            "The map stays viewable during the rebuild.",
+            yesText: "Rebuild",
+            cancelText: "Cancel");
+
+        if (confirmed != true)
+            return;
+
+        _rebuildingMapId = map.Id;
+        try
+        {
+            // APIUpload client: deleting + reseeding a big pyramid can exceed the default API
+            // client's 10s resilience timeout, which would cancel and retry the operation.
+            var httpClient = HttpClientFactory.CreateClient("APIUpload");
+            var response = await httpClient.PostAsJsonAsync(
+                $"/api/superadmin/tenants/{map.TenantId}/maps/{map.Id}/rebuild-webp-tiles",
+                new { confirmMapId = map.Id });
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<RebuildWebpTilesResultDto>();
+                Snackbar.Add(
+                    $"WebP rebuild started for '{map.Name}': {result?.FilesDeleted ?? 0} old tiles removed " +
+                    $"({result?.MegabytesFreed ?? 0:F1} MB), {result?.CellsMarked ?? 0} cells queued for regeneration.",
+                    Severity.Success);
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to rebuild WebP tiles for map {MapId}: {StatusCode}, Body={Body}",
+                    map.Id, response.StatusCode, errorBody);
+                Snackbar.Add("Failed to rebuild WebP tiles. Please try again.", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error rebuilding WebP tiles for map {MapId}", map.Id);
+            Snackbar.Add("Failed to rebuild WebP tiles. Please try again.", Severity.Error);
+        }
+        finally
+        {
+            _rebuildingMapId = null;
+        }
     }
 
     private async Task DeleteMap(GlobalMapDto map)
