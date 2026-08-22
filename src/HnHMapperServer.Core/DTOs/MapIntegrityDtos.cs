@@ -16,7 +16,68 @@ public class MapIntegrityReportDto
     /// <summary>Legacy grid rows with the placeholder id "0" (guards prevent new ones).</summary>
     public List<PlaceholderGridRowDto> PlaceholderRows { get; set; } = new();
 
-    public bool IsClean => ContestedMaps.Count == 0 && PlaceholderRows.Count == 0;
+    /// <summary>Per tenant: storage left behind by deleted maps (merge/delete leftovers).</summary>
+    public List<TenantOrphanStorageDto> OrphanStorage { get; set; } = new();
+
+    public bool IsClean => ContestedMaps.Count == 0 && PlaceholderRows.Count == 0 && OrphanStorage.Count == 0;
+}
+
+/// <summary>
+/// Orphaned map storage of one tenant: tile rows whose map no longer exists, per-map tile
+/// directories (legacy zoom pyramid + WebP pyramid) of dead map ids, and grid PNGs in the shared
+/// pool referenced by no tile row and no grid. All of it is invisible to viewers but counts
+/// against the tenant's storage quota. Feeds the purge-orphans repair action.
+/// </summary>
+public class TenantOrphanStorageDto
+{
+    public string TenantId { get; set; } = string.Empty;
+    public string TenantName { get; set; } = string.Empty;
+
+    /// <summary>Dead map ids that still have tile rows and/or directories on disk.</summary>
+    public List<int> DeadMapIds { get; set; } = new();
+
+    /// <summary>Tile rows (all zoom levels) on dead map ids. DB bloat, no disk cost.</summary>
+    public int OrphanedTileRows { get; set; }
+
+    /// <summary>Dead-map tile directories found on disk (legacy + WebP trees).</summary>
+    public int DeadMapDirectories { get; set; }
+    public long DeadMapDirectoryBytes { get; set; }
+
+    /// <summary>Pool PNGs in grids/ referenced by no tile row and no grid row.</summary>
+    public int UnreferencedGridFiles { get; set; }
+    public long UnreferencedGridFileBytes { get; set; }
+
+    public double ReclaimableMB =>
+        Math.Round((DeadMapDirectoryBytes + UnreferencedGridFileBytes) / 1024.0 / 1024.0, 1);
+}
+
+/// <summary>
+/// Request body for purging a tenant's orphaned map storage. <see cref="ConfirmTenantId"/> must
+/// echo the route tenant id — the same deliberate speed bump the other destructive tools use.
+/// </summary>
+public class PurgeOrphanedMapDataRequestDto
+{
+    public string ConfirmTenantId { get; set; } = string.Empty;
+}
+
+/// <summary>What an orphan purge actually removed. Only provably-dead data is ever touched.</summary>
+public class OrphanPurgeResultDto
+{
+    public string TenantId { get; set; } = string.Empty;
+
+    public int TileRowsDeleted { get; set; }
+    public int DirectoriesDeleted { get; set; }
+    public long DirectoryBytesFreed { get; set; }
+    public int GridFilesDeleted { get; set; }
+    public long GridFileBytesFreed { get; set; }
+
+    public double MegabytesFreed =>
+        Math.Round((DirectoryBytesFreed + GridFileBytesFreed) / 1024.0 / 1024.0, 1);
+
+    /// <summary>Tenant storage usage after the post-purge recalculation.</summary>
+    public double StorageAfterMB { get; set; }
+
+    public List<string> Warnings { get; set; } = new();
 }
 
 /// <summary>

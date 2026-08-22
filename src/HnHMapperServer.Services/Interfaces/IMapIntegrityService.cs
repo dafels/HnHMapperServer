@@ -10,4 +10,12 @@ namespace HnHMapperServer.Services.Interfaces;
 public interface IMapIntegrityService
 {
     Task<MapIntegrityReportDto> ScanAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Deletes one tenant's orphaned map storage: tile rows on dead map ids, dead-map tile
+    /// directories (legacy + WebP trees), and pool PNGs referenced by nothing, then recalculates
+    /// the tenant's storage usage. Only provably-dead data is touched — anything a live row or
+    /// grid still references is kept.
+    /// </summary>
+    Task<OrphanPurgeResultDto> PurgeOrphanedMapDataAsync(string tenantId, CancellationToken ct = default);
 }

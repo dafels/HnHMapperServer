@@ -2,26 +2,50 @@ using HnHMapperServer.Core.DTOs;
 using HnHMapperServer.Infrastructure.Data;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace HnHMapperServer.Services.Services;
 
 /// <summary>
-/// Read-only cross-tenant integrity scan. Every query uses IgnoreQueryFilters() — this runs in a
-/// superadmin request whose ambient tenant context is a different tenant (or none), the same
+/// Cross-tenant integrity scan + orphan purge. Every query uses IgnoreQueryFilters() — this runs
+/// in a superadmin request whose ambient tenant context is a different tenant (or none), the same
 /// rationale as TenantDataPurgeService / MapRegionWipeService.
+///
+/// The orphan model: merges and map deletions historically left behind (1) tile rows whose map id
+/// no longer exists, (2) the dead maps' per-map tile directories (legacy zoom pyramid at
+/// tenants/{t}/{mapId}/ and WebP pyramid at tenants/{t}/large/{mapId}/), and (3) pool PNGs in
+/// tenants/{t}/grids/ that nothing references anymore. None of it is viewer-visible, all of it
+/// counts against the tenant's storage quota.
+///
+/// Safety rule for deletion: only provably-dead data. A dead map's directory can still contain
+/// files referenced by LIVE rows (public-map imports write zoom-0 tiles into per-map dirs and a
+/// later merge copies the rows, File path unchanged, to the target map) — such directories are
+/// kept and reported. Pool PNGs are kept if any tile row references them or a grid row with that
+/// id exists (an upload can write the PNG before its tile row commits).
 /// </summary>
 public class MapIntegrityService : IMapIntegrityService
 {
     /// <summary>Contested cells listed per map before the UI has to rely on the counts alone.</summary>
     public const int SampleCellCap = 12;
 
+    // SQLite parameter-count safety for Contains() chunks.
+    private const int ChunkSize = 500;
+
     private readonly ApplicationDbContext _db;
+    private readonly IStorageQuotaService _quotaService;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<MapIntegrityService> _logger;
 
-    public MapIntegrityService(ApplicationDbContext db, ILogger<MapIntegrityService> logger)
+    public MapIntegrityService(
+        ApplicationDbContext db,
+        IStorageQuotaService quotaService,
+        IConfiguration configuration,
+        ILogger<MapIntegrityService> logger)
     {
         _db = db;
+        _quotaService = quotaService;
+        _configuration = configuration;
         _logger = logger;
     }
 
@@ -112,10 +136,311 @@ public class MapIntegrityService : IMapIntegrityService
             })
             .ToList();
 
+        await ScanOrphanStorageAsync(report, ct);
+
         _logger.LogInformation(
-            "Map integrity scan: {Tenants} tenants, {Grids} grids, {ContestedMaps} maps with contested cells, {Placeholders} placeholder rows",
-            report.TenantsScanned, report.TotalGrids, report.ContestedMaps.Count, report.PlaceholderRows.Count);
+            "Map integrity scan: {Tenants} tenants, {Grids} grids, {ContestedMaps} maps with contested cells, " +
+            "{Placeholders} placeholder rows, {OrphanTenants} tenants with orphaned storage",
+            report.TenantsScanned, report.TotalGrids, report.ContestedMaps.Count,
+            report.PlaceholderRows.Count, report.OrphanStorage.Count);
 
         return report;
+    }
+
+    /// <summary>
+    /// Per tenant: dead-map tile rows, dead-map directories on disk, and unreferenced pool PNGs.
+    /// Uses the same live-reference guards as the purge, so the report shows exactly what a purge
+    /// would remove.
+    /// </summary>
+    private async Task ScanOrphanStorageAsync(MapIntegrityReportDto report, CancellationToken ct)
+    {
+        var gridStorage = _configuration["GridStorage"] ?? "map";
+
+        var tenants = await _db.Tenants.IgnoreQueryFilters()
+            .Select(t => new { t.Id, t.Name })
+            .ToListAsync(ct);
+
+        var liveMapsByTenant = (await _db.Maps.IgnoreQueryFilters()
+                .Select(m => new { m.TenantId, m.Id })
+                .ToListAsync(ct))
+            .GroupBy(m => m.TenantId)
+            .ToDictionary(g => g.Key, g => g.Select(m => m.Id).ToHashSet());
+
+        var rowCountsByTenantMap = (await _db.Tiles.IgnoreQueryFilters()
+                .GroupBy(t => new { t.TenantId, t.MapId })
+                .Select(g => new { g.Key.TenantId, g.Key.MapId, Rows = g.Count() })
+                .ToListAsync(ct))
+            .GroupBy(r => r.TenantId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        foreach (var tenant in tenants)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var liveIds = liveMapsByTenant.GetValueOrDefault(tenant.Id) ?? new HashSet<int>();
+            var entry = new TenantOrphanStorageDto { TenantId = tenant.Id, TenantName = tenant.Name };
+            var deadIds = new HashSet<int>();
+
+            // 1. Tile rows on dead map ids.
+            foreach (var agg in rowCountsByTenantMap.GetValueOrDefault(tenant.Id) ?? new())
+            {
+                if (!liveIds.Contains(agg.MapId))
+                {
+                    deadIds.Add(agg.MapId);
+                    entry.OrphanedTileRows += agg.Rows;
+                }
+            }
+
+            // 2 + 3 need the tenant's referenced-file sets; load lazily only when the tenant
+            // has anything on disk to check.
+            var tenantDir = Path.Combine(gridStorage, "tenants", tenant.Id);
+            if (Directory.Exists(tenantDir))
+            {
+                var referenced = await LoadReferencedFilesAsync(tenant.Id, liveIds, ct);
+
+                // 2. Dead-map directories (legacy + WebP trees), guarded against live references.
+                foreach (var (dir, mapId) in EnumerateNumericMapDirs(tenantDir))
+                {
+                    if (liveIds.Contains(mapId))
+                        continue;
+
+                    deadIds.Add(mapId);
+                    if (referenced.PathPrefixes.Contains(NormalizePath(Path.Combine("tenants", tenant.Id, mapId.ToString()))))
+                        continue; // live rows reference files inside — purge keeps it too
+
+                    entry.DeadMapDirectories++;
+                    entry.DeadMapDirectoryBytes += DirectorySize(dir);
+                }
+
+                // 3. Unreferenced pool PNGs.
+                var (count, bytes) = ScanUnreferencedPoolFiles(tenantDir, referenced);
+                entry.UnreferencedGridFiles = count;
+                entry.UnreferencedGridFileBytes = bytes;
+            }
+
+            if (entry.OrphanedTileRows > 0 || entry.DeadMapDirectories > 0 || entry.UnreferencedGridFiles > 0)
+            {
+                entry.DeadMapIds = deadIds.OrderBy(id => id).ToList();
+                report.OrphanStorage.Add(entry);
+            }
+        }
+
+        report.OrphanStorage = report.OrphanStorage
+            .OrderByDescending(o => o.DeadMapDirectoryBytes + o.UnreferencedGridFileBytes)
+            .ToList();
+    }
+
+    public async Task<OrphanPurgeResultDto> PurgeOrphanedMapDataAsync(string tenantId, CancellationToken ct = default)
+    {
+        var tenantExists = await _db.Tenants.IgnoreQueryFilters().AnyAsync(t => t.Id == tenantId, ct);
+        if (!tenantExists)
+        {
+            throw new ArgumentException($"Tenant {tenantId} not found");
+        }
+
+        var gridStorage = _configuration["GridStorage"] ?? "map";
+        var result = new OrphanPurgeResultDto { TenantId = tenantId };
+
+        var liveIds = (await _db.Maps.IgnoreQueryFilters()
+                .Where(m => m.TenantId == tenantId)
+                .Select(m => m.Id)
+                .ToListAsync(ct))
+            .ToHashSet();
+
+        // 1. Delete tile rows on dead map ids FIRST — the reference sets below must only see
+        //    rows that survive, so files referenced solely by dead rows become deletable.
+        var deadRowMapIds = (await _db.Tiles.IgnoreQueryFilters()
+                .Where(t => t.TenantId == tenantId)
+                .Select(t => t.MapId)
+                .Distinct()
+                .ToListAsync(ct))
+            .Where(id => !liveIds.Contains(id))
+            .ToList();
+
+        foreach (var chunk in Chunk(deadRowMapIds))
+        {
+            result.TileRowsDeleted += await _db.Tiles.IgnoreQueryFilters()
+                .Where(t => t.TenantId == tenantId && chunk.Contains(t.MapId))
+                .ExecuteDeleteAsync(ct);
+        }
+        _db.ChangeTracker.Clear();
+
+        var tenantDir = Path.Combine(gridStorage, "tenants", tenantId);
+        if (Directory.Exists(tenantDir))
+        {
+            var referenced = await LoadReferencedFilesAsync(tenantId, liveIds, ct);
+
+            // 2. Dead-map directories (legacy + WebP trees).
+            foreach (var (dir, mapId) in EnumerateNumericMapDirs(tenantDir))
+            {
+                if (liveIds.Contains(mapId))
+                    continue;
+
+                if (referenced.PathPrefixes.Contains(NormalizePath(Path.Combine("tenants", tenantId, mapId.ToString()))))
+                {
+                    result.Warnings.Add(
+                        $"Kept directory of dead map {mapId}: live tile rows still reference files inside it");
+                    continue;
+                }
+
+                try
+                {
+                    var size = DirectorySize(dir);
+                    Directory.Delete(dir, recursive: true);
+                    result.DirectoriesDeleted++;
+                    result.DirectoryBytesFreed += size;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to delete dead map directory {Dir}", dir);
+                    result.Warnings.Add($"Could not delete '{dir}': {ex.Message}");
+                }
+            }
+
+            // 3. Unreferenced pool PNGs.
+            var gridsDir = Path.Combine(tenantDir, "grids");
+            if (Directory.Exists(gridsDir))
+            {
+                foreach (var file in Directory.EnumerateFiles(gridsDir, "*.png"))
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    var stem = Path.GetFileNameWithoutExtension(file);
+                    if (referenced.GridStems.Contains(stem))
+                        continue;
+
+                    try
+                    {
+                        var size = new FileInfo(file).Length;
+                        File.Delete(file);
+                        result.GridFilesDeleted++;
+                        result.GridFileBytesFreed += size;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to delete unreferenced pool PNG {File}", file);
+                        result.Warnings.Add($"Could not delete '{Path.GetFileName(file)}': {ex.Message}");
+                    }
+                }
+            }
+        }
+
+        result.StorageAfterMB = await _quotaService.RecalculateStorageUsageAsync(tenantId, gridStorage);
+
+        _logger.LogWarning(
+            "Purged orphaned map data for tenant {TenantId}: {Rows} tile rows, {Dirs} directories " +
+            "({DirMB:F1} MB), {Files} pool PNGs ({FileMB:F1} MB); storage now {AfterMB:F1} MB",
+            tenantId, result.TileRowsDeleted, result.DirectoriesDeleted,
+            result.DirectoryBytesFreed / 1024.0 / 1024.0,
+            result.GridFilesDeleted, result.GridFileBytesFreed / 1024.0 / 1024.0,
+            result.StorageAfterMB);
+
+        return result;
+    }
+
+    /// <summary>
+    /// Everything a tenant's LIVE rows and grids still claim:
+    /// - GridStems: PNG stems referenced by a live-map tile row's File under grids/ or owned by a grid row.
+    /// - PathPrefixes: normalized "tenants/{t}/{mapId}" prefixes of every live-referenced File — detects
+    ///   live references into per-map directories (public-import zoom-0 tiles survive merges there).
+    /// Only rows on LIVE map ids count: a dead map's own rows must never protect its files, or the
+    /// scan would report nothing deletable while the purge (which drops dead rows first) deletes it.
+    /// </summary>
+    private async Task<(HashSet<string> GridStems, HashSet<string> PathPrefixes)> LoadReferencedFilesAsync(
+        string tenantId, HashSet<int> liveMapIds, CancellationToken ct)
+    {
+        var liveIdList = liveMapIds.ToList();
+        var files = await _db.Tiles.IgnoreQueryFilters()
+            .Where(t => t.TenantId == tenantId && t.File != "" && liveIdList.Contains(t.MapId))
+            .Select(t => t.File)
+            .Distinct()
+            .ToListAsync(ct);
+
+        var gridStems = new HashSet<string>(StringComparer.Ordinal);
+        var pathPrefixes = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var file in files)
+        {
+            var normalized = NormalizePath(file);
+            var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+            if (normalized.Contains("/grids/"))
+            {
+                var name = segments[^1];
+                gridStems.Add(name.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name);
+            }
+            else if (segments.Length >= 3 && segments[0] == "tenants")
+            {
+                // tenants/{tenantId}/{mapId}/... — remember the per-map prefix.
+                pathPrefixes.Add($"tenants/{segments[1]}/{segments[2]}");
+            }
+        }
+
+        // A grid row can exist whose PNG landed on disk before its tile row committed.
+        var gridIds = await _db.Grids.IgnoreQueryFilters()
+            .Where(g => g.TenantId == tenantId)
+            .Select(g => g.Id)
+            .ToListAsync(ct);
+        gridStems.UnionWith(gridIds);
+
+        return (gridStems, pathPrefixes);
+    }
+
+    /// <summary>Numeric per-map dirs of a tenant: tenants/{t}/{mapId} and tenants/{t}/large/{mapId}.</summary>
+    private static IEnumerable<(string Dir, int MapId)> EnumerateNumericMapDirs(string tenantDir)
+    {
+        foreach (var root in new[] { tenantDir, Path.Combine(tenantDir, "large") })
+        {
+            if (!Directory.Exists(root))
+                continue;
+
+            foreach (var dir in Directory.EnumerateDirectories(root))
+            {
+                if (int.TryParse(Path.GetFileName(dir), out var mapId))
+                {
+                    yield return (dir, mapId);
+                }
+            }
+        }
+    }
+
+    private static (int Count, long Bytes) ScanUnreferencedPoolFiles(
+        string tenantDir, (HashSet<string> GridStems, HashSet<string> PathPrefixes) referenced)
+    {
+        var gridsDir = Path.Combine(tenantDir, "grids");
+        if (!Directory.Exists(gridsDir))
+            return (0, 0);
+
+        var count = 0;
+        long bytes = 0;
+        foreach (var file in Directory.EnumerateFiles(gridsDir, "*.png"))
+        {
+            if (referenced.GridStems.Contains(Path.GetFileNameWithoutExtension(file)))
+                continue;
+
+            count++;
+            try { bytes += new FileInfo(file).Length; } catch { }
+        }
+        return (count, bytes);
+    }
+
+    private static long DirectorySize(string dir)
+    {
+        long size = 0;
+        foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+        {
+            try { size += new FileInfo(file).Length; } catch { }
+        }
+        return size;
+    }
+
+    private static string NormalizePath(string path) => path.Replace('\\', '/');
+
+    private static IEnumerable<List<T>> Chunk<T>(List<T> items)
+    {
+        for (var i = 0; i < items.Count; i += ChunkSize)
+        {
+            yield return items.GetRange(i, Math.Min(ChunkSize, items.Count - i));
+        }
     }
 }

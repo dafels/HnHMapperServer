@@ -125,6 +125,9 @@ public static class SuperadminEndpoints
         // GET /api/superadmin/integrity/scan - Cross-tenant map integrity scan (contested cells)
         group.MapGet("/integrity/scan", ScanMapIntegrity);
 
+        // POST /api/superadmin/integrity/tenants/{tenantId}/purge-orphans - Delete a tenant's orphaned map storage
+        group.MapPost("/integrity/tenants/{tenantId}/purge-orphans", PurgeOrphanedMapData);
+
         // GET /api/superadmin/tenants/{tenantId}/maps/{mapId}/wipe-region/preview - Blast-radius preview
         group.MapGet("/tenants/{tenantId}/maps/{mapId}/wipe-region/preview", PreviewWipeMapRegion);
 
@@ -1993,6 +1996,68 @@ public static class SuperadminEndpoints
         {
             logger.LogError(ex, "Error wiping region for tenant {TenantId} map {MapId}", tenantId, mapId);
             return Results.Problem("Failed to wipe map region");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/integrity/tenants/{tenantId}/purge-orphans
+    /// Deletes one tenant's orphaned map storage: tile rows on dead map ids, dead-map tile
+    /// directories, and unreferenced pool PNGs. Only provably-dead data is touched.
+    /// </summary>
+    private static async Task<IResult> PurgeOrphanedMapData(
+        string tenantId,
+        PurgeOrphanedMapDataRequestDto dto,
+        IMapIntegrityService integrityService,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        if (dto == null || !string.Equals(dto.ConfirmTenantId, tenantId, StringComparison.Ordinal))
+        {
+            return Results.BadRequest(new { error = "confirmTenantId must match the tenant being purged" });
+        }
+
+        var adminUsername = context.User.Identity?.Name ?? "Unknown";
+
+        try
+        {
+            var result = await integrityService.PurgeOrphanedMapDataAsync(tenantId);
+
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = tenantId,
+                UserId = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? adminUsername,
+                Action = "SuperAdminPurgedOrphanedMapData",
+                EntityType = "Tenant",
+                EntityId = tenantId,
+                OldValue = JsonSerializer.Serialize(new
+                {
+                    result.TileRowsDeleted,
+                    result.DirectoriesDeleted,
+                    result.DirectoryBytesFreed,
+                    result.GridFilesDeleted,
+                    result.GridFileBytesFreed
+                }),
+                NewValue = $"Orphaned map storage of tenant {tenantId} purged by {adminUsername}: " +
+                           $"{result.MegabytesFreed:F1} MB freed, storage now {result.StorageAfterMB:F1} MB"
+            });
+
+            logger.LogWarning(
+                "SuperAdmin {Username} purged orphaned map data for tenant {TenantId}: " +
+                "{Rows} rows, {Dirs} dirs, {Files} pool files, {MB:F1} MB freed",
+                adminUsername, tenantId, result.TileRowsDeleted, result.DirectoriesDeleted,
+                result.GridFilesDeleted, result.MegabytesFreed);
+
+            return Results.Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error purging orphaned map data for tenant {TenantId}", tenantId);
+            return Results.Problem("Failed to purge orphaned map data");
         }
     }
 

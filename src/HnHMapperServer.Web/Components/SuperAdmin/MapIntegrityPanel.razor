@@ -23,10 +23,12 @@
         </div>
 
         <MudText Typo="Typo.body2" Class="mud-text-secondary">
-            Finds cells claimed by more than one grid id — the fingerprint of coordinate-frame
-            corruption (two world regions mapped onto the same coordinates, tiles overwriting each
-            other). Repair is the region wipe: the contested area is deleted so the next player to
-            walk it re-registers it cleanly.
+            The map repair console. Finds cells claimed by more than one grid id (the fingerprint of
+            coordinate-frame corruption), plus orphaned storage left behind by merges and map
+            deletions — dead tile rows, dead per-map tile directories, and pool PNGs nothing
+            references. Repairs: wipe a contested region, rebuild a map's WebP tile pyramid
+            (fixes stale/ghost zoom imagery), and purge a tenant's orphans. A background check
+            reruns this scan daily and logs a warning when anything shows up.
         </MudText>
 
         @if (_isScanning)
@@ -96,6 +98,13 @@
                                                   Size="Size.Small"
                                                   OnClick="@(() => OpenWipeDialog(context))" />
                                 </MudTooltip>
+                                <MudTooltip Text="Rebuild this map's WebP tile pyramid (repairs stale/ghost zoom imagery)">
+                                    <MudIconButton Icon="@Icons.Material.Filled.AutoFixHigh"
+                                                  Color="Color.Warning"
+                                                  Size="Size.Small"
+                                                  Disabled="@(_busyAction != null)"
+                                                  OnClick="@(() => RebuildWebpTiles(context.TenantId, context.TenantName, context.MapId, context.MapName))" />
+                                </MudTooltip>
                             </MudStack>
                         </MudTd>
                     </RowTemplate>
@@ -130,6 +139,57 @@
                             </MudTr>
                         }
                     </ChildRowContent>
+                </MudTable>
+            }
+
+            @if (_report.OrphanStorage.Any())
+            {
+                <MudAlert Severity="Severity.Warning">
+                    @_report.OrphanStorage.Count tenant(s) carry orphaned map storage — leftovers of
+                    merges and map deletions. Invisible to viewers, but counted against the tenant's
+                    storage quota. Purging deletes only provably-dead data.
+                </MudAlert>
+
+                <MudTable T="TenantOrphanStorageDto" Items="@_report.OrphanStorage" Hover="true" Dense="true">
+                    <HeaderContent>
+                        <MudTh>Tenant</MudTh>
+                        <MudTh>Dead maps</MudTh>
+                        <MudTh>Orphaned rows</MudTh>
+                        <MudTh>Dead directories</MudTh>
+                        <MudTh>Unreferenced pool PNGs</MudTh>
+                        <MudTh>Reclaimable</MudTh>
+                        <MudTh>Actions</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd DataLabel="Tenant">
+                            <MudText Typo="Typo.body2">@context.TenantName</MudText>
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary">@context.TenantId</MudText>
+                        </MudTd>
+                        <MudTd DataLabel="Dead maps">
+                            <MudTooltip Text="@string.Join(", ", context.DeadMapIds)">
+                                <MudChip T="string" Size="Size.Small" Color="Color.Default">@context.DeadMapIds.Count</MudChip>
+                            </MudTooltip>
+                        </MudTd>
+                        <MudTd DataLabel="Orphaned rows">@context.OrphanedTileRows.ToString("N0")</MudTd>
+                        <MudTd DataLabel="Dead directories">
+                            @context.DeadMapDirectories (@((context.DeadMapDirectoryBytes / 1024.0 / 1024.0).ToString("F1")) MB)
+                        </MudTd>
+                        <MudTd DataLabel="Unreferenced pool PNGs">
+                            @context.UnreferencedGridFiles.ToString("N0") (@((context.UnreferencedGridFileBytes / 1024.0 / 1024.0).ToString("F1")) MB)
+                        </MudTd>
+                        <MudTd DataLabel="Reclaimable">
+                            <MudChip T="string" Size="Size.Small" Color="Color.Warning">@context.ReclaimableMB MB</MudChip>
+                        </MudTd>
+                        <MudTd DataLabel="Actions">
+                            <MudTooltip Text="Delete this tenant's orphaned rows, dead directories and unreferenced pool PNGs">
+                                <MudIconButton Icon="@Icons.Material.Filled.DeleteSweep"
+                                              Color="Color.Error"
+                                              Size="Size.Small"
+                                              Disabled="@(_busyAction != null)"
+                                              OnClick="@(() => PurgeOrphans(context))" />
+                            </MudTooltip>
+                        </MudTd>
+                    </RowTemplate>
                 </MudTable>
             }
 
@@ -201,9 +261,120 @@
         }
     }
 
+    private string? _busyAction;
+
     private void ToggleDetails(MapIntegrityIssueDto issue)
     {
         _expandedIssue = _expandedIssue == issue ? null : issue;
+    }
+
+    private async Task RebuildWebpTiles(string tenantId, string tenantName, int mapId, string mapName)
+    {
+        var confirmed = await DialogService.ShowMessageBox(
+            "Rebuild WebP tiles",
+            $"Rebuild the viewer tile pyramid of map '{mapName}' (ID: {mapId}, tenant '{tenantName}')? " +
+            "All its WebP zoom tiles are deleted and regenerated from the current map data. " +
+            "This repairs stale or ghost imagery; areas whose underlying data no longer exists will " +
+            "show as unexplored at every zoom level until players re-map them. " +
+            "The map stays viewable during the rebuild.",
+            yesText: "Rebuild",
+            cancelText: "Cancel");
+
+        if (confirmed != true)
+            return;
+
+        _busyAction = $"rebuild-{mapId}";
+        try
+        {
+            // APIUpload client: deleting + reseeding a big pyramid can exceed the default API
+            // client's 10s resilience timeout, which would cancel and retry the operation.
+            var httpClient = HttpClientFactory.CreateClient("APIUpload");
+            var response = await httpClient.PostAsJsonAsync(
+                $"/api/superadmin/tenants/{tenantId}/maps/{mapId}/rebuild-webp-tiles",
+                new { confirmMapId = mapId });
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<RebuildWebpTilesResultDto>();
+                Snackbar.Add(
+                    $"WebP rebuild started for '{mapName}': {result?.FilesDeleted ?? 0} old tiles removed " +
+                    $"({result?.MegabytesFreed ?? 0:F1} MB), {result?.CellsMarked ?? 0} cells queued for regeneration.",
+                    Severity.Success);
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to rebuild WebP tiles for map {MapId}: {StatusCode}, Body={Body}",
+                    mapId, response.StatusCode, errorBody);
+                Snackbar.Add("Failed to rebuild WebP tiles. Please try again.", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error rebuilding WebP tiles for map {MapId}", mapId);
+            Snackbar.Add("Failed to rebuild WebP tiles. Please try again.", Severity.Error);
+        }
+        finally
+        {
+            _busyAction = null;
+        }
+    }
+
+    private async Task PurgeOrphans(TenantOrphanStorageDto orphans)
+    {
+        var confirmed = await DialogService.ShowMessageBox(
+            "Purge orphaned storage",
+            $"Delete orphaned map storage of tenant '{orphans.TenantName}'? This removes " +
+            $"{orphans.OrphanedTileRows:N0} tile rows on {orphans.DeadMapIds.Count} dead map(s), " +
+            $"{orphans.DeadMapDirectories} dead tile directories and " +
+            $"{orphans.UnreferencedGridFiles:N0} unreferenced pool PNGs — about {orphans.ReclaimableMB} MB. " +
+            "Only data no existing map, tile row or grid references is touched; live maps are unaffected.",
+            yesText: "Purge",
+            cancelText: "Cancel");
+
+        if (confirmed != true)
+            return;
+
+        _busyAction = $"purge-{orphans.TenantId}";
+        try
+        {
+            // APIUpload client: row deletion + directory sweeps can exceed the default 10s timeout.
+            var httpClient = HttpClientFactory.CreateClient("APIUpload");
+            var response = await httpClient.PostAsJsonAsync(
+                $"/api/superadmin/integrity/tenants/{orphans.TenantId}/purge-orphans",
+                new { confirmTenantId = orphans.TenantId });
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<OrphanPurgeResultDto>();
+                Snackbar.Add(
+                    $"Purged orphans of '{orphans.TenantName}': {result?.TileRowsDeleted ?? 0:N0} rows, " +
+                    $"{result?.DirectoriesDeleted ?? 0} directories, {result?.GridFilesDeleted ?? 0:N0} pool PNGs " +
+                    $"({result?.MegabytesFreed ?? 0:F1} MB freed; storage now {result?.StorageAfterMB ?? 0:F1} MB).",
+                    Severity.Success);
+                foreach (var warning in (result?.Warnings ?? new List<string>()).Take(3))
+                {
+                    Snackbar.Add(warning, Severity.Warning);
+                }
+                await RunScan();
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to purge orphans for tenant {TenantId}: {StatusCode}, Body={Body}",
+                    orphans.TenantId, response.StatusCode, errorBody);
+                Snackbar.Add("Failed to purge orphaned storage. Please try again.", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error purging orphans for tenant {TenantId}", orphans.TenantId);
+            Snackbar.Add("Failed to purge orphaned storage. Please try again.", Severity.Error);
+        }
+        finally
+        {
+            _busyAction = null;
+        }
     }
 
     private async Task OpenWipeDialog(MapIntegrityIssueDto issue)
