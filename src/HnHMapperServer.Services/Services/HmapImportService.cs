@@ -999,6 +999,15 @@ public class HmapImportService : IHmapImportService
         {
             // Base tiles may have duplicates in edge cases (orphaned tiles, partial failures)
             await _tileRepository.SaveTilesBatchAsync(tiles, skipExistenceCheck: false);
+
+            // The repository path bypasses TileService.SaveTileAsync, so nothing marked the
+            // zoom parents dirty — and without dirty rows the WebP scan never force-refreshes
+            // existing (now stale) tiles covering the imported area.
+            foreach (var group in tiles.Where(t => t.Zoom == 0).GroupBy(t => (t.TenantId, t.MapId)))
+            {
+                await _tileService.MarkParentTilesDirtyBatchAsync(
+                    group.Key.TenantId, group.Key.MapId, group.Select(t => t.Coord).ToList());
+            }
         }
 
         if (overlays.Count > 0)

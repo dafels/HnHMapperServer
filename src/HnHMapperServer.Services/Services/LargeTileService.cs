@@ -321,7 +321,71 @@ public class LargeTileService : ILargeTileService
 
     public void InvalidateTenantCache(string tenantId)
     {
-        // No-op placeholder kept for interface compatibility
+        RemoveCacheEntriesByPrefix($"{tenantId}/");
+    }
+
+    public void InvalidateMapCache(string tenantId, int mapId)
+    {
+        RemoveCacheEntriesByPrefix($"{tenantId}/{mapId}/");
+    }
+
+    private static void RemoveCacheEntriesByPrefix(string prefix)
+    {
+        foreach (var key in _tileCache.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                _tileCache.TryRemove(key, out _);
+            }
+        }
+
+        foreach (var key in _nonExistentTileCache.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                _nonExistentTileCache.TryRemove(key, out _);
+            }
+        }
+    }
+
+    public (int FilesDeleted, long BytesFreed) DeleteMapWebpTiles(string tenantId, int mapId)
+    {
+        var mapDir = Path.Combine(_gridStorage, "tenants", tenantId, "large", mapId.ToString());
+        var filesDeleted = 0;
+        long bytesFreed = 0;
+
+        if (Directory.Exists(mapDir))
+        {
+            foreach (var file in Directory.EnumerateFiles(mapDir, "*.webp", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    bytesFreed += new FileInfo(file).Length;
+                    filesDeleted++;
+                }
+                catch
+                {
+                    // Size bookkeeping only — deletion below is what matters.
+                }
+            }
+
+            try
+            {
+                Directory.Delete(mapDir, recursive: true);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "{Prefix} Failed to delete webp tile directory {Dir}", LogPrefix, mapDir);
+            }
+        }
+
+        InvalidateMapCache(tenantId, mapId);
+
+        _logger.LogInformation(
+            "{Prefix} DELETED map pyramid [{Tenant}] map={MapId}: {Files} files ({MB:F1} MB)",
+            LogPrefix, tenantId, mapId, filesDeleted, bytesFreed / 1024.0 / 1024.0);
+
+        return (filesDeleted, bytesFreed);
     }
 
     /// <summary>
@@ -389,8 +453,25 @@ public class LargeTileService : ILargeTileService
         var stats = GetStats(tenantId);
         stats.LastActivity = DateTime.UtcNow;
 
+        // Generation errors are tracked separately from "no sources": only the latter may delete
+        // the existing file below. Deleting on a transient error (DB lock, IO hiccup) would throw
+        // away a perfectly good tile.
+        byte[]? generatedBytes;
+        var generationFailed = false;
         var sw = Stopwatch.StartNew();
-        var generatedBytes = await GenerateLargeTileAsync(tenantId, mapId, zoom, x, y);
+        try
+        {
+            generatedBytes = zoom == 0
+                ? await GenerateZoom0LargeTileAsync(tenantId, mapId, x, y)
+                : await GenerateZoomNLargeTileAsync(tenantId, mapId, zoom, x, y);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "{Prefix} ERROR [{Tenant}] map={MapId} z={Zoom} ({X},{Y}) - regeneration failed",
+                LogPrefix, tenantId, mapId, zoom, x, y);
+            generatedBytes = null;
+            generationFailed = true;
+        }
         sw.Stop();
 
         if (generatedBytes != null)
@@ -406,6 +487,29 @@ public class LargeTileService : ILargeTileService
             // Clear from caches — source tiles may have been removed
             _tileCache.TryRemove(cacheKey, out _);
             AddToNegativeCache(cacheKey);
+
+            if (!generationFailed)
+            {
+                // Source tiles are genuinely gone: a stale file left on disk would keep serving
+                // ghost imagery forever (GetOrGenerateLargeTileAsync serves any existing file
+                // as-is). Deleting it makes the emptiness propagate — parent regeneration
+                // recomposites without this tile.
+                var path = GetLargeTilePath(tenantId, mapId, zoom, x, y);
+                try
+                {
+                    if (File.Exists(path))
+                    {
+                        File.Delete(path);
+                        _logger.LogInformation(
+                            "{Prefix} REGEN-EMPTY [{Tenant}] map={MapId} z={Zoom} ({X},{Y}) - no source tiles, deleted stale file",
+                            LogPrefix, tenantId, mapId, zoom, x, y);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "{Prefix} Failed to delete stale tile file {Path}", LogPrefix, path);
+                }
+            }
         }
 
         return generatedBytes;

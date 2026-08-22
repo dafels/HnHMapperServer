@@ -1027,6 +1027,24 @@ app.MapPost("/internal/tile-cache/invalidate", async (
     return Results.Ok();
 }).DisableAntiforgery();
 
+// Internal endpoint for API to drop this process's in-memory WebP cache for a whole map.
+// Called after bulk pyramid operations (superadmin rebuild, region wipe) that delete files on disk.
+app.MapPost("/internal/tile-cache/invalidate-map", async (
+    HttpContext context,
+    HnHMapperServer.Services.Interfaces.ILargeTileService largeTileService,
+    IOutputCacheStore outputCacheStore,
+    ILogger<Program> logger) =>
+{
+    var request = await context.Request.ReadFromJsonAsync<MapTileCacheInvalidationRequest>();
+    if (request == null || string.IsNullOrEmpty(request.TenantId))
+        return Results.BadRequest();
+
+    largeTileService.InvalidateMapCache(request.TenantId, request.MapId);
+    await outputCacheStore.EvictByTagAsync("tiles-webp", default);
+    logger.LogInformation("Invalidated map tile cache for tenant {TenantId} map {MapId}", request.TenantId, request.MapId);
+    return Results.Ok();
+}).DisableAntiforgery();
+
 // Public map info proxy - forwards map info requests to API service
 app.MapGet("/public/{slug}/info", async (
     HttpContext context,
@@ -1182,5 +1200,8 @@ file sealed class LoginPayload
 
 // DTO for cross-process tile cache invalidation
 file sealed record TileCacheInvalidationRequest(string TenantId, int MapId, int BaseX, int BaseY);
+
+// DTO for cross-process whole-map tile cache invalidation (superadmin rebuild / region wipe)
+file sealed record MapTileCacheInvalidationRequest(string TenantId, int MapId);
 
  

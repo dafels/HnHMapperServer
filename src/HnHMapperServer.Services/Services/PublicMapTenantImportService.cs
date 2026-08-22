@@ -33,6 +33,7 @@ public class PublicMapTenantImportService : IPublicMapTenantImportService
     private readonly IHmapImportService _hmapImportService;
     private readonly IUpdateNotificationService _notifications;
     private readonly ITenantFilePathService _filePaths;
+    private readonly ITileService _tileService;
     private readonly ILogger<PublicMapTenantImportService> _logger;
 
     public PublicMapTenantImportService(
@@ -42,6 +43,7 @@ public class PublicMapTenantImportService : IPublicMapTenantImportService
         IHmapImportService hmapImportService,
         IUpdateNotificationService notifications,
         ITenantFilePathService filePaths,
+        ITileService tileService,
         ILogger<PublicMapTenantImportService> logger)
     {
         _db = db;
@@ -50,6 +52,7 @@ public class PublicMapTenantImportService : IPublicMapTenantImportService
         _hmapImportService = hmapImportService;
         _notifications = notifications;
         _filePaths = filePaths;
+        _tileService = tileService;
         _logger = logger;
     }
 
@@ -388,6 +391,16 @@ public class PublicMapTenantImportService : IPublicMapTenantImportService
                 finalMapId, targetTenantId, gridStorage, cancellationToken,
                 allZoom0CoordsForZoomGen.Count > 0 ? allZoom0CoordsForZoomGen : null);
             Report(progress, stopwatch, 4, "Generating zoom levels", 1, 1, "Done", 95);
+
+            // Direct _db.Tiles writes bypass TileService, so nothing marked the zoom parents
+            // dirty — the WebP scan needs those rows to force-refresh existing stale tiles
+            // covering the imported area (gap-fill alone skips any file that already exists).
+            if (writtenZoom0Coords.Count > 0)
+            {
+                await _tileService.MarkParentTilesDirtyBatchAsync(
+                    targetTenantId, finalMapId,
+                    writtenZoom0Coords.Select(c => new Coord(c.X, c.Y)).ToList());
+            }
 
             // ---- Markers from markers.json (thingwalls in absolute coords) ----
             await ImportThingwallMarkersFromJsonAsync(

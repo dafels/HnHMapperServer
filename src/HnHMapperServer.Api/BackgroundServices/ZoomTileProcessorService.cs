@@ -130,19 +130,22 @@ public class ZoomTileProcessorService : BackgroundService
                 var result = await largeTileService.ForceRegenerateLargeTileAsync(
                     request.TenantId, request.MapId, 0, largeTileX, largeTileY);
 
+                // Force-regenerate zoom levels 1-6 (parent tiles) even when zoom 0 came back
+                // null: null means the cell's sources are gone and its stale file was deleted,
+                // and the parents must recomposite without it or the old imagery ghosts on
+                // forever at far-out zoom levels (wipes, merges, moved grids).
+                var parentX = largeTileX;
+                var parentY = largeTileY;
+                for (int zoom = 1; zoom <= 6; zoom++)
+                {
+                    parentX = (int)Math.Floor(parentX / 2.0);
+                    parentY = (int)Math.Floor(parentY / 2.0);
+                    await largeTileService.ForceRegenerateLargeTileAsync(
+                        request.TenantId, request.MapId, zoom, parentX, parentY);
+                }
+
                 if (result != null)
                 {
-                    // Force-regenerate zoom levels 1-6 (parent tiles)
-                    var parentX = largeTileX;
-                    var parentY = largeTileY;
-                    for (int zoom = 1; zoom <= 6; zoom++)
-                    {
-                        parentX = (int)Math.Floor(parentX / 2.0);
-                        parentY = (int)Math.Floor(parentY / 2.0);
-                        await largeTileService.ForceRegenerateLargeTileAsync(
-                            request.TenantId, request.MapId, zoom, parentX, parentY);
-                    }
-
                     generated++;
                 }
                 else

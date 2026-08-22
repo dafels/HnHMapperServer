@@ -16,6 +16,7 @@ public class GridService : IGridService
     private readonly IMapNameService _mapNameService;
     private readonly IPendingMarkerService _pendingMarkerService;
     private readonly ITenantContextAccessor _tenantContext;
+    private readonly ZoomTileQueueService _zoomTileQueue;
     private readonly ILogger<GridService> _logger;
 
     public GridService(
@@ -27,6 +28,7 @@ public class GridService : IGridService
         IMapNameService mapNameService,
         IPendingMarkerService pendingMarkerService,
         ITenantContextAccessor tenantContext,
+        ZoomTileQueueService zoomTileQueue,
         ILogger<GridService> logger)
     {
         _gridRepository = gridRepository;
@@ -37,7 +39,50 @@ public class GridService : IGridService
         _mapNameService = mapNameService;
         _pendingMarkerService = pendingMarkerService;
         _tenantContext = tenantContext;
+        _zoomTileQueue = zoomTileQueue;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// One 400x400 WebP tile at server zoom 0 covers 4x4 base grid cells.
+    /// </summary>
+    private const int WebpCellSize = 4;
+
+    /// <summary>
+    /// Cap on per-operation WebP regeneration enqueues. The queue is bounded (DropOldest), so a
+    /// huge merge must not flush out upload-driven requests; anything beyond the cap is covered
+    /// by the DirtyZoomTiles rows the tile saves wrote (the 5-minute scan force-regenerates them).
+    /// </summary>
+    private const int MaxWebpEnqueuesPerOperation = 1500;
+
+    /// <summary>
+    /// Enqueues WebP chain regeneration for the distinct 4x4 cells covering the given base coords.
+    /// The processor force-regenerates z0-z6, bumps mapRevision and invalidates the Web cache.
+    /// </summary>
+    private void EnqueueWebpRegenerationForCells(string tenantId, int mapId, IEnumerable<Coord> baseCoords)
+    {
+        var cells = new HashSet<(int X, int Y)>();
+        foreach (var coord in baseCoords)
+        {
+            cells.Add(((int)Math.Floor(coord.X / (double)WebpCellSize), (int)Math.Floor(coord.Y / (double)WebpCellSize)));
+        }
+
+        var enqueued = 0;
+        foreach (var cell in cells)
+        {
+            if (enqueued >= MaxWebpEnqueuesPerOperation)
+            {
+                _logger.LogWarning(
+                    "WebP regeneration enqueue capped at {Cap} cells for map {MapId} ({Total} affected); " +
+                    "the dirty-tile scan will catch up on the rest",
+                    MaxWebpEnqueuesPerOperation, mapId, cells.Count);
+                break;
+            }
+
+            _zoomTileQueue.EnqueueZoomRegeneration(
+                new ZoomTileRequest(tenantId, mapId, cell.X * WebpCellSize, cell.Y * WebpCellSize));
+            enqueued++;
+        }
     }
 
     /// <summary>
@@ -389,6 +434,14 @@ public class GridService : IGridService
                 }
             }
 
+            // The source map is retired: drop its tile rows (all zooms) and per-map tile
+            // directories. Leaving the rows behind is what accumulated thousands of orphaned
+            // zoom-0 rows per merge; the grid PNGs themselves are grid-id-keyed and shared with
+            // the rows just copied to the target, so only rows and per-map dirs go — never
+            // the files under tenants/{tenant}/grids/.
+            await _tileService.DeleteTilesByMapAsync(sourceMapId);
+            DeleteSourceMapTileDirectories(gridStorage, tenantId, sourceMapId);
+
             // Delete source map
             await _mapRepository.DeleteMapAsync(sourceMapId);
 
@@ -430,6 +483,41 @@ public class GridService : IGridService
         }
         
         _logger.LogInformation("Map merge complete: regenerated zoom levels 1-6");
+
+        // The target map's existing WebP tiles were generated before the merge and don't contain
+        // the merged-in imagery; the background scans only fill MISSING files, so without this
+        // the merged area stays invisible at zoom levels whose files already existed.
+        if (tilesToRegenerate.Count > 0)
+        {
+            EnqueueWebpRegenerationForCells(tenantId, targetMapId, tilesToRegenerate.Select(t => t.coord));
+        }
+    }
+
+    /// <summary>
+    /// Best-effort removal of a retired source map's per-map tile directories:
+    /// the legacy zoom 1-6 pyramid (tenants/{t}/{mapId}/) and the WebP pyramid
+    /// (tenants/{t}/large/{mapId}/). Grid PNGs live in the shared grids/ dir and are untouched.
+    /// </summary>
+    private void DeleteSourceMapTileDirectories(string gridStorage, string tenantId, int sourceMapId)
+    {
+        foreach (var dir in new[]
+                 {
+                     Path.Combine(gridStorage, "tenants", tenantId, sourceMapId.ToString()),
+                     Path.Combine(gridStorage, "tenants", tenantId, "large", sourceMapId.ToString())
+                 })
+        {
+            try
+            {
+                if (Directory.Exists(dir))
+                {
+                    Directory.Delete(dir, recursive: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete retired map directory {Dir}", dir);
+            }
+        }
     }
 
     public async Task<(int mapId, Coord coord)?> LocateGridAsync(string gridId)
@@ -467,6 +555,10 @@ public class GridService : IGridService
             c = c.Parent();
             await _tileService.UpdateZoomLevelAsync(mapId, c, z, map.TenantId, gridStorage);
         }
+
+        // Regenerate the WebP chain so the wipe is visible in the viewer (which serves only the
+        // WebP pyramid); with no remaining sources the regeneration deletes the stale files.
+        EnqueueWebpRegenerationForCells(map.TenantId, mapId, new[] { coord });
     }
 
     public async Task SetCoordinatesAsync(int mapId, Coord fromCoord, Coord toCoord, string gridStorage)

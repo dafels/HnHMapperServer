@@ -131,6 +131,9 @@ public static class SuperadminEndpoints
         // POST /api/superadmin/tenants/{tenantId}/maps/{mapId}/wipe-region - Surgically wipe a map region
         group.MapPost("/tenants/{tenantId}/maps/{mapId}/wipe-region", WipeMapRegion);
 
+        // POST /api/superadmin/tenants/{tenantId}/maps/{mapId}/rebuild-webp-tiles - Rebuild the WebP pyramid from zoom-0 truth
+        group.MapPost("/tenants/{tenantId}/maps/{mapId}/rebuild-webp-tiles", RebuildWebpTiles);
+
         // === Cross-Tenant Map Viewing ===
 
         // GET /api/superadmin/tenants/{tenantId}/map-view-data - Get all map view data for tenant
@@ -1914,6 +1917,8 @@ public static class SuperadminEndpoints
         HnHMapperServer.Api.Services.MapRevisionCache revisionCache,
         IUpdateNotificationService notificationService,
         HnHMapperServer.Services.Services.TileCacheService tileCacheService,
+        ILargeTileService largeTileService,
+        IHttpClientFactory httpClientFactory,
         IAuditService auditService,
         HttpContext context,
         ILogger<Program> logger)
@@ -1936,6 +1941,11 @@ public static class SuperadminEndpoints
         try
         {
             var result = await wipeService.WipeAsync(tenantId, mapId, dto.X1, dto.Y1, dto.X2, dto.Y2);
+
+            // The wipe deleted covering WebP files — evict both processes' in-memory copies so
+            // requests regenerate from the remaining rows instead of serving cached ghost bytes.
+            largeTileService.InvalidateMapCache(tenantId, mapId);
+            await InvalidateWebMapTileCacheAsync(httpClientFactory, tenantId, mapId, logger);
 
             // Live viewers drop their tile caches and refetch the (now blank) region.
             var newRevision = revisionCache.Increment(mapId);
@@ -1983,6 +1993,140 @@ public static class SuperadminEndpoints
         {
             logger.LogError(ex, "Error wiping region for tenant {TenantId} map {MapId}", tenantId, mapId);
             return Results.Problem("Failed to wipe map region");
+        }
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/tenants/{tenantId}/maps/{mapId}/rebuild-webp-tiles
+    /// Deletes the map's whole WebP pyramid and seeds regeneration from current zoom-0 truth.
+    /// The repair tool for pyramid/database drift: stale ghost imagery disappears, missing areas
+    /// regenerate, and cells whose sources are gone go honestly empty at every zoom level.
+    /// Viewers keep working throughout — requested tiles regenerate on-the-fly.
+    /// </summary>
+    private static async Task<IResult> RebuildWebpTiles(
+        string tenantId,
+        int mapId,
+        RebuildWebpTilesRequestDto dto,
+        ApplicationDbContext db,
+        ILargeTileService largeTileService,
+        ITileService tileService,
+        HnHMapperServer.Services.Services.ZoomTileQueueService zoomTileQueue,
+        HnHMapperServer.Api.Services.MapRevisionCache revisionCache,
+        IUpdateNotificationService notificationService,
+        IHttpClientFactory httpClientFactory,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        if (dto == null || dto.ConfirmMapId != mapId)
+        {
+            return Results.BadRequest(new { error = "confirmMapId must match the map being rebuilt" });
+        }
+
+        var mapExists = await db.Maps
+            .IgnoreQueryFilters()
+            .AnyAsync(m => m.Id == mapId && m.TenantId == tenantId);
+        if (!mapExists)
+        {
+            return Results.NotFound(new { error = "Map not found in this tenant" });
+        }
+
+        var adminUsername = context.User.Identity?.Name ?? "Unknown";
+
+        try
+        {
+            // 1. Drop the old pyramid (files + this process's in-memory cache).
+            var (filesDeleted, bytesFreed) = largeTileService.DeleteMapWebpTiles(tenantId, mapId);
+
+            // 2. Evict the Web process's in-memory cache too.
+            await InvalidateWebMapTileCacheAsync(httpClientFactory, tenantId, mapId, logger);
+
+            // 3. Seed regeneration: every distinct 4x4 cell with renderable zoom-0 rows. Dirty
+            //    rows are the durable path (5-minute scan); the queue covers the first cells fast.
+            var zoom0Coords = await db.Tiles
+                .AsNoTracking()
+                .IgnoreQueryFilters()
+                .Where(t => t.TenantId == tenantId && t.MapId == mapId && t.Zoom == 0 && t.File != "")
+                .Select(t => new { t.CoordX, t.CoordY })
+                .ToListAsync();
+
+            var cells = zoom0Coords
+                .Select(c => (X: (int)Math.Floor(c.CoordX / 4.0), Y: (int)Math.Floor(c.CoordY / 4.0)))
+                .Distinct()
+                .ToList();
+
+            await tileService.MarkParentTilesDirtyBatchAsync(
+                tenantId, mapId,
+                cells.Select(c => new HnHMapperServer.Core.Models.Coord(c.X * 4, c.Y * 4)).ToList());
+
+            var enqueued = 0;
+            foreach (var cell in cells)
+            {
+                if (zoomTileQueue.PendingCount >= 3000)
+                {
+                    break; // bounded queue: leave headroom for live uploads; the scan takes the rest
+                }
+
+                zoomTileQueue.EnqueueZoomRegeneration(
+                    new HnHMapperServer.Services.Services.ZoomTileRequest(tenantId, mapId, cell.X * 4, cell.Y * 4));
+                enqueued++;
+            }
+
+            // 4. Everyone refetches.
+            var newRevision = revisionCache.Increment(mapId);
+            notificationService.NotifyMapRevision(mapId, newRevision);
+
+            var result = new RebuildWebpTilesResultDto
+            {
+                TenantId = tenantId,
+                MapId = mapId,
+                FilesDeleted = filesDeleted,
+                MegabytesFreed = Math.Round(bytesFreed / 1024.0 / 1024.0, 2),
+                CellsMarked = cells.Count,
+                CellsEnqueued = enqueued
+            };
+
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = tenantId,
+                UserId = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? adminUsername,
+                Action = "SuperAdminRebuiltWebpTiles",
+                EntityType = "Map",
+                EntityId = mapId.ToString(),
+                OldValue = JsonSerializer.Serialize(new { result.FilesDeleted, result.MegabytesFreed }),
+                NewValue = $"WebP pyramid of map {mapId} rebuilt by {adminUsername}: {result.CellsMarked} cells reseeded"
+            });
+
+            logger.LogWarning(
+                "SuperAdmin {Username} rebuilt WebP pyramid of map {MapId} (tenant {TenantId}): " +
+                "{Files} files deleted ({MB:F1} MB), {Cells} cells reseeded ({Enqueued} queued)",
+                adminUsername, mapId, tenantId, filesDeleted, result.MegabytesFreed, cells.Count, enqueued);
+
+            return Results.Ok(result);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error rebuilding WebP tiles for tenant {TenantId} map {MapId}", tenantId, mapId);
+            return Results.Problem("Failed to rebuild WebP tiles");
+        }
+    }
+
+    /// <summary>
+    /// Tells the Web process to drop its in-memory WebP cache for one map (it holds its own
+    /// LargeTileService statics). Best-effort — a miss only means up to a few stale in-memory
+    /// hits until natural eviction.
+    /// </summary>
+    private static async Task InvalidateWebMapTileCacheAsync(
+        IHttpClientFactory httpClientFactory, string tenantId, int mapId, ILogger logger)
+    {
+        try
+        {
+            var webClient = httpClientFactory.CreateClient("Web");
+            await webClient.PostAsJsonAsync("/internal/tile-cache/invalidate-map", new { tenantId, mapId });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to invalidate Web tile cache for tenant {TenantId} map {MapId}", tenantId, mapId);
         }
     }
 

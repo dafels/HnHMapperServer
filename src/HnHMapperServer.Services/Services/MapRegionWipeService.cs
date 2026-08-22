@@ -169,7 +169,13 @@ public class MapRegionWipeService : IMapRegionWipeService
         // ExecuteDelete bypasses the change tracker, which may still hold now-deleted entities.
         _db.ChangeTracker.Clear();
 
-        DeleteTileFiles(tenantId, gridStorage, inBoxTileFiles, result);
+        await DeleteTileFilesAsync(tenantId, gridStorage, inBoxTileFiles, result, ct);
+
+        // The viewer serves only the WebP pyramid, which nothing above touched: delete every
+        // WebP tile whose footprint intersects the wiped box so the wipe is actually visible.
+        // On-request generation rebuilds them from the remaining zoom-0 rows (box edges get
+        // partial tiles, fully wiped interiors 404 honestly instead of ghosting old imagery).
+        DeleteCoveringWebpTiles(tenantId, mapId, gridStorage, x1, y1, x2, y2, result);
 
         // Rewrites CurrentStorageMB from what is actually left on disk.
         await _quotaService.RecalculateStorageUsageAsync(tenantId, gridStorage);
@@ -230,15 +236,35 @@ public class MapRegionWipeService : IMapRegionWipeService
     /// Best-effort deletion of the captured zoom-0 tile files. Each Tiles.File value is a
     /// relative path; a poisoned value must never escape the tenant storage root, so every
     /// resolved path is containment-checked before deletion (same guard as the tenant purge).
+    ///
+    /// Tile files are grid-id-keyed and can be referenced by MULTIPLE tile rows (frame flip-flop
+    /// leftovers, merge copies), so a file is only deleted when no row anywhere in the tenant
+    /// still points at it — deleting a shared file would blank the surviving row's cell.
     /// </summary>
-    private void DeleteTileFiles(string tenantId, string gridStorage, List<string> tileFiles, MapRegionWipeResultDto result)
+    private async Task DeleteTileFilesAsync(
+        string tenantId, string gridStorage, List<string> tileFiles, MapRegionWipeResultDto result, CancellationToken ct)
     {
         var tenantsRoot = Path.GetFullPath(Path.Combine(gridStorage, "tenants"));
 
-        foreach (var file in tileFiles)
+        // The in-box rows are already deleted, so any remaining reference belongs to a row
+        // that must keep its imagery.
+        var candidates = tileFiles.Where(f => !string.IsNullOrWhiteSpace(f)).Distinct().ToList();
+        var stillReferenced = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var chunk in Chunk(candidates))
         {
-            if (string.IsNullOrWhiteSpace(file))
+            stillReferenced.UnionWith(await _db.Tiles.IgnoreQueryFilters()
+                .Where(t => t.TenantId == tenantId && chunk.Contains(t.File))
+                .Select(t => t.File)
+                .ToListAsync(ct));
+        }
+
+        var skippedShared = 0;
+
+        foreach (var file in candidates)
+        {
+            if (stillReferenced.Contains(file))
             {
+                skippedShared++;
                 continue;
             }
 
@@ -276,6 +302,58 @@ public class MapRegionWipeService : IMapRegionWipeService
             {
                 _logger.LogWarning(ex, "Failed to delete tile file {File} for tenant {TenantId}", file, tenantId);
                 result.Warnings.Add($"Could not delete '{file}': {ex.Message}");
+            }
+        }
+
+        if (skippedShared > 0)
+        {
+            result.Warnings.Add(
+                $"{skippedShared} tile file(s) kept: still referenced by tile rows outside the wiped box");
+        }
+    }
+
+    /// <summary>
+    /// Deletes every WebP pyramid file (zoom 0-6) whose footprint intersects the wiped box.
+    /// One zoom-z WebP tile covers 4·2^z base coords per axis.
+    /// </summary>
+    private void DeleteCoveringWebpTiles(
+        string tenantId, int mapId, string gridStorage, int x1, int y1, int x2, int y2, MapRegionWipeResultDto result)
+    {
+        for (int zoom = 0; zoom <= 6; zoom++)
+        {
+            var span = 4 << zoom;
+            var minCellX = (int)Math.Floor(x1 / (double)span);
+            var maxCellX = (int)Math.Floor(x2 / (double)span);
+            var minCellY = (int)Math.Floor(y1 / (double)span);
+            var maxCellY = (int)Math.Floor(y2 / (double)span);
+
+            var zoomDir = Path.Combine(gridStorage, "tenants", tenantId, "large", mapId.ToString(), zoom.ToString());
+            if (!Directory.Exists(zoomDir))
+            {
+                continue;
+            }
+
+            for (int cx = minCellX; cx <= maxCellX; cx++)
+            {
+                for (int cy = minCellY; cy <= maxCellY; cy++)
+                {
+                    var path = Path.Combine(zoomDir, $"{cx}_{cy}.webp");
+                    try
+                    {
+                        if (File.Exists(path))
+                        {
+                            var size = new FileInfo(path).Length;
+                            File.Delete(path);
+                            result.WebpTilesDeleted++;
+                            result.BytesFreed += size;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to delete webp tile {Path} for tenant {TenantId}", path, tenantId);
+                        result.Warnings.Add($"Could not delete webp tile z{zoom} ({cx},{cy}): {ex.Message}");
+                    }
+                }
             }
         }
     }

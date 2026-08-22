@@ -385,4 +385,70 @@ public class MapRegionWipeServiceTests : IDisposable
         Assert.Equal(501, result.Markers);
         Assert.Equal(0, await _db.Markers.IgnoreQueryFilters().CountAsync(m => m.TenantId == TenantA));
     }
+
+    [Fact]
+    public async Task WipeAsync_KeepsTileFilesStillReferencedOutsideTheBox()
+    {
+        // Tile files are grid-id-keyed and can back multiple rows (frame flip-flop leftovers,
+        // merge copies). The incident-era wipe deleted in-box rows' files unconditionally, which
+        // would blank an out-of-box twin row pointing at the same PNG.
+        SeedMap(1, TenantA);
+        SeedGrid("g-in", 1, TenantA, 5, 5);
+
+        var sharedRelative = Path.Combine("tenants", TenantA, "grids", "shared-grid.png");
+        var sharedFull = Path.Combine(_gridStorage, sharedRelative);
+        Directory.CreateDirectory(Path.GetDirectoryName(sharedFull)!);
+        File.WriteAllBytes(sharedFull, new byte[10]);
+
+        var soloRelative = Path.Combine("tenants", TenantA, "grids", "solo-grid.png");
+        var soloFull = Path.Combine(_gridStorage, soloRelative);
+        File.WriteAllBytes(soloFull, new byte[10]);
+
+        // In-box rows: one sharing its file with an out-of-box row, one sole owner of its file.
+        _db.Tiles.Add(new TileDataEntity { MapId = 1, CoordX = 5, CoordY = 5, Zoom = 0, File = sharedRelative, Cache = 1, TenantId = TenantA });
+        _db.Tiles.Add(new TileDataEntity { MapId = 1, CoordX = 6, CoordY = 5, Zoom = 0, File = soloRelative, Cache = 1, TenantId = TenantA });
+        // Out-of-box twin referencing the shared file.
+        _db.Tiles.Add(new TileDataEntity { MapId = 1, CoordX = 50, CoordY = 50, Zoom = 0, File = sharedRelative, Cache = 1, TenantId = TenantA });
+        _db.SaveChanges();
+        ClearTracker();
+
+        var result = await _service.WipeAsync(TenantA, 1, 0, 0, 10, 10);
+
+        Assert.Equal(2, result.Zoom0Tiles);
+        Assert.True(File.Exists(sharedFull), "file still referenced by an out-of-box row must survive");
+        Assert.False(File.Exists(soloFull), "file with no remaining references must be deleted");
+        Assert.Contains(result.Warnings, w => w.Contains("still referenced"));
+    }
+
+    [Fact]
+    public async Task WipeAsync_DeletesCoveringWebpTiles()
+    {
+        // The viewer serves only the WebP pyramid; leaving its files untouched is what ghosted
+        // wiped regions at far-out zoom levels. Every zoom 0-6 file whose footprint intersects
+        // the box goes; files clearly outside stay.
+        SeedMap(1, TenantA);
+        SeedGrid("g1", 1, TenantA, 5, 5);
+        SeedTile(1, TenantA, 5, 5, 0, fileBytes: 10);
+
+        string WebpPath(int zoom, int cx, int cy)
+        {
+            var dir = Path.Combine(_gridStorage, "tenants", TenantA, "large", "1", zoom.ToString());
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, $"{cx}_{cy}.webp");
+            File.WriteAllBytes(path, new byte[5]);
+            return path;
+        }
+
+        // Box (0,0)-(10,10): z0 cells 0..2, z6 cell 0 all intersect. Cell (50,50) at z0 does not.
+        var inBoxZ0 = WebpPath(0, 1, 1);
+        var inBoxZ6 = WebpPath(6, 0, 0);
+        var outsideZ0 = WebpPath(0, 50, 50);
+
+        var result = await _service.WipeAsync(TenantA, 1, 0, 0, 10, 10);
+
+        Assert.False(File.Exists(inBoxZ0), "z0 webp covering the box must be deleted");
+        Assert.False(File.Exists(inBoxZ6), "z6 webp covering the box must be deleted");
+        Assert.True(File.Exists(outsideZ0), "webp outside the box must survive");
+        Assert.Equal(2, result.WebpTilesDeleted);
+    }
 }

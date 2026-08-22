@@ -15,6 +15,17 @@ public interface ITileService
     Task<TileData?> GetTileAsync(int mapId, Coord coord, int zoom);
 
     /// <summary>
+    /// Deletes all tile rows (all zoom levels) for a map. Used when a merge retires the source map.
+    /// </summary>
+    Task DeleteTilesByMapAsync(int mapId);
+
+    /// <summary>
+    /// Marks the zoom 1-6 parents of many base coords dirty in one deduped pass.
+    /// Used by bulk writers (imports, merges, rebuilds) as the durable regeneration backstop.
+    /// </summary>
+    Task MarkParentTilesDirtyBatchAsync(string tenantId, int mapId, IReadOnlyCollection<Coord> baseCoords);
+
+    /// <summary>
     /// Updates the zoom level by combining 4 sub-tiles into one parent tile
     /// </summary>
     Task UpdateZoomLevelAsync(int mapId, Coord coord, int zoom, string tenantId, string gridStorage, List<TileData>? preloadedTiles = null);

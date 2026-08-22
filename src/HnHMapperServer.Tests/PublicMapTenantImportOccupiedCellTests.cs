@@ -85,6 +85,7 @@ public class PublicMapTenantImportOccupiedCellTests : IDisposable
             mockHmapImport.Object,
             Mock.Of<IUpdateNotificationService>(),
             new TenantFilePathService(),
+            Mock.Of<ITileService>(),
             Mock.Of<ILogger<PublicMapTenantImportService>>());
     }
 

@@ -34,6 +34,7 @@ public class GridServiceMapMergeTests : IDisposable
     private readonly ITileRepository _tileRepository;
     private readonly IConfigRepository _configRepository;
     private readonly Mock<IUpdateNotificationService> _mockNotificationService;
+    private readonly ZoomTileQueueService _zoomTileQueue;
 
     private const string TestTenantId = "default-tenant-1";
 
@@ -99,6 +100,8 @@ public class GridServiceMapMergeTests : IDisposable
             tileLogger.Object,
             _dbContext);
 
+        _zoomTileQueue = new ZoomTileQueueService(new Mock<ILogger<ZoomTileQueueService>>().Object);
+
         _gridService = new GridService(
             _gridRepository,
             _mapRepository,
@@ -108,6 +111,7 @@ public class GridServiceMapMergeTests : IDisposable
             mockMapNameService.Object,
             mockPendingMarkerService.Object,
             mockTenantContext.Object,
+            _zoomTileQueue,
             gridLogger.Object);
 
         // Seed default configuration
@@ -246,6 +250,24 @@ public class GridServiceMapMergeTests : IDisposable
             var zoomFilePath = Path.Combine(_testGridStorage, zoomTile.File);
             Assert.True(File.Exists(zoomFilePath), $"Zoom {z} tile file should exist at {zoomFilePath}");
         }
+
+        // 8. REGRESSION: the retired source map must leave no tile rows behind. Merges used to
+        // orphan the source map's whole tile set (10k+ rows per merge observed in prod).
+        var orphanedSourceRows = await _dbContext.Tiles
+            .IgnoreQueryFilters()
+            .Where(t => t.MapId == 2)
+            .CountAsync();
+        Assert.Equal(0, orphanedSourceRows);
+
+        // 9. The merged-in area's WebP cells must be queued for force-regeneration — the target
+        // map's existing WebP files predate the merge and are only refreshed via this queue.
+        var queued = new List<ZoomTileRequest>();
+        while (_zoomTileQueue.Reader.TryRead(out var request))
+        {
+            queued.Add(request);
+        }
+        Assert.Contains(queued, r => r.MapId == 1 && r.TenantId == TestTenantId
+            && r.BaseX == 0 && r.BaseY == 0); // cell (0,0) covers the moved grids at (1,0)/(1,1)
     }
 
     [Fact]

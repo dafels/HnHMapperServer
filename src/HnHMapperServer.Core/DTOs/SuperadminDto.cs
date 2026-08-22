@@ -215,6 +215,34 @@ public class MapRegionWipePreviewDto
 }
 
 /// <summary>
+/// Request body for rebuilding a map's WebP tile pyramid. <see cref="ConfirmMapId"/> must match
+/// the route map id — the same deliberate speed bump the tenant purge uses.
+/// </summary>
+public class RebuildWebpTilesRequestDto
+{
+    public int ConfirmMapId { get; set; }
+}
+
+/// <summary>
+/// Result of a WebP pyramid rebuild: the old pyramid is deleted wholesale and regeneration is
+/// seeded (queue fast path + durable dirty rows); tiles also regenerate on-the-fly as viewers
+/// request them, so the map stays viewable throughout.
+/// </summary>
+public class RebuildWebpTilesResultDto
+{
+    public string TenantId { get; set; } = string.Empty;
+    public int MapId { get; set; }
+    public int FilesDeleted { get; set; }
+    public double MegabytesFreed { get; set; }
+
+    /// <summary>Distinct 4x4-grid cells with zoom-0 imagery, all marked for regeneration.</summary>
+    public int CellsMarked { get; set; }
+
+    /// <summary>Cells pushed onto the fast in-process queue (the rest follow via the 5-minute scan).</summary>
+    public int CellsEnqueued { get; set; }
+}
+
+/// <summary>
 /// Request body for wiping a map region. <see cref="ConfirmMapId"/> must match the route map id —
 /// the same deliberate speed bump the tenant purge uses.
 /// </summary>
@@ -248,6 +276,10 @@ public class MapRegionWipeResultDto
     public int Overlays { get; set; }
 
     public int FilesDeleted { get; set; }
+
+    /// <summary>WebP pyramid tiles (zoom 0-6) deleted because their footprint intersects the box.</summary>
+    public int WebpTilesDeleted { get; set; }
+
     public long BytesFreed { get; set; }
     public double MegabytesFreed => Math.Round(BytesFreed / 1024.0 / 1024.0, 2);
 

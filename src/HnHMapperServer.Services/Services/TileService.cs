@@ -84,7 +84,9 @@ public class TileService : ITileService
 
         for (int zoom = 1; zoom <= 6; zoom++)
         {
-            currentCoord = new Coord(currentCoord.X / 2, currentCoord.Y / 2);
+            // Coord.Parent() floors for negative coordinates; plain /2 truncates toward zero and
+            // marked the wrong parent for every negative coord (e.g. -1/2 = 0 instead of -1).
+            currentCoord = currentCoord.Parent();
 
             // Check if already exists (unique index will prevent duplicates anyway)
             var exists = await _dbContext.DirtyZoomTiles
@@ -123,6 +125,77 @@ public class TileService : ITileService
     public async Task<TileData?> GetTileAsync(int mapId, Coord coord, int zoom)
     {
         return await _tileRepository.GetTileAsync(mapId, coord, zoom);
+    }
+
+    public async Task DeleteTilesByMapAsync(int mapId)
+    {
+        await _tileRepository.DeleteTilesByMapAsync(mapId);
+    }
+
+    /// <summary>
+    /// Marks the zoom 1-6 parents of many base coords dirty in one pass. Unlike the per-tile
+    /// path this dedupes parents in memory and diffs against existing rows first, so bulk
+    /// writers (imports, merges, rebuilds) don't pay 6 exists-queries per tile.
+    /// Explicit tenantId + IgnoreQueryFilters: bulk callers run outside the row's tenant context
+    /// (superadmin requests, background services).
+    /// </summary>
+    public async Task MarkParentTilesDirtyBatchAsync(string tenantId, int mapId, IReadOnlyCollection<Coord> baseCoords)
+    {
+        if (baseCoords.Count == 0)
+            return;
+
+        var wanted = new HashSet<(int Zoom, int X, int Y)>();
+        foreach (var baseCoord in baseCoords)
+        {
+            var current = baseCoord;
+            for (int zoom = 1; zoom <= 6; zoom++)
+            {
+                current = current.Parent();
+                wanted.Add((zoom, current.X, current.Y));
+            }
+        }
+
+        var existing = await _dbContext.DirtyZoomTiles
+            .IgnoreQueryFilters()
+            .Where(d => d.TenantId == tenantId && d.MapId == mapId)
+            .Select(d => new { d.Zoom, d.CoordX, d.CoordY })
+            .ToListAsync();
+        var existingSet = existing.Select(e => (e.Zoom, e.CoordX, e.CoordY)).ToHashSet();
+
+        var now = DateTime.UtcNow;
+        var toAdd = wanted
+            .Where(w => !existingSet.Contains(w))
+            .Select(w => new DirtyZoomTileEntity
+            {
+                TenantId = tenantId,
+                MapId = mapId,
+                CoordX = w.X,
+                CoordY = w.Y,
+                Zoom = w.Zoom,
+                CreatedAt = now
+            })
+            .ToList();
+
+        const int batchSize = 500;
+        for (int i = 0; i < toAdd.Count; i += batchSize)
+        {
+            _dbContext.DirtyZoomTiles.AddRange(toAdd.Skip(i).Take(batchSize));
+            try
+            {
+                await _dbContext.SaveChangesAsync();
+            }
+            catch (DbUpdateException)
+            {
+                // Unique-index race with a concurrent marker — rows are already there.
+                _dbContext.ChangeTracker.Clear();
+            }
+        }
+
+        if (toAdd.Count > 0)
+        {
+            _logger.LogDebug("Marked {Count} parent zoom tiles dirty for tenant {TenantId} map {MapId} ({BaseCount} base coords)",
+                toAdd.Count, tenantId, mapId, baseCoords.Count);
+        }
     }
 
     public async Task UpdateZoomLevelAsync(int mapId, Coord coord, int zoom, string tenantId, string gridStorage, List<TileData>? preloadedTiles = null)

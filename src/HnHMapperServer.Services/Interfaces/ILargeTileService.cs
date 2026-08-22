@@ -55,6 +55,18 @@ public interface ILargeTileService
     void InvalidateTenantCache(string tenantId);
 
     /// <summary>
+    /// Invalidates all in-memory cached tiles (positive and negative) for one map.
+    /// </summary>
+    void InvalidateMapCache(string tenantId, int mapId);
+
+    /// <summary>
+    /// Deletes a map's entire WebP tile pyramid from disk and evicts its in-memory cache entries.
+    /// The pyramid rebuilds from current zoom-0 truth via on-the-fly generation and background scans.
+    /// Used by the superadmin rebuild tool and after map merges delete the source map.
+    /// </summary>
+    (int FilesDeleted, long BytesFreed) DeleteMapWebpTiles(string tenantId, int mapId);
+
+    /// <summary>
     /// Invalidates in-memory cache entries for a specific tile and its parent zoom chain.
     /// Used for cross-process cache invalidation (API notifying Web after generating new tiles on disk).
     /// </summary>

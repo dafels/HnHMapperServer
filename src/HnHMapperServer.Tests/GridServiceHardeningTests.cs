@@ -100,6 +100,7 @@ public class GridServiceHardeningTests : IDisposable
             mockMapNameService.Object,
             mockPendingMarkerService.Object,
             mockTenantContext.Object,
+            new ZoomTileQueueService(new Mock<ILogger<ZoomTileQueueService>>().Object),
             gridLogger.Object);
 
         _dbContext.Database.EnsureCreated();
