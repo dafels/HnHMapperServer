@@ -193,6 +193,87 @@
                 </MudTable>
             }
 
+            @if (_report.WebpDrift.Any())
+            {
+                <MudAlert Severity="Severity.Warning">
+                    <div class="d-flex justify-space-between align-center" style="width: 100%">
+                        <span>
+                            @_report.WebpDrift.Count map(s) have a drifted WebP tile pyramid — ghost files
+                            rendering deleted terrain and/or stale files missing newer content. These maps
+                            show wrong imagery at some zoom levels until rebuilt.
+                        </span>
+                        <MudButton Variant="Variant.Filled"
+                                  Color="Color.Warning"
+                                  Size="Size.Small"
+                                  StartIcon="@Icons.Material.Filled.AutoFixHigh"
+                                  Disabled="@(_busyAction != null)"
+                                  OnClick="RebuildAllDrifted"
+                                  Class="ml-4 flex-shrink-0">
+                            Rebuild all
+                        </MudButton>
+                    </div>
+                </MudAlert>
+
+                <MudTable T="WebpPyramidDriftDto" Items="@_report.WebpDrift" Hover="true" Dense="true">
+                    <HeaderContent>
+                        <MudTh>Tenant</MudTh>
+                        <MudTh>Map</MudTh>
+                        <MudTh>Ghost files</MudTh>
+                        <MudTh>Stale files</MudTh>
+                        <MudTh>Missing z0 cells</MudTh>
+                        <MudTh>Checked</MudTh>
+                        <MudTh>Actions</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd DataLabel="Tenant">
+                            <MudText Typo="Typo.body2">@context.TenantName</MudText>
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary">@context.TenantId</MudText>
+                        </MudTd>
+                        <MudTd DataLabel="Map">
+                            <MudText Typo="Typo.body2">@context.MapName</MudText>
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary">map @context.MapId</MudText>
+                        </MudTd>
+                        <MudTd DataLabel="Ghost files">
+                            @if (context.GhostFiles > 0)
+                            {
+                                <MudChip T="string" Size="Size.Small" Color="Color.Error">
+                                    @context.GhostFiles (@((context.GhostBytes / 1024.0 / 1024.0).ToString("F1")) MB)
+                                </MudChip>
+                            }
+                            else
+                            {
+                                <MudText Typo="Typo.body2">—</MudText>
+                            }
+                        </MudTd>
+                        <MudTd DataLabel="Stale files">
+                            @if (context.StaleFiles > 0)
+                            {
+                                <MudChip T="string" Size="Size.Small" Color="Color.Warning">@context.StaleFiles</MudChip>
+                            }
+                            else
+                            {
+                                <MudText Typo="Typo.body2">—</MudText>
+                            }
+                        </MudTd>
+                        <MudTd DataLabel="Missing z0 cells">@context.MissingZoom0Cells</MudTd>
+                        <MudTd DataLabel="Checked">
+                            <MudTooltip Text="@string.Join("; ", context.SampleDriftTiles)">
+                                <MudText Typo="Typo.body2">@context.FilesChecked.ToString("N0")</MudText>
+                            </MudTooltip>
+                        </MudTd>
+                        <MudTd DataLabel="Actions">
+                            <MudTooltip Text="Rebuild this map's WebP tile pyramid from current data">
+                                <MudIconButton Icon="@Icons.Material.Filled.AutoFixHigh"
+                                              Color="Color.Warning"
+                                              Size="Size.Small"
+                                              Disabled="@(_busyAction != null)"
+                                              OnClick="@(() => RebuildWebpTiles(context.TenantId, context.TenantName, context.MapId, context.MapName))" />
+                            </MudTooltip>
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
+            }
+
             @if (_report.PlaceholderRows.Any())
             {
                 <MudAlert Severity="Severity.Warning">
@@ -313,6 +394,58 @@
         {
             Logger.LogError(ex, "Error rebuilding WebP tiles for map {MapId}", mapId);
             Snackbar.Add("Failed to rebuild WebP tiles. Please try again.", Severity.Error);
+        }
+        finally
+        {
+            _busyAction = null;
+        }
+    }
+
+    private async Task RebuildAllDrifted()
+    {
+        var driftCount = _report?.WebpDrift.Count ?? 0;
+        var confirmed = await DialogService.ShowMessageBox(
+            "Rebuild all drifted WebP pyramids",
+            $"Rebuild the WebP tile pyramids of all {driftCount} drifted map(s)? The server re-checks " +
+            "which maps are drifted and rebuilds each from its current data. Ghost imagery of " +
+            "deleted terrain disappears at every zoom level; maps stay viewable throughout.",
+            yesText: "Rebuild all",
+            cancelText: "Cancel");
+
+        if (confirmed != true)
+            return;
+
+        _busyAction = "rebuild-all";
+        try
+        {
+            // APIUpload client: the server rescans + rebuilds many pyramids — far beyond the
+            // default API client's 10s resilience timeout.
+            var httpClient = HttpClientFactory.CreateClient("APIUpload");
+            var response = await httpClient.PostAsJsonAsync(
+                "/api/superadmin/integrity/rebuild-webp-drift",
+                new { confirmAll = true });
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<RebuildAllDriftResultDto>();
+                Snackbar.Add(
+                    $"Rebuilt {result?.MapsRebuilt ?? 0} drifted pyramid(s): {result?.FilesDeleted ?? 0:N0} old tiles " +
+                    $"removed ({result?.MegabytesFreed ?? 0:F1} MB), {result?.CellsMarked ?? 0:N0} cells queued for regeneration.",
+                    Severity.Success);
+                await RunScan();
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to rebuild drifted pyramids: {StatusCode}, Body={Body}",
+                    response.StatusCode, errorBody);
+                Snackbar.Add("Failed to rebuild drifted pyramids. Please try again.", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error rebuilding drifted pyramids");
+            Snackbar.Add("Failed to rebuild drifted pyramids. Please try again.", Severity.Error);
         }
         finally
         {

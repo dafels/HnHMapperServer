@@ -60,11 +60,13 @@ public class MapIntegrityCheckService : BackgroundService
                     var reclaimableMB = report.OrphanStorage
                         .Sum(o => (o.DeadMapDirectoryBytes + o.UnreferencedGridFileBytes)) / 1024.0 / 1024.0;
                     var worstContested = report.ContestedMaps.FirstOrDefault();
+                    var worstDrift = report.WebpDrift.FirstOrDefault();
 
                     _logger.LogWarning(
                         "{Prefix} ISSUES FOUND: {ContestedMaps} map(s) with contested cells{WorstContested}, " +
                         "{Placeholders} placeholder row(s), {OrphanTenants} tenant(s) with orphaned storage " +
-                        "(~{ReclaimMB:F0} MB reclaimable). Repair via SuperAdmin -> Map Integrity.",
+                        "(~{ReclaimMB:F0} MB reclaimable), {DriftMaps} map(s) with WebP pyramid drift{WorstDrift}. " +
+                        "Repair via SuperAdmin -> Map Integrity.",
                         LogPrefix,
                         report.ContestedMaps.Count,
                         worstContested != null
@@ -72,7 +74,11 @@ public class MapIntegrityCheckService : BackgroundService
                             : string.Empty,
                         report.PlaceholderRows.Count,
                         report.OrphanStorage.Count,
-                        reclaimableMB);
+                        reclaimableMB,
+                        report.WebpDrift.Count,
+                        worstDrift != null
+                            ? $" (worst: map {worstDrift.MapId} '{worstDrift.MapName}' with {worstDrift.GhostFiles} ghost / {worstDrift.StaleFiles} stale)"
+                            : string.Empty);
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

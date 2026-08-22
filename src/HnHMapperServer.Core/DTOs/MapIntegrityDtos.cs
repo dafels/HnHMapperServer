@@ -19,7 +19,42 @@ public class MapIntegrityReportDto
     /// <summary>Per tenant: storage left behind by deleted maps (merge/delete leftovers).</summary>
     public List<TenantOrphanStorageDto> OrphanStorage { get; set; } = new();
 
-    public bool IsClean => ContestedMaps.Count == 0 && PlaceholderRows.Count == 0 && OrphanStorage.Count == 0;
+    /// <summary>Live maps whose WebP tile pyramid disagrees with their zoom-0 data.</summary>
+    public List<WebpPyramidDriftDto> WebpDrift { get; set; } = new();
+
+    public bool IsClean => ContestedMaps.Count == 0 && PlaceholderRows.Count == 0
+        && OrphanStorage.Count == 0 && WebpDrift.Count == 0;
+}
+
+/// <summary>
+/// WebP pyramid drift of one live map, measured file-by-file against the map's zoom-0 rows
+/// (the pyramid's ground truth): ghost files whose footprint holds no data anymore (they render
+/// imagery of deleted/moved terrain) and stale files older than the newest data in their
+/// footprint (they miss content added since). Either kind means the map needs a WebP rebuild.
+/// Missing zoom-0 files are informational only — on-the-fly generation heals those on view.
+/// </summary>
+public class WebpPyramidDriftDto
+{
+    public string TenantId { get; set; } = string.Empty;
+    public string TenantName { get; set; } = string.Empty;
+    public int MapId { get; set; }
+    public string MapName { get; set; } = string.Empty;
+
+    /// <summary>Files (any zoom) whose footprint contains no zoom-0 rows at all.</summary>
+    public int GhostFiles { get; set; }
+    public long GhostBytes { get; set; }
+
+    /// <summary>Files (any zoom) older than the newest zoom-0 row in their footprint.</summary>
+    public int StaleFiles { get; set; }
+
+    /// <summary>Cells with zoom-0 rows but no zoom-0 WebP file (heals on view; informational).</summary>
+    public int MissingZoom0Cells { get; set; }
+
+    /// <summary>Total pyramid files checked for this map.</summary>
+    public int FilesChecked { get; set; }
+
+    /// <summary>Up to a handful of "z{zoom} (x,y)" examples for orientation.</summary>
+    public List<string> SampleDriftTiles { get; set; } = new();
 }
 
 /// <summary>
@@ -58,6 +93,27 @@ public class TenantOrphanStorageDto
 public class PurgeOrphanedMapDataRequestDto
 {
     public string ConfirmTenantId { get; set; } = string.Empty;
+}
+
+/// <summary>Request body for rebuilding the WebP pyramids of ALL currently drifted maps.</summary>
+public class RebuildAllDriftRequestDto
+{
+    public bool ConfirmAll { get; set; }
+}
+
+/// <summary>Result of a rebuild-all-drift run: one entry aggregated across every drifted map.</summary>
+public class RebuildAllDriftResultDto
+{
+    public int MapsRebuilt { get; set; }
+    public int FilesDeleted { get; set; }
+    public double MegabytesFreed { get; set; }
+    public int CellsMarked { get; set; }
+
+    /// <summary>Cells pushed onto the fast queue; the rest follow via the 5-minute scan.</summary>
+    public int CellsEnqueued { get; set; }
+
+    /// <summary>"tenant/mapId (name)" per rebuilt map.</summary>
+    public List<string> Maps { get; set; } = new();
 }
 
 /// <summary>What an orphan purge actually removed. Only provably-dead data is ever touched.</summary>

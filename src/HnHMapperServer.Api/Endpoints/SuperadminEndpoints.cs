@@ -128,6 +128,9 @@ public static class SuperadminEndpoints
         // POST /api/superadmin/integrity/tenants/{tenantId}/purge-orphans - Delete a tenant's orphaned map storage
         group.MapPost("/integrity/tenants/{tenantId}/purge-orphans", PurgeOrphanedMapData);
 
+        // POST /api/superadmin/integrity/rebuild-webp-drift - Rebuild WebP pyramids of ALL drifted maps
+        group.MapPost("/integrity/rebuild-webp-drift", RebuildAllDriftedWebpTiles);
+
         // GET /api/superadmin/tenants/{tenantId}/maps/{mapId}/wipe-region/preview - Blast-radius preview
         group.MapGet("/tenants/{tenantId}/maps/{mapId}/wipe-region/preview", PreviewWipeMapRegion);
 
@@ -2100,56 +2103,9 @@ public static class SuperadminEndpoints
 
         try
         {
-            // 1. Drop the old pyramid (files + this process's in-memory cache).
-            var (filesDeleted, bytesFreed) = largeTileService.DeleteMapWebpTiles(tenantId, mapId);
-
-            // 2. Evict the Web process's in-memory cache too.
-            await InvalidateWebMapTileCacheAsync(httpClientFactory, tenantId, mapId, logger);
-
-            // 3. Seed regeneration: every distinct 4x4 cell with renderable zoom-0 rows. Dirty
-            //    rows are the durable path (5-minute scan); the queue covers the first cells fast.
-            var zoom0Coords = await db.Tiles
-                .AsNoTracking()
-                .IgnoreQueryFilters()
-                .Where(t => t.TenantId == tenantId && t.MapId == mapId && t.Zoom == 0 && t.File != "")
-                .Select(t => new { t.CoordX, t.CoordY })
-                .ToListAsync();
-
-            var cells = zoom0Coords
-                .Select(c => (X: (int)Math.Floor(c.CoordX / 4.0), Y: (int)Math.Floor(c.CoordY / 4.0)))
-                .Distinct()
-                .ToList();
-
-            await tileService.MarkParentTilesDirtyBatchAsync(
-                tenantId, mapId,
-                cells.Select(c => new HnHMapperServer.Core.Models.Coord(c.X * 4, c.Y * 4)).ToList());
-
-            var enqueued = 0;
-            foreach (var cell in cells)
-            {
-                if (zoomTileQueue.PendingCount >= 3000)
-                {
-                    break; // bounded queue: leave headroom for live uploads; the scan takes the rest
-                }
-
-                zoomTileQueue.EnqueueZoomRegeneration(
-                    new HnHMapperServer.Services.Services.ZoomTileRequest(tenantId, mapId, cell.X * 4, cell.Y * 4));
-                enqueued++;
-            }
-
-            // 4. Everyone refetches.
-            var newRevision = revisionCache.Increment(mapId);
-            notificationService.NotifyMapRevision(mapId, newRevision);
-
-            var result = new RebuildWebpTilesResultDto
-            {
-                TenantId = tenantId,
-                MapId = mapId,
-                FilesDeleted = filesDeleted,
-                MegabytesFreed = Math.Round(bytesFreed / 1024.0 / 1024.0, 2),
-                CellsMarked = cells.Count,
-                CellsEnqueued = enqueued
-            };
+            var result = await RebuildMapWebpCoreAsync(
+                tenantId, mapId, db, largeTileService, tileService, zoomTileQueue,
+                revisionCache, notificationService, httpClientFactory, logger);
 
             await auditService.LogAsync(new AuditEntry
             {
@@ -2165,7 +2121,7 @@ public static class SuperadminEndpoints
             logger.LogWarning(
                 "SuperAdmin {Username} rebuilt WebP pyramid of map {MapId} (tenant {TenantId}): " +
                 "{Files} files deleted ({MB:F1} MB), {Cells} cells reseeded ({Enqueued} queued)",
-                adminUsername, mapId, tenantId, filesDeleted, result.MegabytesFreed, cells.Count, enqueued);
+                adminUsername, mapId, tenantId, result.FilesDeleted, result.MegabytesFreed, result.CellsMarked, result.CellsEnqueued);
 
             return Results.Ok(result);
         }
@@ -2173,6 +2129,147 @@ public static class SuperadminEndpoints
         {
             logger.LogError(ex, "Error rebuilding WebP tiles for tenant {TenantId} map {MapId}", tenantId, mapId);
             return Results.Problem("Failed to rebuild WebP tiles");
+        }
+    }
+
+    /// <summary>
+    /// The rebuild itself, shared by the per-map endpoint and rebuild-all-drift: drop the old
+    /// pyramid (files + both processes' caches), seed regeneration (durable dirty rows + fast
+    /// queue up to a shared headroom cap), and bump the map revision so viewers refetch.
+    /// </summary>
+    private static async Task<RebuildWebpTilesResultDto> RebuildMapWebpCoreAsync(
+        string tenantId,
+        int mapId,
+        ApplicationDbContext db,
+        ILargeTileService largeTileService,
+        ITileService tileService,
+        HnHMapperServer.Services.Services.ZoomTileQueueService zoomTileQueue,
+        HnHMapperServer.Api.Services.MapRevisionCache revisionCache,
+        IUpdateNotificationService notificationService,
+        IHttpClientFactory httpClientFactory,
+        ILogger logger)
+    {
+        // 1. Drop the old pyramid (files + this process's in-memory cache).
+        var (filesDeleted, bytesFreed) = largeTileService.DeleteMapWebpTiles(tenantId, mapId);
+
+        // 2. Evict the Web process's in-memory cache too.
+        await InvalidateWebMapTileCacheAsync(httpClientFactory, tenantId, mapId, logger);
+
+        // 3. Seed regeneration: every distinct 4x4 cell with renderable zoom-0 rows. Dirty
+        //    rows are the durable path (5-minute scan); the queue covers the first cells fast.
+        var zoom0Coords = await db.Tiles
+            .AsNoTracking()
+            .IgnoreQueryFilters()
+            .Where(t => t.TenantId == tenantId && t.MapId == mapId && t.Zoom == 0 && t.File != "")
+            .Select(t => new { t.CoordX, t.CoordY })
+            .ToListAsync();
+
+        var cells = zoom0Coords
+            .Select(c => (X: (int)Math.Floor(c.CoordX / 4.0), Y: (int)Math.Floor(c.CoordY / 4.0)))
+            .Distinct()
+            .ToList();
+
+        await tileService.MarkParentTilesDirtyBatchAsync(
+            tenantId, mapId,
+            cells.Select(c => new HnHMapperServer.Core.Models.Coord(c.X * 4, c.Y * 4)).ToList());
+
+        var enqueued = 0;
+        foreach (var cell in cells)
+        {
+            if (zoomTileQueue.PendingCount >= 3000)
+            {
+                break; // bounded queue: leave headroom for live uploads; the scan takes the rest
+            }
+
+            zoomTileQueue.EnqueueZoomRegeneration(
+                new HnHMapperServer.Services.Services.ZoomTileRequest(tenantId, mapId, cell.X * 4, cell.Y * 4));
+            enqueued++;
+        }
+
+        // 4. Everyone refetches.
+        var newRevision = revisionCache.Increment(mapId);
+        notificationService.NotifyMapRevision(mapId, newRevision);
+
+        return new RebuildWebpTilesResultDto
+        {
+            TenantId = tenantId,
+            MapId = mapId,
+            FilesDeleted = filesDeleted,
+            MegabytesFreed = Math.Round(bytesFreed / 1024.0 / 1024.0, 2),
+            CellsMarked = cells.Count,
+            CellsEnqueued = enqueued
+        };
+    }
+
+    /// <summary>
+    /// POST /api/superadmin/integrity/rebuild-webp-drift
+    /// The one-click repair: reruns the drift scan server-side and rebuilds the WebP pyramid of
+    /// every map it flags (ghost or stale files). Regeneration is seeded durably per map, so any
+    /// number of maps completes via the 5-minute backstop even when the fast queue fills up.
+    /// </summary>
+    private static async Task<IResult> RebuildAllDriftedWebpTiles(
+        RebuildAllDriftRequestDto dto,
+        ApplicationDbContext db,
+        IMapIntegrityService integrityService,
+        ILargeTileService largeTileService,
+        ITileService tileService,
+        HnHMapperServer.Services.Services.ZoomTileQueueService zoomTileQueue,
+        HnHMapperServer.Api.Services.MapRevisionCache revisionCache,
+        IUpdateNotificationService notificationService,
+        IHttpClientFactory httpClientFactory,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        if (dto == null || !dto.ConfirmAll)
+        {
+            return Results.BadRequest(new { error = "confirmAll must be true" });
+        }
+
+        var adminUsername = context.User.Identity?.Name ?? "Unknown";
+
+        try
+        {
+            // The server decides what is drifted — never a client-supplied list.
+            var report = await integrityService.ScanAsync();
+            var result = new RebuildAllDriftResultDto();
+
+            foreach (var drift in report.WebpDrift)
+            {
+                var mapResult = await RebuildMapWebpCoreAsync(
+                    drift.TenantId, drift.MapId, db, largeTileService, tileService, zoomTileQueue,
+                    revisionCache, notificationService, httpClientFactory, logger);
+
+                result.MapsRebuilt++;
+                result.FilesDeleted += mapResult.FilesDeleted;
+                result.MegabytesFreed = Math.Round(result.MegabytesFreed + mapResult.MegabytesFreed, 2);
+                result.CellsMarked += mapResult.CellsMarked;
+                result.CellsEnqueued += mapResult.CellsEnqueued;
+                result.Maps.Add($"{drift.TenantId}/{drift.MapId} ({drift.MapName})");
+            }
+
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = null,
+                UserId = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? adminUsername,
+                Action = "SuperAdminRebuiltAllDriftedWebpTiles",
+                EntityType = "System",
+                EntityId = "webp-drift",
+                OldValue = JsonSerializer.Serialize(new { result.MapsRebuilt, result.FilesDeleted, result.MegabytesFreed }),
+                NewValue = $"Rebuilt WebP pyramids of {result.MapsRebuilt} drifted map(s) by {adminUsername}: " +
+                           string.Join(", ", result.Maps)
+            });
+
+            logger.LogWarning(
+                "SuperAdmin {Username} rebuilt WebP pyramids of {Count} drifted maps: {Maps}",
+                adminUsername, result.MapsRebuilt, string.Join(", ", result.Maps));
+
+            return Results.Ok(result);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error rebuilding drifted WebP pyramids");
+            return Results.Problem("Failed to rebuild drifted WebP pyramids");
         }
     }
 

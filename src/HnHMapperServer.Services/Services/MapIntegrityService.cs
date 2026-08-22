@@ -137,14 +137,169 @@ public class MapIntegrityService : IMapIntegrityService
             .ToList();
 
         await ScanOrphanStorageAsync(report, ct);
+        await ScanWebpDriftAsync(report, ct);
 
         _logger.LogInformation(
             "Map integrity scan: {Tenants} tenants, {Grids} grids, {ContestedMaps} maps with contested cells, " +
-            "{Placeholders} placeholder rows, {OrphanTenants} tenants with orphaned storage",
+            "{Placeholders} placeholder rows, {OrphanTenants} tenants with orphaned storage, " +
+            "{DriftMaps} maps with WebP pyramid drift",
             report.TenantsScanned, report.TotalGrids, report.ContestedMaps.Count,
-            report.PlaceholderRows.Count, report.OrphanStorage.Count);
+            report.PlaceholderRows.Count, report.OrphanStorage.Count, report.WebpDrift.Count);
 
         return report;
+    }
+
+    /// <summary>Drift examples listed per map before the UI has to rely on the counts alone.</summary>
+    public const int DriftSampleCap = 8;
+
+    /// <summary>
+    /// A file is only stale when it predates the newest data in its footprint by more than this —
+    /// the regeneration pipeline (queue + 5-minute backstop) needs a moment after an upload, and
+    /// flagging that window would be pure noise.
+    /// </summary>
+    public static readonly TimeSpan StaleSlack = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Answers "which maps need a WebP rebuild?" by checking every pyramid file against the map's
+    /// zoom-0 rows (the pyramid's ground truth). A zoom-z file at (X,Y) covers base coords
+    /// [X·4·2^z, (X+1)·4·2^z): no rows in the footprint → ghost (renders deleted/moved terrain);
+    /// file mtime older than the newest row in the footprint → stale (missing content added
+    /// since). Cells with rows but no zoom-0 file are only informational — on-the-fly generation
+    /// heals those the moment someone looks.
+    /// </summary>
+    private async Task ScanWebpDriftAsync(MapIntegrityReportDto report, CancellationToken ct)
+    {
+        var gridStorage = _configuration["GridStorage"] ?? "map";
+
+        var tenantNames = await _db.Tenants.IgnoreQueryFilters()
+            .ToDictionaryAsync(t => t.Id, t => t.Name, ct);
+        var liveMaps = await _db.Maps.IgnoreQueryFilters()
+            .Select(m => new { m.TenantId, m.Id, m.Name })
+            .ToListAsync(ct);
+
+        foreach (var tenantGroup in liveMaps.GroupBy(m => m.TenantId))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // One query per tenant: all zoom-0 rows, grouped per map in memory.
+            var rows = await _db.Tiles.IgnoreQueryFilters()
+                .Where(t => t.TenantId == tenantGroup.Key && t.Zoom == 0 && t.File != "")
+                .Select(t => new { t.MapId, t.CoordX, t.CoordY, t.Cache })
+                .ToListAsync(ct);
+            var rowsByMap = rows.GroupBy(r => r.MapId).ToDictionary(g => g.Key, g => g.ToList());
+
+            foreach (var map in tenantGroup)
+            {
+                var largeDir = Path.Combine(gridStorage, "tenants", map.TenantId, "large", map.Id.ToString());
+                var mapRows = rowsByMap.GetValueOrDefault(map.Id);
+
+                if ((mapRows == null || mapRows.Count == 0) && !Directory.Exists(largeDir))
+                    continue;
+
+                // Per-zoom aggregates: tile coord -> newest data timestamp in its footprint.
+                var levels = new Dictionary<(int X, int Y), DateTime>[7];
+                levels[0] = new Dictionary<(int X, int Y), DateTime>();
+                foreach (var row in mapRows ?? new())
+                {
+                    var key = (FloorDiv(row.CoordX, 4), FloorDiv(row.CoordY, 4));
+                    var when = CacheToUtc(row.Cache);
+                    if (!levels[0].TryGetValue(key, out var current) || when > current)
+                        levels[0][key] = when;
+                }
+                for (int z = 1; z <= 6; z++)
+                {
+                    levels[z] = new Dictionary<(int X, int Y), DateTime>();
+                    foreach (var kv in levels[z - 1])
+                    {
+                        var key = (FloorDiv(kv.Key.X, 2), FloorDiv(kv.Key.Y, 2));
+                        if (!levels[z].TryGetValue(key, out var current) || kv.Value > current)
+                            levels[z][key] = kv.Value;
+                    }
+                }
+
+                var drift = new WebpPyramidDriftDto
+                {
+                    TenantId = map.TenantId,
+                    TenantName = tenantNames.GetValueOrDefault(map.TenantId, map.TenantId),
+                    MapId = map.Id,
+                    MapName = map.Name
+                };
+                var zoom0Files = new HashSet<(int X, int Y)>();
+
+                for (int z = 0; z <= 6; z++)
+                {
+                    var zoomDir = Path.Combine(largeDir, z.ToString());
+                    if (!Directory.Exists(zoomDir))
+                        continue;
+
+                    foreach (var file in new DirectoryInfo(zoomDir).EnumerateFiles("*.webp"))
+                    {
+                        if (!TryParseTileName(file.Name, out var x, out var y))
+                            continue;
+
+                        drift.FilesChecked++;
+                        if (z == 0)
+                            zoom0Files.Add((x, y));
+
+                        if (!levels[z].TryGetValue((x, y), out var newestData))
+                        {
+                            drift.GhostFiles++;
+                            drift.GhostBytes += file.Length;
+                            AddDriftSample(drift, z, x, y, "ghost");
+                        }
+                        else if (file.LastWriteTimeUtc + StaleSlack < newestData)
+                        {
+                            drift.StaleFiles++;
+                            AddDriftSample(drift, z, x, y, "stale");
+                        }
+                    }
+                }
+
+                drift.MissingZoom0Cells = levels[0].Keys.Count(c => !zoom0Files.Contains(c));
+
+                if (drift.GhostFiles > 0 || drift.StaleFiles > 0)
+                {
+                    report.WebpDrift.Add(drift);
+                }
+            }
+        }
+
+        report.WebpDrift = report.WebpDrift
+            .OrderByDescending(d => d.GhostFiles + d.StaleFiles)
+            .ToList();
+    }
+
+    private static void AddDriftSample(WebpPyramidDriftDto drift, int zoom, int x, int y, string kind)
+    {
+        if (drift.SampleDriftTiles.Count < DriftSampleCap)
+        {
+            drift.SampleDriftTiles.Add($"z{zoom} ({x},{y}) {kind}");
+        }
+    }
+
+    private static int FloorDiv(int value, int divisor) => (int)Math.Floor(value / (double)divisor);
+
+    /// <summary>
+    /// Tiles.Cache holds unix MILLISECONDS on the upload/merge/zoom paths but unix SECONDS on the
+    /// hmap-import path. Anything below 10^12 (≈ Sep 2001 as ms) can only be a seconds value.
+    /// </summary>
+    private static DateTime CacheToUtc(long cache)
+    {
+        if (cache <= 0)
+            return DateTime.MinValue;
+        var ms = cache < 1_000_000_000_000 ? cache * 1000 : cache;
+        return DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
+    }
+
+    private static bool TryParseTileName(string fileName, out int x, out int y)
+    {
+        x = 0;
+        y = 0;
+        var stem = fileName.EndsWith(".webp", StringComparison.OrdinalIgnoreCase)
+            ? fileName[..^5]
+            : fileName;
+        var parts = stem.Split('_');
+        return parts.Length == 2 && int.TryParse(parts[0], out x) && int.TryParse(parts[1], out y);
     }
 
     /// <summary>

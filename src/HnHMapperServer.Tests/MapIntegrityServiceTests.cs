@@ -195,12 +195,12 @@ public class MapIntegrityServiceTests : IDisposable
 
     // ---------- orphaned storage ----------
 
-    private void SeedTileRow(string tenantId, int mapId, int x, int y, int zoom, string file)
+    private void SeedTileRow(string tenantId, int mapId, int x, int y, int zoom, string file, long cache = 1)
     {
         _db.Tiles.Add(new TileDataEntity
         {
             MapId = mapId, CoordX = x, CoordY = y, Zoom = zoom,
-            File = file, Cache = 1, TenantId = tenantId, FileSizeBytes = 10
+            File = file, Cache = cache, TenantId = tenantId, FileSizeBytes = 10
         });
         _db.SaveChanges();
     }
@@ -289,6 +289,73 @@ public class MapIntegrityServiceTests : IDisposable
         // A rescan is clean.
         var report = await _service.ScanAsync();
         Assert.Empty(report.OrphanStorage);
+    }
+
+    // ---------- WebP pyramid drift ----------
+
+    private string WriteWebp(int mapId, int zoom, int x, int y, DateTime? mtimeUtc = null)
+    {
+        var path = WriteFile("tenants", TenantA, "large", mapId.ToString(), zoom.ToString(), $"{x}_{y}.webp");
+        if (mtimeUtc.HasValue)
+        {
+            File.SetLastWriteTimeUtc(path, mtimeUtc.Value);
+        }
+        return path;
+    }
+
+    [Fact]
+    public async Task ScanAsync_DetectsWebpPyramidDrift()
+    {
+        SeedMap(400, TenantA, "Drifty");
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // Three cells with data: (0,0) has a STALE file, (10,0) a FRESH file, (20,0) NO file.
+        SeedTileRow(TenantA, 400, 0, 0, 0, $"tenants/{TenantA}/grids/a.png", nowMs);
+        SeedTileRow(TenantA, 400, 40, 0, 0, $"tenants/{TenantA}/grids/b.png", nowMs);
+        SeedTileRow(TenantA, 400, 80, 0, 0, $"tenants/{TenantA}/grids/c.png", nowMs);
+
+        WriteWebp(400, 0, 0, 0, DateTime.UtcNow.AddHours(-2));   // stale: data is newer than file + slack
+        WriteWebp(400, 0, 10, 0);                                 // fresh: mtime now, not flagged
+        WriteWebp(400, 0, 50, 50);                                // ghost: no rows anywhere near
+        WriteWebp(400, 6, 5, 5);                                  // ghost at z6: footprint empty too
+
+        var report = await _service.ScanAsync();
+
+        var drift = Assert.Single(report.WebpDrift);
+        Assert.Equal(400, drift.MapId);
+        Assert.Equal(2, drift.GhostFiles);
+        Assert.Equal(1, drift.StaleFiles);
+        Assert.Equal(1, drift.MissingZoom0Cells); // cell (20,0)
+        Assert.Equal(4, drift.FilesChecked);
+        Assert.False(report.IsClean);
+    }
+
+    [Fact]
+    public async Task ScanAsync_WebpDrift_NormalizesSecondsCacheAndSkipsCleanMaps()
+    {
+        // Map 500: row Cache written in SECONDS (the hmap-import unit) with an old file — only
+        // correct unit normalization detects it as stale (misread as ms it would be 1970).
+        SeedMap(500, TenantA, "SecondsUnits");
+        _db.Tiles.Add(new TileDataEntity
+        {
+            MapId = 500, CoordX = 0, CoordY = 0, Zoom = 0,
+            File = $"tenants/{TenantA}/grids/s.png", Cache = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            TenantId = TenantA, FileSizeBytes = 10
+        });
+        _db.SaveChanges();
+        WriteWebp(500, 0, 0, 0, DateTime.UtcNow.AddHours(-2));
+
+        // Map 600: perfectly in sync — must not appear at all.
+        SeedMap(600, TenantA, "Clean");
+        SeedTileRow(TenantA, 600, 0, 0, 0, $"tenants/{TenantA}/grids/d.png");
+        WriteWebp(600, 0, 0, 0);
+
+        var report = await _service.ScanAsync();
+
+        var drift = Assert.Single(report.WebpDrift);
+        Assert.Equal(500, drift.MapId);
+        Assert.Equal(1, drift.StaleFiles);
+        Assert.DoesNotContain(report.WebpDrift, d => d.MapId == 600);
     }
 
     [Fact]
