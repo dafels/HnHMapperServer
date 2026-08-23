@@ -398,6 +398,39 @@ public class CustomMarkerServiceTests : IDisposable
     }
 
     /// <summary>
+    /// Test: script stripping is case-insensitive and spans newlines.
+    /// <para>
+    /// These two properties come from RegexOptions.IgnoreCase and RegexOptions.Singleline.
+    /// They are asserted separately because the sanitizer's pattern moved from an inline
+    /// Regex.Replace call to [GeneratedRegex], which carries its options in an attribute —
+    /// dropping one there would silently let markup through, and this is XSS-facing code.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task CreateAsync_ScriptVariants_AreStripped()
+    {
+        var dto = new CreateCustomMarkerDto
+        {
+            MapId = 1,
+            CoordX = 0,
+            CoordY = 0,
+            X = 50,
+            Y = 50,
+            // Uppercase tag with an attribute, and a body broken across lines.
+            Title = "<SCRIPT TYPE=\"text/javascript\">alert('x')</SCRIPT>Kept",
+            Description = "before<script>\nvar a = 1;\nalert('multi');\n</script>after",
+            Icon = "gfx/icons/arrow.png"
+        };
+
+        var result = await _customMarkerService.CreateAsync(dto, "testuser");
+
+        Assert.Equal("Kept", result.Title);
+        Assert.Equal("beforeafter", result.Description);
+        Assert.DoesNotContain("alert", result.Title, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("alert", result.Description, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// Test: Coordinates are clamped to 0-100 range
     /// </summary>
     [Fact]

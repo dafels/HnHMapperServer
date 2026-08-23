@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+
 namespace HnHMapperServer.Core.Cookbook;
 
 /// <summary>
@@ -8,7 +10,7 @@ namespace HnHMapperServer.Core.Cookbook;
 /// </summary>
 public static class FepPalette
 {
-    private static readonly Dictionary<string, (string Tier1, string Tier2)> StatColors = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenDictionary<string, (string Tier1, string Tier2)> StatColors = new Dictionary<string, (string Tier1, string Tier2)>(StringComparer.OrdinalIgnoreCase)
     {
         ["STR"] = ("#BF9794", "#DF958F"),
         ["AGI"] = ("#9995B8", "#9991DC"),
@@ -19,9 +21,9 @@ public static class FepPalette
         ["DEX"] = ("#FEFDCC", "#FFFEA6"),
         ["WILL"] = ("#E4F38F", "#EEFF9E"),
         ["PSY"] = ("#C48DFD", "#C286FE")
-    };
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
-    public static readonly IReadOnlyDictionary<string, string> StatFullNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    public static readonly FrozenDictionary<string, string> StatFullNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["STR"] = "Strength",
         ["AGI"] = "Agility",
@@ -32,7 +34,7 @@ public static class FepPalette
         ["DEX"] = "Dexterity",
         ["WILL"] = "Will",
         ["PSY"] = "Psyche"
-    };
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Hex color for a stat pill; unknown stats fall back to neutral gray.</summary>
     public static string Color(string attribute, int tier = 1) =>

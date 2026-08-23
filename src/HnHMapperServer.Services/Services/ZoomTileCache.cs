@@ -42,7 +42,7 @@ internal sealed class ZoomTileCache : IDisposable
     private readonly Dictionary<(int zoom, Coord coord), CachedTile> _cache = new();
 
     // Lock for thread-safe access to _cache
-    private readonly object _cacheLock = new();
+    private readonly System.Threading.Lock _cacheLock = new();
 
     // Pending disk writes
     private readonly List<PendingWrite> _pendingWrites = new();

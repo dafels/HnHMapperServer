@@ -32,7 +32,7 @@ public class PublicTileCacheService
     private readonly ILogger<PublicTileCacheService> _logger;
     private readonly string _gridStorage;
     private readonly long _budgetBytes;
-    private readonly object _evictionGate = new();
+    private readonly System.Threading.Lock _evictionGate = new();
     private long _bytes;
     private bool _isLoaded;
     private bool _budgetReported;
