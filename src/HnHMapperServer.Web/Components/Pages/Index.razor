@@ -103,7 +103,7 @@
                                 <MudPaper Class="pa-2 d-flex justify-space-between align-center" Elevation="0" Style="background: rgba(255,255,255,0.55);">
                                     <MudText Typo="Typo.body2" Style="font-family: monospace; word-break: break-all;">@InviteLinkUrl</MudText>
                                     <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Color="Color.Primary"
-                                                   OnClick="@(() => Clipboard.CopyAsync(InviteLinkUrl, "Invite link copied"))" Title="Copy invite link" />
+                                                   OnClick="@(() => Clipboard.CopyAsync(InviteLinkUrl, "Invite link copied"))" aria-label="Copy invite link" title="Copy invite link" />
                                 </MudPaper>
                                 <MudText Typo="Typo.caption" Class="ck-text-secondary mt-2">
                                     Expires in @DaysUntil(_inviteLink.ExpiresAt) &middot; @_inviteLink.UseCount joined
@@ -153,13 +153,13 @@
                                             <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Text">Mapper</MudChip>
                                             <MudText Typo="Typo.caption" Style="font-family: monospace; word-break: break-all;">@token.Url</MudText>
                                             <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Color="Color.Primary"
-                                                           OnClick="@(() => CopyToClipboard(token.Url))" Title="Copy mapper URL" />
+                                                           OnClick="@(() => CopyToClipboard(token.Url))" aria-label="Copy mapper URL" title="Copy mapper URL" />
                                         </MudStack>
                                         <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
                                             <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Text">Cookbook</MudChip>
                                             <MudText Typo="Typo.caption" Style="font-family: monospace; word-break: break-all;">@CookbookUrl(token.Url)</MudText>
                                             <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Color="Color.Warning"
-                                                           OnClick="@(() => CopyToClipboard(CookbookUrl(token.Url)))" Title="Copy cookbook URL" />
+                                                           OnClick="@(() => CopyToClipboard(CookbookUrl(token.Url)))" aria-label="Copy cookbook URL" title="Copy cookbook URL" />
                                         </MudStack>
                                     </MudStack>
                                 </MudTd>

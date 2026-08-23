@@ -68,7 +68,8 @@
                                   Validation="@(new Func<string, string?>(ValidateUsername))"
                                   Variant="Variant.Outlined"
                                   HelperText="3-20 letters, numbers or underscores"
-                                  OnKeyPress="@HandleKeyPress" />
+                                  Immediate="true"
+                                  OnKeyDown="@HandleKeyPress" />
 
                     <MudTextField @bind-Value="_discordName"
                                   Label="Discord name"
@@ -77,7 +78,8 @@
                                   Validation="@(new Func<string, string?>(ValidateDiscordName))"
                                   Variant="Variant.Outlined"
                                   HelperText="So your village knows who you are"
-                                  OnKeyPress="@HandleKeyPress" />
+                                  Immediate="true"
+                                  OnKeyDown="@HandleKeyPress" />
 
                     <MudTextField @bind-Value="_password"
                                   Label="Password"
@@ -86,7 +88,8 @@
                                   Validation="@(new Func<string, string?>(ValidatePassword))"
                                   Variant="Variant.Outlined"
                                   HelperText="Minimum 6 characters"
-                                  OnKeyPress="@HandleKeyPress" />
+                                  Immediate="true"
+                                  OnKeyDown="@HandleKeyPress" />
 
                     <MudTextField @bind-Value="_confirmPassword"
                                   Label="Confirm password"
@@ -94,7 +97,8 @@
                                   Required="true"
                                   Validation="@(new Func<string, string?>(ValidateConfirmPassword))"
                                   Variant="Variant.Outlined"
-                                  OnKeyPress="@HandleKeyPress" />
+                                  Immediate="true"
+                                  OnKeyDown="@HandleKeyPress" />
 
                     @if (!string.IsNullOrEmpty(_errorMessage))
                     {

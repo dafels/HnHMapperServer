@@ -30,7 +30,7 @@
 @if (GetFilteredRoads().Any())
 {
     <MudText Typo="Typo.caption" Class="mb-2">@GetFilteredRoads().Count() road(s)</MudText>
-    <MudList T="string" Dense="true" Clickable="true">
+    <MudList T="string" Dense="true">
         @foreach (var road in GetFilteredRoads())
         {
             <MudListItem T="string" OnClick="@(() => OnRoadSelected.InvokeAsync(road))">
@@ -54,14 +54,16 @@
                                           Size="Size.Small"
                                           Color="Color.Primary"
                                           OnClick="@(() => OnRoadEdit.InvokeAsync(road))"
-                                          OnClickStopPropagation="true"
-                                          Title="Edit road" />
+                                          ClickPropagation="false"
+                                          aria-label="Edit road"
+                                          title="Edit road" />
                             <MudIconButton Icon="@Icons.Material.Filled.Delete"
                                           Size="Size.Small"
                                           Color="Color.Error"
                                           OnClick="@(() => OnRoadDelete.InvokeAsync(road))"
-                                          OnClickStopPropagation="true"
-                                          Title="Delete road" />
+                                          ClickPropagation="false"
+                                          aria-label="Delete road"
+                                          title="Delete road" />
                         </MudStack>
                     }
                 </MudStack>

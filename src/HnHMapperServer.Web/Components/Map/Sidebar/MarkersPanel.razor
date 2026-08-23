@@ -43,7 +43,7 @@
         Custom Markers
     </MudText>
     <MudText Typo="Typo.caption" Class="mb-2">@GetFilteredCustomMarkers().Count() custom marker(s)</MudText>
-    <MudList T="string" Dense="true" Clickable="true" Class="mb-4">
+    <MudList T="string" Dense="true" Class="mb-4">
         @foreach (var marker in GetFilteredCustomMarkers())
         {
             var customMarkerTimer = GetTimerForCustomMarker(marker.Id);
@@ -80,18 +80,21 @@
                                               Size="Size.Small"
                                               Color="Color.Default"
                                               OnClick="@(() => OnSetTimerForCustomMarker.InvokeAsync(marker))"
-                                              Title="Set timer" />
+                                              aria-label="Set timer"
+                                              title="Set timer" />
                             }
                             <MudIconButton Icon="@Icons.Material.Filled.Edit"
                                           Size="Size.Small"
                                           Color="Color.Primary"
                                           OnClick="@(() => OnCustomMarkerEdit.InvokeAsync(marker))"
-                                          Title="Edit marker" />
+                                          aria-label="Edit marker"
+                                          title="Edit marker" />
                             <MudIconButton Icon="@Icons.Material.Filled.Delete"
                                           Size="Size.Small"
                                           Color="Color.Error"
                                           OnClick="@(() => OnCustomMarkerDelete.InvokeAsync(marker))"
-                                          Title="Delete marker" />
+                                          aria-label="Delete marker"
+                                          title="Delete marker" />
                         </MudStack>
                     }
                 </MudStack>
@@ -127,8 +130,9 @@
                                Size="Size.Small"
                                Color="@(isVisible ? Color.Default : Color.Error)"
                                OnClick="@(() => ToggleGroupVisibility(group.ImageType))"
-                               OnClickStopPropagation="true"
-                               Title="@(isVisible ? "Hide on map" : "Show on map")"
+                               ClickPropagation="false"
+                               aria-label="@(isVisible ? "Hide on map" : "Show on map")"
+                               title="@(isVisible ? "Hide on map" : "Show on map")"
                                Style="margin: -4px 0;" />
                 <img src="@GetMarkerIconSrc(group.ImageType)"
                      alt="icon"
@@ -164,8 +168,9 @@
                                                    Size="Size.Small"
                                                    Color="Color.Default"
                                                    OnClick="@(() => OnSetTimerForMarker.InvokeAsync(marker))"
-                                                   OnClickStopPropagation="true"
-                                                   Title="Set timer" />
+                                                   ClickPropagation="false"
+                                                   aria-label="Set timer"
+                                                   title="Set timer" />
                                 }
                             </MudStack>
                         </MudListItem>

@@ -26,7 +26,7 @@
     <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">
         <MudStack Row="true" Justify="Justify.SpaceBetween" AlignItems="AlignItems.Center">
             <MudText Typo="Typo.body2">Your character: @MyCharacterName</MudText>
-            <MudIconButton Icon="@Icons.Material.Filled.StarBorder" Size="Size.Small" OnClick="@(() => OnSetMyCharacter.InvokeAsync(null))" Title="Clear selection" />
+            <MudIconButton Icon="@Icons.Material.Filled.StarBorder" Size="Size.Small" OnClick="@(() => OnSetMyCharacter.InvokeAsync(null))" aria-label="Clear selection" title="Clear selection" />
         </MudStack>
     </MudAlert>
 }
@@ -34,7 +34,7 @@
 @if (FilteredPlayers.Any())
 {
     <MudText Typo="Typo.caption" Class="mb-2">@FilteredPlayers.Count() active player(s)</MudText>
-    <MudList T="string" Dense="true" Clickable="true">
+    <MudList T="string" Dense="true">
         @foreach (var player in FilteredPlayers)
         {
             var isMyCharacter = player.Name == MyCharacterName;
@@ -57,8 +57,9 @@
                                    Size="Size.Small"
                                    Color="@(isMyCharacter ? Color.Warning : Color.Default)"
                                    OnClick="@(() => HandleSetMyCharacter(player.Name))"
-                                   OnClickStopPropagation="true"
-                                   Title="@(isMyCharacter ? "This is your character" : "Set as your character")" />
+                                   ClickPropagation="false"
+                                   aria-label="@(isMyCharacter ? "This is your character" : "Set as your character")"
+                                   title="@(isMyCharacter ? "This is your character" : "Set as your character")" />
                 </MudStack>
             </MudListItem>
         }

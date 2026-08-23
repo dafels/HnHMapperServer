@@ -637,6 +637,64 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-23: MUD0002 cleanup — 89 dead MudBlazor attributes ported or deleted (0 warnings)
+
+**Every attribute MudBlazor was silently swallowing into `UserAttributes` is gone: 178 MUD0002
+warnings (89 sites across 26 razor files — each is reported twice) → 0.** These predate the v8→v9
+upgrade, so the configuration they expressed had never once taken effect. Removing them also cleared
+12 `CS8974` and 4 `CS8601` warnings, which were the compiler noticing method groups being boxed into
+that same dictionary. Suite 308/308; no new warnings; solution-wide MUD0002 is 0.
+**The analyzer's `LowerCase` pattern is why `title=`/`aria-label=` pass and `Title=` does not** — an
+attribute starting lowercase is assumed to be an HTML pass-through, anything else must be a real parameter.
+- **Snackbar config moved to `AddMudServices`** (Web/Program.cs): `PositionClass` (bottom-left — the
+  one real visual change; toasts had been rendering top-right all along), `MaxDisplayedSnackbars=5`
+  and `PreventDuplicates=true` (both already the library defaults) and `HideTransitionDuration=400`
+  (default 2000). **`VisibleStateDuration="400"` was deliberately NOT ported** — that is how long a
+  toast stays readable (default 5000ms), not a transition timing; it was almost certainly meant as a
+  twin of `HideTransitionDuration`, and honouring it now would make every toast in the app flash past
+  unread. Verified live: container renders `mud-snackbar-location-bottom-left`, two identical adds
+  collapse to one, eight distinct adds show five.
+- **Two dead features came back to life.** `MudFab` has **no `ChildContent`** in v9, so the
+  character-count `MudBadge` inside the map's floating menu button was being stringified into a bogus
+  DOM attribute and never rendered — the badge now *wraps* the FAB (`MudBadge` carries
+  `GetMenuButtonStyle()` so the fixed positioning still anchors it). `OnKeyPress` on `MudTextField`
+  → **`OnKeyDown`** restored Enter-to-submit on Login/Register; those six fields also gained
+  **`Immediate="true"`**, without which `keydown` fires before the `change` event commits the binding
+  and Enter would post a stale (often empty) password.
+- **Renames:** `Option`→`Value` on MudRadio and `@bind-SelectedOption`→`@bind-Value` on MudRadioGroup
+  (CreateTimerDialog's timer-type selector was completely inert; note all three current call sites
+  pass `ForceStandalone`/`Timer`/`PresetType`, so that radio group is not reachable from the UI
+  today); `OpenMenuOnFocus`→`OpenOnFocus`; `DisableGutters`→`Gutters="false"`;
+  `IsInitiallyExpanded`→`Expanded`; `OnClickStopPropagation="true"`→**`ClickPropagation="false"`**
+  (inverted — five icon buttons nested in clickable rows were firing the row action too).
+- **Deleted (no v9 equivalent, and nothing to preserve since they never worked):** `Clickable` on
+  MudList (items carry their own `OnClick`), `Filter` + `@bind-SelectedChip` on MudChipSet (plus the
+  never-read `_selectedPreset` field), `DisablePortal` on MudAutocomplete. **Note:** the
+  `.icon-autocomplete-context .mud-popover` rule in `map-styles.css` has been dead since v7 — popovers
+  always render through `MudPopoverProvider` at the end of `<body>`, never inside that wrapper. Left
+  in place (out of scope); `PopoverClass="icon-autocomplete-popover"` is what actually styles it.
+- **`Expanded` needs somewhere to live.** `MudExpansionPanels` lost `Expanded`/`ExpandedChanged` (it
+  is per-panel now). Map.razor's controls hint just moved `@bind-Expanded` onto its panel, but
+  EventsPanel's timer groups could not: `GetTimerGroups()` rebuilds its `TimerGroup` objects on every
+  render, so binding to `group.IsExpanded` would snap the panel back to the hardcoded default on the
+  next timer tick. Added `_groupPanelExpanded` (name-keyed dict) with `Expanded`+`ExpandedChanged`,
+  so the group's own `IsExpanded` supplies only the initial value. **Rule: a MudBlazor `Expanded` fed
+  from a per-render-rebuilt object needs its state held by the component, not the object.**
+- **`Title` on 48 icon buttons + 1 FAB → `aria-label` + `title`.** `Title` was never inert here: Blazor
+  splats `UserAttributes` verbatim and HTML lowercases attribute names, so it *was* rendering a working
+  native tooltip. Dropping it would have been a visible regression, so both are set — `aria-label` for
+  the robust accessible name, `title` for the unchanged hover tooltip. MapsPanel's eight overlay-nudge
+  buttons got descriptive labels (`aria-label="X offset -10"`) while keeping the terse `title="-10"`;
+  the icons there are left/right chevrons on both rows, so the labels say "X/Y offset", not up/down.
+- **Verified in a real browser** (API+Web in a .NET 10 container, Chromium via Playwright): radio
+  binding walks Standalone→Marker→CustomMarker; a chip click selects exactly one; an icon click
+  increments only its own counter while the row's stays put; a collapsed group panel *stays* collapsed
+  across a forced re-render; the FAB badge shows "7"; the controls hint expands and collapses with no
+  gutter class. Zero console/page errors on dashboard, map, admin, superadmin and cookbook.
+  **This app has no dark mode** — `MudThemeProvider` is used without `IsDarkMode`/`DarkTheme` and
+  there is no `prefers-color-scheme` CSS, so light and dark render identically (confirmed by
+  screenshotting under both); "Dark mode" is still the open Priority 3 item below.
+
 ### 2026-08-23: Memory work on top of .NET 10 (branch `upgrade/net10`)
 
 **Every number here was measured on the branch against a copy of the dev DB, driving the real
@@ -771,12 +829,9 @@ z0/z2/z5; Blazor circuit, chip filters, header sort, dialogs, tabs, uploads all 
   JPEG paths, lower WebP-lossless allocations, configurable `MemoryAllocator` limits) is worth the
   licence chore; the only code change needed was two test helpers (`Color.FromPixel(...)`).
 - **Known follow-ups (not done here):** ~89 dead MudBlazor attributes flagged by MUD0002 since the
-  v8 days (`PreventDuplicates`/`MaxDisplayedSnackbars`/`VisibleStateDuration`/`PositionClass` on
-  MudSnackbarProvider, `Clickable` on MudList, `Filter`/`SelectedChip` on MudChipSet, `Option` on
-  MudRadio, `DisablePortal`/`OpenMenuOnFocus` on MudAutocomplete, `Title` on MudIconButton/MudFab,
-  …) — they compile but do nothing, so that UI configuration has been silently inert; and one
+  v8 days — **done 2026-08-23, see the MUD0002 entry above**; and one
   malformed icon URL `/f:gfx/invobjs/leaf-brassica.png` (an `f:`-prefixed path leaking into
-  `FoodIcons`). Optional .NET 10 adoption work: named query filters for the 17 tenant filters,
+  `FoodIcons`) — still open. Optional .NET 10 adoption work: named query filters for the 17 tenant filters,
   `TypedResults.ServerSentEvents` for the 10 hand-rolled SSE writers, Blazor circuit
   pause/resume + `[PersistentState]` (the disconnected-circuit memory problem behind
   `CookbookFlatCache`), Blazor circuit metrics (`circuit.active` / `circuit.connected`) in Grafana,

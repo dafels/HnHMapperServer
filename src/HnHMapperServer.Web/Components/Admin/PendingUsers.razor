@@ -89,12 +89,14 @@
                             <MudIconButton Icon="@Icons.Material.Filled.CheckCircle"
                                           Color="Color.Success"
                                           Size="Size.Small"
-                                          Title="Approve user"
+                                          aria-label="Approve user"
+                                          title="Approve user"
                                           OnClick="@(() => ApproveUser(context))" />
                             <MudIconButton Icon="@Icons.Material.Filled.Cancel"
                                           Color="Color.Error"
                                           Size="Size.Small"
-                                          Title="Reject user"
+                                          aria-label="Reject user"
+                                          title="Reject user"
                                           OnClick="@(() => RejectUser(context))" />
                         </MudStack>
                     </MudTd>

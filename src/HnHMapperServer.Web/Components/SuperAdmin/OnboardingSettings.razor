@@ -158,7 +158,7 @@
                             and save:
                             <div class="d-flex align-center mt-1 mb-1" style="gap: 6px;">
                                 <code style="word-break: break-all;">@(_baseUri)signin-discord</code>
-                                <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Title="Copy redirect URL"
+                                <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" aria-label="Copy redirect URL" title="Copy redirect URL"
                                                OnClick="@(() => Clipboard.CopyAsync($"{_baseUri}signin-discord", "Redirect URL copied"))" />
                             </div>
                             Discord requires an <strong>https</strong> address for public sites (http is accepted only for localhost),
