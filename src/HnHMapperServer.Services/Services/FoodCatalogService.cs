@@ -746,7 +746,7 @@ public class FoodCatalogService : IFoodCatalogService
         foreach (var (name, groupRecords) in groups.OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
         {
             var baseRecord = PickBaseRecord(groupRecords);
-            if (string.IsNullOrWhiteSpace(baseRecord.ResourceName))
+            if (FoodResourceName.Normalize(baseRecord.ResourceName).Length == 0)
             {
                 result.Skipped++;
                 AddError(result, $"'{name}': no resource path in any record");
@@ -887,7 +887,7 @@ public class FoodCatalogService : IFoodCatalogService
         foreach (var food in snapshot.Foods)
         {
             var name = string.IsNullOrWhiteSpace(food.Name) ? string.Empty : NormalizeName(food.Name);
-            var resource = food.ResourceName?.Trim() ?? string.Empty;
+            var resource = FoodResourceName.Normalize(food.ResourceName);
             if (name.Length is 0 or > MaxUploadNameLength
                 || resource.Length is 0 or > MaxUploadResourceLength)
             {
@@ -1142,7 +1142,8 @@ public class FoodCatalogService : IFoodCatalogService
 
         foreach (var upload in records)
         {
-            if (string.IsNullOrWhiteSpace(upload.ItemName) || string.IsNullOrWhiteSpace(upload.ResourceName))
+            if (string.IsNullOrWhiteSpace(upload.ItemName)
+                || FoodResourceName.Normalize(upload.ResourceName).Length == 0)
             {
                 result.Skipped++;
                 continue;
@@ -1399,7 +1400,7 @@ public class FoodCatalogService : IFoodCatalogService
         {
             TenantId = tenantId,
             Name = name,
-            ResourceName = baseRecord.ResourceName!.Trim(),
+            ResourceName = FoodResourceName.Normalize(baseRecord.ResourceName),
             ImportedAt = importedAt,
             Ingredients = MapIngredients(baseRecord.Ingredients)
         };
