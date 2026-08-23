@@ -1,18 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <Sdk Name="Aspire.AppHost.Sdk" Version="9.5.1" />
+  <Sdk Name="Aspire.AppHost.Sdk" Version="13.5.2" />
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UserSecretsId>70a6019e-6529-4976-9923-3309c986ca60</UserSecretsId>
+    <!-- Orchestration deps come from NuGet, not the Aspire CLI bundle (aspire.dev/diagnostics/aspire010) -->
+    <NoWarn>$(NoWarn);ASPIRE010</NoWarn>
   </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Aspire.Hosting.AppHost" Version="9.5.1" />
-  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\HnHMapperServer.Api\HnHMapperServer.Api.csproj" />

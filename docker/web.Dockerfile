@@ -1,10 +1,10 @@
 # Multi-stage Dockerfile for HnH Mapper Web Service (Blazor Server)
-# Uses .NET 9.0 SDK for building and .NET 9.0 ASP.NET runtime for production
+# Uses .NET 10.0 SDK for building and .NET 10.0 ASP.NET runtime for production
 
 # ============================================================================
 # Build Stage: Compile and publish the Web project
 # ============================================================================
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 
 # Build arguments for version information (passed from docker build --build-arg)
 ARG BUILD_VERSION="dev"
@@ -36,7 +36,7 @@ RUN dotnet publish -c Release -o /app/publish -p:InformationalVersion="${BUILD_V
 # ============================================================================
 # Runtime Stage: Minimal production image with only the compiled application
 # ============================================================================
-FROM mcr.microsoft.com/dotnet/aspnet:9.0
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
 
 # Build arguments need to be re-declared in runtime stage to be accessible
 ARG BUILD_VERSION="dev"
