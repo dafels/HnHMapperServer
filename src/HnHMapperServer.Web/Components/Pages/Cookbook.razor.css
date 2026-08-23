@@ -225,6 +225,25 @@
     background: #e8ddc9;
 }
 
+/* Recipe components (wiki recipe names the game never records): dashed, paler wheat */
+.stat-chip.wall-chip.component,
+.stat-chip.filter-chip.component {
+    background: #f1e9da;
+    border: 1px dashed rgba(0, 0, 0, 0.35);
+}
+
+.stat-chip.wall-chip.component.selected,
+.stat-chip.filter-chip.component {
+    border-color: rgba(0, 0, 0, 0.55);
+}
+
+.wall-legend {
+    padding: 6px 2px 2px 2px;
+    font-size: 0.72rem;
+    color: var(--ck-text-muted);
+    max-width: 900px;
+}
+
 /* Small amber preparation badge next to the food name */
 .prep-badge {
     display: inline-block;

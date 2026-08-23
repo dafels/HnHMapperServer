@@ -222,26 +222,34 @@
                                       Variant="Variant.Outlined"
                                       Margin="Margin.Dense"
                                       Class="wall-filter" />
+                        <div class="wall-legend">
+                            Solid chips are ingredients players' clients recorded. Dashed chips are <strong>recipe
+                            components</strong> the wiki recipe calls for that the game never records as ingredients —
+                            it logs source ingredients instead (butter shows up as the milk it was churned from;
+                            fixed parts like leeks or trout don't show at all).
+                        </div>
                         <div class="wall-groups">
-                            @foreach (var (letter, names) in IngredientWallGroups)
+                            @foreach (var (letter, entries) in IngredientWallGroups)
                             {
-                                var visible = names.Where(WallNameVisible).ToList();
+                                var visible = entries.Where(e => WallNameVisible(e.Name)).ToList();
                                 if (visible.Count == 0)
                                 {
                                     continue;
                                 }
                                 <div class="wall-group">
                                     <span class="wall-letter">@letter</span>
-                                    @foreach (var name in visible)
+                                    @foreach (var entry in visible)
                                     {
-                                        var picked = _selectedIngredients.Contains(name);
-                                        var dead = IsDeadPick(name);
+                                        var picked = entry.IsComponent
+                                            ? _selectedComponents.Contains(entry.Name)
+                                            : _selectedIngredients.Contains(entry.Name);
+                                        var dead = IsDeadPick(entry.Name, entry.IsComponent);
                                         <button type="button"
-                                                class="stat-chip wall-chip @(picked ? "selected" : "") @(dead ? "empty" : "")"
+                                                class="stat-chip wall-chip @(entry.IsComponent ? "component" : "") @(picked ? "selected" : "") @(dead ? "empty" : "")"
                                                 disabled="@dead"
-                                                title="@WallChipTitle(name)"
-                                                @onclick="() => ToggleIngredient(name)">
-                                            @name<span class="stat-chip-count">@WallChipCountText(name)</span>
+                                                title="@WallChipTitle(entry.Name, entry.IsComponent)"
+                                                @onclick="() => ToggleWallEntry(entry.Name, entry.IsComponent)">
+                                            @entry.Name<span class="stat-chip-count">@WallChipCountText(entry.Name, entry.IsComponent)</span>
                                         </button>
                                     }
                                 </div>
@@ -369,6 +377,15 @@
                               title="@IngredientChipTitle(selectedIngredient)"
                               @onclick="() => ToggleIngredient(selectedIngredient)">
                             @selectedIngredient<span class="stat-chip-count">&times;</span>
+                        </span>
+                    }
+                    @foreach (var selectedComponent in _selectedComponents.OrderBy(n => n, StringComparer.OrdinalIgnoreCase))
+                    {
+                        <span class="stat-chip filter-chip component"
+                              style="--chip-color: #f1e9da;"
+                              title="@ComponentTagTitle(selectedComponent)"
+                              @onclick="() => ToggleComponent(selectedComponent)">
+                            @selectedComponent<span class="stat-chip-count">&times;</span>
                         </span>
                     }
                     @foreach (var condition in _allConditions)
@@ -1568,8 +1585,18 @@
     private int _ingredientVocabGen = -1;                   // _flatGen the vocabulary was built for
     private bool _ingredientWallOpen;
     private string _ingredientWallFilter = string.Empty;
-    private List<(string Letter, List<string> Names)> _ingredientWallGroups = new();
+    private List<(string Letter, List<(string Name, bool IsComponent)> Entries)> _ingredientWallGroups = new();
     private int _ingredientWallGen = -1;                    // vocabulary gen the groups were built for
+
+    // Second ingredient source: recipe COMPONENTS from the canonical (wiki) recipe trees.
+    // The game records only the variable, quality-carrying SOURCE ingredients and flattens
+    // intermediates (butter → the milk it was churned from; fixed parts like leeks or trout
+    // are not recorded at all), so names like "Butter" exist only here. Component picks
+    // filter at FOOD level (the recipe calls for it) and AND with recorded picks.
+    private readonly HashSet<string> _selectedComponents = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<int, HashSet<string>> _componentsByFoodId = new();
+    private Dictionary<string, int> _componentGlobalCounts = new(StringComparer.OrdinalIgnoreCase); // component-only names → recipe rows of foods calling for it
+    private int _componentsGen = -1;
     private Dictionary<int, int> _ingredientFoodMatches = new();
     private string? _ingredientFoodMatchesKey;
     private readonly HashSet<int> _expanded = new();
@@ -1801,7 +1828,7 @@
         // a world change while they are in use, the initial toggle racing a slow catalog
         // load — for the flat view AND for the ingredient facet in the Foods view (open
         // wall or active selection). Failed loads stop the loop until Retry resets.
-        var rowsNeeded = _view == CookbookView.Recipes || _ingredientWallOpen || _selectedIngredients.Count > 0;
+        var rowsNeeded = _view == CookbookView.Recipes || _ingredientWallOpen || AnyIngredientPicks;
         if (rowsNeeded && !FlatRowsCurrent && !_flatLoading && !_flatLoadFailed)
         {
             await EnsureFlatRowsAsync();
@@ -2079,6 +2106,12 @@
             {
                 var ingredientMatches = IngredientFoodMatches;
                 rows = rows.Where(r => ingredientMatches.ContainsKey(r.Food.Id));
+            }
+
+            // Recipe components are food-level by nature (catalog + recipe index, no rows needed).
+            if (_selectedComponents.Count > 0)
+            {
+                rows = rows.Where(r => FoodHasComponents(r.Food.Id));
             }
 
             return rows;
@@ -2364,6 +2397,11 @@
                 IngredientFilter.Matches(r.V.Variant.Ingredients, _selectedIngredients, _ingredientsOnlyMode));
         }
 
+        if (_selectedComponents.Count > 0)
+        {
+            rows = rows.Where(r => FoodHasComponents(r.Food.Food.Id));
+        }
+
         var ordered = false;
         if (_showNewOnly)
         {
@@ -2416,7 +2454,8 @@
         int Untagged,
         int NewCount,
         Dictionary<string, int> Ingredients,
-        int IngredientFullMatch);
+        int IngredientFullMatch,
+        Dictionary<string, int> Components);
 
     private FlatChipCounts FlatCounts
     {
@@ -2444,11 +2483,16 @@
         var preps = new Dictionary<string, int>(StringComparer.Ordinal);
         var worlds = new Dictionary<string, int>(StringComparer.Ordinal);
         var ingredients = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var componentCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var plainPrep = 0;
         var untagged = 0;
         var newCount = 0;
         var ingredientFullMatch = 0;
         var ingredientsActive = _selectedIngredients.Count > 0;
+        var componentsActive = _selectedComponents.Count > 0;
+        var componentOnly = _componentGlobalCounts; // built with the vocabulary
+        _ = IngredientVocabulary;
+        var componentsByFood = ComponentsByFoodId;
 
         foreach (var r in FlatCountCore())
         {
@@ -2464,6 +2508,10 @@
                         || (_ingredientsOnlyMode
                             ? r.V.Variant.Ingredients.Count > 0 && ingScan.Missing == 0
                             : ingScan.Hits == _selectedIngredients.Count);
+            componentsByFood.TryGetValue(r.Food.Food.Id, out var foodComponents);
+            var compOk = !componentsActive || (foodComponents != null && foodComponents.IsSupersetOf(_selectedComponents));
+            // Every other family sees both halves of the ingredient facet.
+            ingOk = ingOk && compOk;
 
             if (satOk && prepOk && worldOk && ingOk)
             {
@@ -2521,7 +2569,22 @@
             // counting — a fully-covered recipe keeps matching whatever gets added
             // (shared IngredientFullMatch); a recipe missing exactly ONE name is
             // unlocked by adding that name (its per-name count).
-            if (satOk && prepOk && statOk && worldOk)
+            // Component family (add-one, food level): rows passing everything — including the
+            // current component picks — counted under each component their food calls for.
+            if (satOk && prepOk && statOk && worldOk && ingOk && foodComponents != null)
+            {
+                foreach (var component in foodComponents)
+                {
+                    if (componentOnly.ContainsKey(component))
+                    {
+                        componentCounts[component] = componentCounts.GetValueOrDefault(component) + 1;
+                    }
+                }
+            }
+
+            // Recorded-ingredient family: respects the component picks (compOk), excludes
+            // its own selection per mode.
+            if (satOk && prepOk && statOk && worldOk && compOk)
             {
                 if (!_ingredientsOnlyMode || !ingredientsActive)
                 {
@@ -2545,7 +2608,7 @@
         }
 
         return new FlatChipCounts(stats, satiations, preps, plainPrep, worlds, untagged, newCount,
-            ingredients, ingredientFullMatch);
+            ingredients, ingredientFullMatch, componentCounts);
     }
 
     // ----- Ingredient facet: vocabulary, mutations, picker handlers -----
@@ -2561,10 +2624,32 @@
         {
             if (_ingredientVocabGen != _flatGen)
             {
-                var recipeLists = AllFlatRows().Select(r => r.V.Variant.Ingredients).ToList();
+                var components = ComponentsByFoodId;
+                var recipeLists = new List<List<FoodIngredientDto>>();
+                var componentCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var r in AllFlatRows())
+                {
+                    recipeLists.Add(r.V.Variant.Ingredients);
+                    if (components.TryGetValue(r.Food.Food.Id, out var foodComponents))
+                    {
+                        foreach (var component in foodComponents)
+                        {
+                            componentCounts[component] = componentCounts.GetValueOrDefault(component) + 1;
+                        }
+                    }
+                }
+
                 _ingredientVocab = IngredientFilter.BuildVocabulary(recipeLists);
                 _ingredientGlobalCounts = _ingredientVocab
                     .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+                // A name the game DOES record is a normal ingredient chip; components only
+                // cover what the recorded data can never show.
+                foreach (var recorded in _ingredientGlobalCounts.Keys)
+                {
+                    componentCounts.Remove(recorded);
+                }
+
+                _componentGlobalCounts = componentCounts;
                 _ingredientVocabTotal = recipeLists.Count;
                 _ingredientVocabGen = _flatGen;
             }
@@ -2588,17 +2673,126 @@
         _ingredientFilterVersion++;
     }
 
+    private void ToggleComponent(string name)
+    {
+        if (!_selectedComponents.Remove(name))
+        {
+            _selectedComponents.Add(name);
+        }
+
+        _ingredientFilterVersion++;
+    }
+
+    private void ToggleWallEntry(string name, bool isComponent)
+    {
+        if (isComponent)
+        {
+            ToggleComponent(name);
+        }
+        else
+        {
+            ToggleIngredient(name);
+        }
+    }
+
     private void ClearIngredients()
     {
-        if (_selectedIngredients.Count == 0 && !_ingredientsOnlyMode)
+        if (_selectedIngredients.Count == 0 && _selectedComponents.Count == 0 && !_ingredientsOnlyMode)
         {
             return;
         }
 
         _selectedIngredients.Clear();
+        _selectedComponents.Clear();
         _ingredientsOnlyMode = false;
         _ingredientFilterVersion++;
     }
+
+    /// <summary>
+    /// Recipe components per food: every name in the food's canonical recipe tree —
+    /// direct parts, "made from" chain links and nested intermediates (the expansion
+    /// the detail panel shows), prep-variants inheriting their base recipe. Depends on
+    /// the catalog + recipe index only; keyed to the rows generation for simplicity.
+    /// </summary>
+    private Dictionary<int, HashSet<string>> ComponentsByFoodId
+    {
+        get
+        {
+            if (_componentsGen != _flatGen)
+            {
+                var map = new Dictionary<int, HashSet<string>>();
+                foreach (var row in _rows)
+                {
+                    var recipeText = !string.IsNullOrEmpty(row.Food.RecipeText)
+                        ? row.Food.RecipeText
+                        : BaseRecipeSource(row)?.Recipe;
+                    var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    if (!string.IsNullOrEmpty(recipeText))
+                    {
+                        var seed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { row.Food.Name };
+                        CollectComponentNames(BuildRecipeNodes(recipeText, 0, seed), set);
+                    }
+
+                    map[row.Food.Id] = set;
+                }
+
+                _componentsByFoodId = map;
+                _componentsGen = _flatGen;
+            }
+
+            return _componentsByFoodId;
+        }
+    }
+
+    private static void CollectComponentNames(List<RecipeNode> nodes, HashSet<string> into)
+    {
+        foreach (var node in nodes)
+        {
+            AddComponentName(node.Part.Name, into);
+            foreach (var link in node.Chain)
+            {
+                AddComponentName(link.Name, into);
+            }
+
+            if (node.Sub != null)
+            {
+                CollectComponentNames(node.Sub, into);
+            }
+        }
+    }
+
+    /// <summary>Wiki quantity leftovers the part parser doesn't catch ("Any Flour {0.1 kg)", "Salt x").</summary>
+    private static readonly Regex ComponentJunkRegex = new(@"(\s*[\{\(][^\)\}]*[\)\}]?|\s+x)\s*$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Wiki "requires" entries that are not ingredients: cooking vessels/tools/stations,
+    /// crafting materials pulled in by deeper expansion, locations, quest items, a stray
+    /// category word, and water (every kitchen has it; it only adds noise). Tool
+    /// alternatives ("X or Y") and dungeon locations are caught by pattern.
+    /// </summary>
+    private static readonly HashSet<string> ComponentDenylist = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Any Container", "Sharp Tool", "Nugget of Any Metal", "Candle", "String", "Board", "Bucket",
+        "Log", "Block of Wood", "Creatures", "A Beautiful Dream!", "Water", "Boiling Water"
+    };
+
+    private static void AddComponentName(string raw, HashSet<string> into)
+    {
+        var name = ComponentJunkRegex.Replace(raw, string.Empty).Trim();
+        if (name.Length == 0
+            || ComponentDenylist.Contains(name)
+            || name.Contains(" or ", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith("Dungeon", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        into.Add(name);
+    }
+
+    private bool FoodHasComponents(int foodId) =>
+        _selectedComponents.Count == 0
+        || (ComponentsByFoodId.TryGetValue(foodId, out var set) && set.IsSupersetOf(_selectedComponents));
 
     private void ToggleIngredientsOnlyMode()
     {
@@ -2608,18 +2802,24 @@
 
     // ----- A–Z ingredient wall -----
 
-    /// <summary>The vocabulary as alphabetical letter groups (memoized with the vocabulary).</summary>
-    private List<(string Letter, List<string> Names)> IngredientWallGroups
+    /// <summary>
+    /// The wall's alphabetical letter groups: recorded ingredients plus component-only
+    /// names (flagged), merged so "Butter" sits under B next to everything else.
+    /// Memoized with the vocabulary.
+    /// </summary>
+    private List<(string Letter, List<(string Name, bool IsComponent)> Entries)> IngredientWallGroups
     {
         get
         {
-            var vocab = IngredientVocabulary; // also refreshes _ingredientVocabGen
+            var vocab = IngredientVocabulary; // also refreshes _ingredientVocabGen + component counts
             if (_ingredientWallGen != _ingredientVocabGen)
             {
-                _ingredientWallGroups = vocab
-                    .Select(kv => kv.Key)
-                    .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-                    .GroupBy(n => char.IsLetter(n[0]) ? char.ToUpperInvariant(n[0]).ToString() : "#")
+                var entries = new List<(string Name, bool IsComponent)>();
+                entries.AddRange(vocab.Select(kv => (kv.Key, false)));
+                entries.AddRange(_componentGlobalCounts.Keys.Select(n => (n, true)));
+                _ingredientWallGroups = entries
+                    .OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                    .GroupBy(e => char.IsLetter(e.Name[0]) ? char.ToUpperInvariant(e.Name[0]).ToString() : "#")
                     .Select(g => (g.Key, g.ToList()))
                     .ToList();
                 _ingredientWallGen = _ingredientVocabGen;
@@ -2683,16 +2883,36 @@
     /// the result, so its chip is rendered dead. Strict mode never disables — a
     /// zero-unlock name can still enable combinations once more is picked.
     /// </summary>
-    private bool IsDeadPick(string name) =>
-        !_ingredientsOnlyMode
-        && _selectedIngredients.Count > 0
-        && !_selectedIngredients.Contains(name)
-        && IngredientChipCount(name) == 0;
+    private bool AnyIngredientPicks => _selectedIngredients.Count > 0 || _selectedComponents.Count > 0;
+
+    private int ComponentChipCount(string name) => FlatCounts.Components.GetValueOrDefault(name);
+
+    private bool IsDeadPick(string name, bool isComponent)
+    {
+        if (!AnyIngredientPicks)
+        {
+            return false;
+        }
+
+        if (isComponent)
+        {
+            return !_selectedComponents.Contains(name) && ComponentChipCount(name) == 0;
+        }
+
+        return !_ingredientsOnlyMode
+               && !_selectedIngredients.Contains(name)
+               && IngredientChipCount(name) == 0;
+    }
 
     /// <summary>Wall chip pill: overall count with no picks; live add-one count with picks ("+N unlock" in strict mode).</summary>
-    private string WallChipCountText(string name)
+    private string WallChipCountText(string name, bool isComponent)
     {
-        if (_selectedIngredients.Count == 0)
+        if (isComponent)
+        {
+            return (AnyIngredientPicks ? ComponentChipCount(name) : _componentGlobalCounts.GetValueOrDefault(name)).ToString("N0");
+        }
+
+        if (!AnyIngredientPicks)
         {
             return _ingredientGlobalCounts.GetValueOrDefault(name).ToString("N0");
         }
@@ -2703,8 +2923,22 @@
             : live.ToString("N0");
     }
 
-    private string WallChipTitle(string name)
+    private string WallChipTitle(string name, bool isComponent)
     {
+        if (isComponent)
+        {
+            var globalRows = _componentGlobalCounts.GetValueOrDefault(name);
+            var what = $"{name} — recipe component: the wiki recipe calls for it (the game records source ingredients instead, e.g. milk for butter) · {globalRows:N0} recipes overall";
+            if (_selectedComponents.Contains(name))
+            {
+                return $"{what}. Click to remove.";
+            }
+
+            return AnyIngredientPicks
+                ? $"{what} · {ComponentChipCount(name):N0} with your picks. Click to add."
+                : $"{what}. Click to add.";
+        }
+
         var global = _ingredientGlobalCounts.GetValueOrDefault(name);
         var overall = $"in {global:N0} of {_ingredientVocabTotal:N0} recipes overall ({IngredientShareText(global)})";
         if (_selectedIngredients.Contains(name))
@@ -2712,7 +2946,7 @@
             return $"{name} — picked · {overall}. Click to remove.";
         }
 
-        if (_selectedIngredients.Count == 0)
+        if (!AnyIngredientPicks)
         {
             return $"{name} — {overall}. Click to add.";
         }
@@ -2722,6 +2956,9 @@
             ? $"{name} — unlocks {live - FlatCounts.IngredientFullMatch:N0} more recipes · {overall}. Click to add."
             : $"{name} — {live:N0} recipes contain all your picks plus this · {overall}. Click to add.";
     }
+
+    private string ComponentTagTitle(string name) =>
+        $"Recipe component: {name} — foods whose recipe calls for it · {ComponentChipCount(name):N0} matching recipes. Click to remove.";
 
     /// <summary>
     /// Live add-one count for a name. "Contains all": recipes passing the current
@@ -3100,7 +3337,8 @@
         + (_selectedPrep != null ? 1 : 0)
         + (_selectedWorld != null ? 1 : 0)
         + (_showNewOnly ? 1 : 0)
-        + _selectedIngredients.Count;
+        + _selectedIngredients.Count
+        + _selectedComponents.Count;
 
     /// <summary>The Filters row's Clear chip: drops facet selections and conditions, keeps text search.</summary>
     private void ClearActiveFilters()
