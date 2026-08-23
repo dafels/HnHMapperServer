@@ -1,9 +1,9 @@
 # HnH Mapper Server - Project Documentation for AI Assistants
 
-**Last Updated:** 2026-08-11
+**Last Updated:** 2026-08-23
 **Project Status:** Production-Ready (Core + Admin + Multi-Tenancy + Cookbook)
-**Tech Stack:** .NET 9, ASP.NET Core, Blazor Server, MudBlazor, SQLite, .NET Aspire, Docker
-**Current Branch:** `master`
+**Tech Stack:** .NET 10 (LTS), ASP.NET Core, Blazor Server, MudBlazor 9, SQLite, .NET Aspire 13, Docker
+**Current Branch:** `master` (the .NET 10 / MudBlazor 9 upgrade lives on `upgrade/net10`)
 
 ---
 
@@ -131,7 +131,8 @@ The application is a **fully multi-tenant system** on the `tenancy` branch:
 
 **Core Features:**
 - **Tenant Isolation**: Complete data isolation via EF Core global query filters
-- **Invitation System**: Invite-code based registration with admin approval workflow
+- **Self-service onboarding**: players create their own tenant ("map") or join one through a multi-use
+  invite link that joins immediately (no approval queue); optional Steam / Discord sign-in
 - **Role Hierarchy**: SuperAdmin, TenantAdmin, TenantUser with granular permissions
 - **Storage Quotas**: Per-tenant storage limits with real-time tracking
 - **Audit Logging**: Comprehensive audit trail for all sensitive operations
@@ -146,7 +147,9 @@ The application is a **fully multi-tenant system** on the `tenancy` branch:
 **Key Endpoints:**
 - **TenantAdmin** (10 endpoints): User management, invitations, audit logs
 - **Superadmin** (13 endpoints): Tenant management, unassigned users, global audit
-- **Invitation** (4 endpoints): Create, validate, list, revoke invitations
+- **Invitation** (5 endpoints): Validate (public preview), redeem (signed-in), create / list / revoke (TenantAdmin of that tenant)
+- **Self-service** (2 endpoints): `POST /api/tenants/self` (create a map, become its admin), `GET /api/tenants/self/options`
+- **Accounts overview**: `GET /api/superadmin/accounts` (paged, filterable "who joined how")
 
 **UI Components:**
 - Tenant admin panel with tabs: Users, Tokens, Invitations, Pending Users, Audit Logs, Maps, Config
@@ -243,12 +246,18 @@ User-placed annotations with authorization:
 - Shared keys in `map/DataProtection-Keys/` for Web/API cookie sharing
 
 **Multi-Tenant Authentication Flow:**
-1. User logs in at `/login`
-2. If user belongs to multiple tenants → tenant selection page
-3. Cookie created with tenant context in claims
-4. `TenantClaimsPrincipalFactory` injects tenant-specific claims
-5. `TenantContextMiddleware` resolves tenant from token or claims
-6. All database queries automatically filtered by tenant via EF Core global query filters
+1. User logs in at `/login` (password → Web `/api/login`; or Steam / Discord → `/auth/{provider}/callback`)
+2. The Web process mints the cookie; the ONE shared `Infrastructure/Identity/TenantClaimsPrincipalFactory`
+   (registered by both Web and API) injects the claims of the user's **active tenant** =
+   `AspNetUsers.ActiveTenantId` when it is still an approved membership in an active tenant, else the
+   oldest approved membership (`ActiveTenantMembershipResolver`); zero memberships → no tenant claims
+   (a normal state: the user is routed to `/tenant/select` to create or join a map)
+3. Switching = Web `GET|POST /api/tenant/select?tenantId=&returnUrl=` (persists `ActiveTenantId`, re-issues
+   the cookie; Blazor callers navigate with `forceLoad`). Other tabs/devices converge without a security-stamp
+   bump: the Web cookie validator rebuilds when the cookie's TenantId ≠ resolved active tenant, the API's
+   Identity validator rebuilds from the DB every 10 s, and the Blazor revalidation provider bounces stale circuits
+4. `TenantContextMiddleware` resolves tenant from token or claims
+5. All database queries automatically filtered by tenant via EF Core global query filters
 
 ### Authorization Hierarchy
 
@@ -627,6 +636,465 @@ See `deploy/SECURITY.md` for complete security checklist.
 ---
 
 ## Recent Changes
+
+### 2026-08-23: .NET 10 (LTS) + MudBlazor 9 upgrade (branch `upgrade/net10`)
+
+**.NET 9 and .NET 8 both lose support on 2026-11-10; .NET 10 is supported until 2028-11-14.**
+Two commits: framework/packages first (MudBlazor untouched), then MudBlazor 9 — so a UI
+regression is attributable to one of them. Clean build 0 errors, 306/306 tests, both services
+verified against a copy of the dev DB (EF Core 10 reports the schema up to date; tiles serve at
+z0/z2/z5; Blazor circuit, chip filters, header sort, dialogs, tabs, uploads all exercised live).
+- **Frameworks/packages:** all 8 projects → `net10.0` (ServiceDefaults was still `net8.0`);
+  `global.json` pins the 10.0.x SDK (`rollForward: latestFeature`); EF Core / Identity /
+  DataProtection 9.0.10 → **10.0.11**; **Aspire 9.5.1 → 13.5.2** (9.5.x is out of support — the
+  AppHost drops the `Aspire.Hosting.AppHost` PackageReference, which the SDK now supplies, and sets
+  `<NoWarn>ASPIRE010</NoWarn>` because orchestration deps come from NuGet, not the Aspire CLI
+  bundle); Http.Resilience 8.10.0 → 10.9.0, ServiceDiscovery 8.2.2 → 10.9.0, OpenTelemetry
+  1.10.0/1.15.3 → 1.18.0; Serilog.AspNetCore 10.0.0; Steam OpenID / Discord OAuth 10.0.0;
+  Test.Sdk 18.9.0, coverlet 10.0.1, xunit 2.9.3 (last v2 — still VSTest; MTP stays opt-in).
+- **Code changes the upgrade forced (only two):** `ForwardedHeadersOptions.KnownNetworks` →
+  `KnownIPNetworks` (obsolete, ASPDEPR005) in both `Program.cs`; `Password.razor`'s
+  `[SupplyParameterFromForm]` property lost its initializer (new **BL0008** analyzer: a field-less
+  post overwrites it with null) and is initialized in `OnInitialized` instead.
+- **Package hygiene:** BCrypt.Net-Next removed (no call sites since the Identity migration);
+  deprecated `Microsoft.AspNetCore.Http.Abstractions` 2.2.0 / `Microsoft.AspNetCore.Http` 2.2.2
+  replaced by `<FrameworkReference Include="Microsoft.AspNetCore.App" />`;
+  `Microsoft.AspNetCore.DataProtection` dropped from Tests (framework-provided, NU1510);
+  **AngleSharp pinned to 1.7.1** in Web — Steam OpenID pulls ≥ 1.3.0, which carries
+  CVE-2026-54570 (mXSS); 1.5.0+ is patched.
+- **Deployment:** `docker/*.Dockerfile` and the stale root `Dockerfile` → `sdk:10.0`/`aspnet:10.0`,
+  CI `setup-dotnet` → `10.0.x`. **The 10.0 tags are Ubuntu 24.04, not Debian** (Debian images are
+  not published for .NET 10) — watch the first deploy for native-dependency surprises
+  (`e_sqlite3`, ICU, fonts).
+- **MudBlazor 8.13.0 → 9.8.0** (8.x ended at 8.15.0 and never shipped a `net10.0` build):
+  `IDialogService.ShowMessageBox` → **`ShowMessageBoxAsync`** (27 sites/18 files);
+  `MudDataGrid.ServerData` gains a `CancellationToken` (MapManagement); **silent** ones —
+  `MudTabs.PanelClass` → **`TabPanelsClass`** (5 sites; the old name silently stops applying panel
+  padding) and `MudFileUpload.ActivatorContent` → **`CustomContent`**, whose context is the upload
+  component so the trigger must call `OpenFilePickerAsync()` itself (cookbook import, hmap sources,
+  hmap map import — otherwise the button renders nothing); `MudForm.Validate()` → `ValidateAsync()`.
+  **Popovers are non-modal by default now** (the `Modal="false"` workarounds are redundant but
+  harmless) and overflow is `FlipAlways`. Wins: MudTable no longer resets `RowsPerPage`/one-way
+  `CurrentPage` on parent re-render (the flat cookbook view re-renders on every filter change),
+  no needless MudTooltip re-renders, modeless overlays reopen on the same activator,
+  MudAutocomplete disposes its previous search CTS, every internal regex has a match timeout.
+- **Fixed in passing:** `<SignInMethodIcons>` was unresolved in `Admin/UserManagement.razor` and
+  `Pages/TenantDetails.razor` (only `AccountsOverview.razor` imported `Components.Shared`), so the
+  Sign-in column rendered a dead HTML tag on those two pages — `Components.Shared` is now in
+  `Components/_Imports.razor`.
+- **Deliberately NOT taken: SixLabors.ImageSharp 4.x.** 4.0 added **build-time license
+  enforcement** — a direct dependency needs a `sixlabors.lic` file or `$(SixLaborsLicenseKey)`, and
+  4.1.1 emits "No Six Labors license found" warnings on every build. The licence terms themselves
+  are unchanged (free for open-source / non-profit / under-$1M revenue) but a key must be applied
+  for at licensing.sixlabors.com and wired into local builds AND CI. Staying on **3.1.12** (no
+  advisories, no enforcement). Revisit only if the 4.x perf work (resize convolution, Vector128
+  JPEG paths, lower WebP-lossless allocations, configurable `MemoryAllocator` limits) is worth the
+  licence chore; the only code change needed was two test helpers (`Color.FromPixel(...)`).
+- **Known follow-ups (not done here):** ~89 dead MudBlazor attributes flagged by MUD0002 since the
+  v8 days (`PreventDuplicates`/`MaxDisplayedSnackbars`/`VisibleStateDuration`/`PositionClass` on
+  MudSnackbarProvider, `Clickable` on MudList, `Filter`/`SelectedChip` on MudChipSet, `Option` on
+  MudRadio, `DisablePortal`/`OpenMenuOnFocus` on MudAutocomplete, `Title` on MudIconButton/MudFab,
+  …) — they compile but do nothing, so that UI configuration has been silently inert; and one
+  malformed icon URL `/f:gfx/invobjs/leaf-brassica.png` (an `f:`-prefixed path leaking into
+  `FoodIcons`). Optional .NET 10 adoption work: named query filters for the 17 tenant filters,
+  `TypedResults.ServerSentEvents` for the 10 hand-rolled SSE writers, Blazor circuit
+  pause/resume + `[PersistentState]` (the disconnected-circuit memory problem behind
+  `CookbookFlatCache`), Blazor circuit metrics (`circuit.active` / `circuit.connected`) in Grafana,
+  complex-type JSON columns with `ExecuteUpdate` support, C# 14 `field` in the parse-on-set
+  cookbook property setters.
+
+### 2026-08-23: Self-service onboarding — create/join maps, auto-join invite links, Steam + Discord sign-in
+
+**Players now onboard themselves: any signed-in player can create a tenant ("map" in all player-facing
+copy) and becomes its admin, and admins share multi-use invite links that join immediately — the link IS
+the approval. Research confirmed Haven & Hearth has no identity provider of its own (its own website signs
+players in via Steam OpenID), so "Sign in through Steam" plus Discord OAuth were added as optional
+providers — switched on, configured and explained in SuperAdmin → Sign-in (no deployment changes).**
+Suite 303/303.
+- **Session foundation (prerequisite — tenant switching was broken end-to-end):** both claims factories
+  picked the first-ever membership and `POST /api/auth/select-tenant` discarded the claims it built (wrong
+  `SignInAsync` overload; its Set-Cookie could never reach the browser through the `UseCookies=false`
+  Web→API client). Now: `AspNetUsers.ActiveTenantId` (+ `RegistrationSource`, `LastLoginAt`; migration
+  `AddActiveTenantAndAccountOrigin`), one canonical `Infrastructure/Identity/TenantClaimsPrincipalFactory`
+  on `ActiveTenantMembershipResolver` (Web + Api copies deleted), Web-side `/api/tenant/select` switch
+  endpoint (`TenantSwitchUrl.For` helper; every UI switch is a `forceLoad` navigation), `/api/login` signs
+  in tenant-less users and lands them on `/tenant/select` (the old `no_tenant` refusal is gone), API
+  `select-tenant` is persist-only. **No stamp bump on switch** (it would sign the user out everywhere):
+  Web `OnValidatePrincipal` also rebuilds on active-tenant drift (and compares Identity roles excluding the
+  tenant Role claim), `RevalidatingIdentityAuthenticationStateProvider` invalidates circuits whose TenantId
+  claim ≠ resolved active tenant. Dashboard/Map/Cookbook redirect tenant-less users to `/tenant/select`.
+  `AssignUserToTenant` now refuses only duplicates in the SAME tenant (multi-membership works).
+- **`ITenantMembershipService`** (`Services/Services/TenantMembershipService.cs`) is the single writer of
+  `TenantUsers` rows: `AddMemberAsync(AddMemberRequest)` (Joined / ApprovedExisting — legacy pending rows
+  flipped in place with permission merge + invitation flag cleared / AlreadyMember / TenantNotFound /
+  TenantInactive; audits with the Identity user id as actor; records `TenantUsers.JoinSource` +
+  `InvitationId` — migration `AddInvitationMultiUseAndJoinSource`, existing rows read "Legacy") and
+  `RedeemInvitationAsync` (validate → already-member shortcut consumes nothing → transaction { atomic
+  `TryClaimUseAsync` → AddMember(role **always** TenantUser, permissions = the link's stored preset,
+  active tenant set) }). Registered in Api AND Web (the external-sign-in callback redeems in-process —
+  no HnH.Auth cookie exists yet). `ApproveUser` (legacy) delegates to it; bootstrap/assign tag their source.
+- **Invite links are multi-use:** `TenantInvitations.MaxUses` (null = unlimited; pre-existing rows
+  back-filled to 1, redeemed ones to UseCount 1), `UseCount`, `Permissions` (JSON list = preset "Full" —
+  all five incl. Writer, the default per the user's decision — or "Contribute" = no Writer); `UsedBy`/`UsedAt`
+  = last redeemer. `TryClaimUseAsync` = one conditional `ExecuteUpdate` (active ∧ unexpired ∧ uses left)
+  so two redeemers racing the last use get exactly one winner; `Status="Used"` only when exhausted.
+  Expiry choices 7/30/90 days (server-clamped), uses 1–100 or unlimited. Short link form
+  `{base}/invite/{code}` everywhere (`InviteLinks.Build/TryExtractCode`).
+- **Invitation endpoints locked down:** the unauthenticated full-record `GET /api/invitations/{code}` is
+  DELETED (it leaked TenantId/UsedBy); public `GET /validate/{code}` returns only name / inviter / member
+  count / expiry / preset for valid codes and a generic "invalid or expired" otherwise; new
+  `POST /api/invitations/{code}/redeem`; the `/api/tenants/{tenantId}/invitations` group now requires the
+  TenantAdmin policy AND the route-vs-claim tenant check (list could previously enumerate any tenant's
+  codes; revoke ignored the tenant — `RevokeInvitationAsync(id, tenantId)` is ownership-checked). Audits
+  `InvitationCreated/Revoked/Redeemed`. No EF global filter on TenantInvitations (validate/redeem run
+  without tenant context) — explicit predicates + endpoint auth are the mechanism.
+- **Register** (`POST /api/auth/register`): with a link → account + immediate join (`joined:true`), the
+  Register page then auto-signs-in via the Web cookie form; without a link → gated by
+  `SelfRegistration:Enabled` **in the API** (the flag previously only hid a button and was set on the wrong
+  container) — a valid link always permits registration. Sets `RegistrationSource=Password`, audit
+  `UserRegistered`. New IP rate-limit policies `Register` 5/h, `Login` 20/min, `TenantCreate` 3/h,
+  `InviteRedeem` 10/min, `InviteValidate` 30/min. **Client IP through the Web hop:**
+  `AuthenticationDelegatingHandler` forwards `X-Forwarded-For`/`-Proto` (cached in
+  `AuthenticationStateCache.ClientOrigin` for circuit threads) — without it every web user shared the web
+  container's bucket and audit IP.
+- **Self-service tenants:** `ITenantProvisioningService.CreateOwnedTenantAsync(userId, name?)` — settings
+  (SuperAdmin → Sign-in; deployment config only seeds): enabled (kill switch), quota (1024 MB; never
+  client-supplied), owned-tenant cap (3, counts TenantAdmin memberships in active tenants), and
+  **`SelfServiceTenantsRequireExternalIdentity` (default ON, user decision 2026-08-23): password-only accounts
+  cannot create maps** — they join with an invite link or a superadmin creates the tenant and assigns them
+  (SuperAdmin → Unassigned Users, the pre-existing flow); an account with any `AspNetUserLogins` row
+  (Steam/Discord sign-in or linked later) or the SuperAdmin role is eligible. `GetOptionsAsync(userId)` →
+  `{enabled, eligible, reason}` drives the "Create a new map" card (ineligible state explains + links to
+  `/account`); `CreateOwnedTenantAsync` returns `NotEligible` (403) regardless of UI. One transaction: tenant
+  (generated `icon-icon-NNNN` id, optional display name 3–40 chars applied via `UpdateTenantAsync`) +
+  owner membership (TenantAdmin, all five permissions, `JoinSource=SelfCreated`, active tenant) + audit
+  `TenantSelfCreated`; directories pre-created best-effort. `POST /api/tenants/self {name?}` (201 / 400 name
+  / 403 disabled / 409 cap), `GET /api/tenants/self/options`.
+- **UI (the fork must be unmissable):** `/tenant/select` (`TenantSelector.razor`) is the hub — zero maps →
+  welcome screen with exactly two big cards `Shared/CreateMapCard.razor` / `Shared/JoinMapCard.razor`
+  (paste a link or code → live preview "Invite to X · N members" → *Join X*); with maps → "Your maps" grid
+  (current one checked) + the same two cards (`?action=create|join` highlights one). Dashboard/Map/Cookbook
+  funnel tenant-less users there. `TenantSelectorDropdown` (top bar) is ALWAYS visible: current map name,
+  switch, *Create a new map*, *Join a map with an invite*, *Copy invite link* (admins; reuses the newest
+  live link or creates a 7-day unlimited one). Dashboard gained a "Your map" card and an admin "Invite
+  players" card with the link ready to copy. `/invite/{code}` (`InviteRedirect.razor`) is a real landing
+  page: "You're invited to join X · invited by Y · N members · valid D more days" → signed-in: *Join X*;
+  anonymous: Continue with Steam/Discord (when enabled) / Create an account / Log in (round-trips via
+  `returnUrl`). Admin → Invitations: expiry + uses + access-preset selects (`Modal="false"`), Uses/Access
+  columns, "Used up" tab. New `ClipboardService` replaces three copy-paste helpers. Player-facing wording is
+  "map" (never tenant/organization) on all touched surfaces ("Map admin" nav button). **Readability rules
+  learned here:** SuperAdmin tabs must wrap content in a plain `MudPaper` (the `.superadmin-panel .mud-paper`
+  rule supplies the 80% glass; a bare `MudTable` with `glass-morphism` is see-through), and the hub page's
+  panels use the opaque `.onboarding-card` (white, no backdrop-filter) — `glass-morphism` on pages without a
+  glass backing is too transparent for text-heavy cards. Login page = three buttons (Steam / Discord /
+  Username and password); the password form (with the "create an account" link) appears only after choosing
+  it, or directly when it is the only method, after a failed password login, or after registering.
+- **Sign-in settings are superadmin-managed at runtime (user request):** `IAuthSettingsStore` /
+  `AuthSettingsStore` (Services) keeps `AuthSettings` (open registration, self-service maps + quota + cap,
+  Steam on/off + Web API key, Discord on/off + client id/secret) as global `Config` rows (`auth.*`,
+  tenant `__global__` — created on demand), **secrets encrypted** with `IDataProtectionProvider`
+  (purpose `HnHMapperServer.AuthSettings.v1`, shared key ring, `dp1:` prefix; undecryptable → treated as
+  unset + warning). **Authorization is enforced in the store itself**: `GetViewAsync`/`SaveAsync` take the
+  caller's `ClaimsPrincipal` and require SuperAdmin by claim AND by database role (`UnauthorizedAccessException`
+  otherwise; the audit actor comes from the principal). Everyone else gets `GetPolicyAsync()` → `AuthPolicy`
+  (flags only, no string fields). Secrets are decrypted only where `AuthSettingsStoreOptions.DecryptSecrets`
+  is on (Web); the API process never holds plaintext (presence flags `SteamKeyConfigured` /
+  `DiscordSecretConfigured` keep both processes agreeing on what is active). No HTTP endpoint exposes the
+  settings — the page writes in-process over the circuit. Process singleton `AuthSettingsCache` (15 s TTL,
+  `Changed` event on save); deployment config (`SelfRegistration:*`, `TenantSelfService:*`,
+  `Authentication:*`) only seeds defaults until a row exists (a seed is persisted encrypted on first save).
+  UI: SuperAdmin → **Sign-in** (`OnboardingSettings.razor`, wrapped in `AuthorizeView Roles="SuperAdmin"`) —
+  toggles, credential fields that never echo secrets (blank = keep, checkbox = clear), live status chips, and
+  the setup guides incl. the exact redirect URL to register (`{BaseUri}signin-discord`); audit
+  `AuthSettingsUpdated` (secrets as set/unset). Register/Login/Provisioning read the policy, not IConfiguration.
+- **External sign-in (`Web/Security/ExternalAuthEndpoints.cs`, provider-agnostic):** BOTH handlers are
+  registered at startup (`AspNet.Security.OpenId.Steam` 9.0.0, `AspNet.Security.OAuth.Discord` 9.4.1 —
+  scope `identify` only, PKCE, `SaveTokens=false`, `CorrelationCookie.SameSite=Lax` because the default
+  None breaks on plain HTTP; external cookie `HnH.External` 15 min). **`DynamicAuthSchemeManager`** (Web
+  singleton, started after Build with the loaded settings, subscribed to `AuthSettingsCache.Changed`) adds
+  / removes the scheme on `IAuthenticationSchemeProvider` and evicts `IOptionsMonitorCache` so
+  **`DynamicAuthOptionsConfigurator`** (an `IConfigureNamedOptions` registered AFTER AddSteam/AddDiscord)
+  injects the stored key/secret on the next options build — no restart. Removing the scheme matters: the
+  auth middleware initialises every registered remote handler per request and an OAuth handler with an
+  empty ClientId throws (placeholders cover the disabled state). `ExternalAuthProviders` computes the live
+  provider list from the cache. `GET /auth/{provider}/challenge?invite=&returnUrl=`
+  carries state in `AuthenticationProperties.Items`; `GET /auth/{provider}/callback` → `IExternalUserProvisioner`
+  (Services; `ExternalUsernameFactory` sanitizes persona/username to `^[a-zA-Z0-9_]{3,20}$` + `_2`/`_3`/random
+  suffixes; passwordless account, `RegistrationSource` = provider, Discord fills a VERIFIED `DiscordName`)
+  → in-process invite redeem → `SignInAsync` → `/` or `/tenant/select`. Linking/unlinking is a **POST with
+  antiforgery** from the new `/account` page (a bare GET link endpoint would be account-linking CSRF);
+  unlink refuses the last sign-in method. `ExternalAuthProviders` singleton gates every button/route.
+  Login page shows "Sign in through Steam" / "Continue with Discord" above the password form.
+- **SuperAdmin → Accounts** (`AccountsOverview.razor`, `GET /api/superadmin/accounts`, `AccountOverviewService`):
+  summary chips (total, by sign-in method, by registration source, without a map), search + method/source/
+  no-map filters, server-paged table with Sign-in icons (`SignInMethodIcons`, external id in tooltip),
+  Registered (source + date), Last login, and membership chips whose tooltip says how they joined. Member
+  lists (Admin → Users, superadmin tenant details) gained Sign-in + "Joined via" columns
+  (`SignInMethodResolver` derives methods from `PasswordHash` + `AspNetUserLogins`).
+- **Deployment:** nothing provider-related in compose anymore — SuperAdmin → Sign-in owns it;
+  `SelfRegistration__Enabled=true` on the api service only seeds the first start (open registration is the
+  recommended default — otherwise a no-invite newcomer cannot start a fresh map without Steam/Discord).
+  Discord needs the exact redirect URI `https://{domain}/signin-discord` registered (the page shows it with a
+  copy button); Caddy needs no changes (`/auth/*`, `/signin-*` default-route to Web). Security notes in
+  `deploy/README.md`. Legacy pending-approval machinery (PendingUsers, 7-day purge, 1:1 invitation joins) is
+  untouched and only matches pre-existing rows.
+- **Tests (303/303):** `ActiveTenantResolverTests` (6), `TenantMembershipServiceTests` (8),
+  `InvitationServiceMultiUseTests` (7, incl. the one-winner race and back-filled legacy rows),
+  `TenantProvisioningServiceTests` (6), `ExternalUsernameFactoryTests` (15), `ExternalUserProvisionerTests`
+  (5, real `UserManager` over SQLite with the app's relaxed password policy), `AccountOverviewServiceTests` (4),
+  `AuthSettingsStoreTests` (10 — superadmin-only by claim+DB incl. revoked-role refusal, policy carries no
+  secrets, API process never decrypts, config defaults + seed persistence, encrypted storage, keep/clear
+  semantics, clamping, cache, audit).
+  Gotchas recorded: Git-Bash `sed -i` silently converts CRLF files to LF; `UserManager` in tests needs the
+  app's password policy or seeded password accounts silently fail to create.
+
+### 2026-08-23: Cookbook ingredient facet (data-derived larder filter, flat view)
+
+**The flat "All recipes" view gained an "Ingredients" facet — a compact picker whose contents ARE
+the data analysis: the tenant's full ingredient vocabulary ranked by how many recipes use each
+(dropdown lines read "Salt — 12,525 · 25.5%").** Closes the customer's "filter ingredients for
+what's available" larder case properly. Grounding analysis (dev prod-copy DB, 49,056 variants):
+only **358 distinct ingredient names, perfectly clean** (no case/whitespace/volume noise — ingestion
+`MapIngredients` only trims; `NormalizeName`'s volume-prefix strip applies to FOOD names only), so
+matching is exact-name `OrdinalIgnoreCase` and the whole vocabulary ships to the client; recipes
+have 2–5 ingredients (868 have zero); strict-larder coverage: top-10 → 4%, top-120 → 50.9%.
+- **Semantics (user-settled, revised 2026-08-23 to AND):** multi-select; default **"contains
+  all"** (recipe must contain EVERY picked ingredient, extras allowed — the user asked for an AND
+  operation) with an **"Only these"** strict-larder toggle (recipe's entire recorded ingredient
+  list ⊆ selection). Counts are **add-one**: a name's count is what the result becomes if you
+  pick it next (AND: co-occurrence with the picks; a picked tag = current result count). The
+  picker dropdown ranks by overall usage with nothing picked, and by live add-one count once
+  something is — in AND mode names that combine with nothing are dropped from the list (picking
+  them could only empty the result). **Zero-ingredient recipes never match an active selection
+  in either mode** (unknown ≠ none).
+- **Core kernel `IngredientFilter`** (`Core/Cookbook/IngredientFilter.cs`, pure — Core because the
+  test project can't reference Web): `Scan` (one pass per recipe, prior-index distinct guard —
+  duplicate names count once; returns Hits/Missing/SoleMissing), `Matches`, `CountDistinctNames`,
+  `BuildVocabulary` (rank = count desc, name asc). Selection sets MUST be built with
+  `StringComparer.OrdinalIgnoreCase` (membership supplies case-insensitivity).
+  `IngredientFilterTests` (10). Suite 241/241.
+- **All in-circuit, no new API surface:** vocabulary memoized per `_flatGen` from `AllFlatRows()`.
+  **Both views (revised 2026-08-23):** in the Ungrouped view the filter is per recipe row; in the
+  Foods view a food passes when ANY of its recorded recipes passes (`IngredientFoodMatches`, a
+  food-id set memoized per (rows gen, selection), applied in `BaseFiltered` so `Filtered` and
+  `CountBase` both respect it). The Foods view has no recipe rows of its own, so opening the
+  wall or holding a selection there makes the `OnAfterRenderAsync` funnel load the shared rows
+  on demand (wall shows a loading/retry state meanwhile; the facet is simply not applied until
+  they arrive). Wall chip counts are always RECIPE add-one counts (the analysis is per recipe)
+  even while the Foods table counts foods. In the Foods view the name-cell hint becomes
+  "N of M recipes" (matching recipes within the world bucket; the FEP-condition hint keeps
+  precedence when both are active) and the expanded variations sub-table is filtered to the
+  fitting recipes (`FilteredVariants`). `ClearFilters`/`ClearActiveFilters`/
+  `ApplyHighlightAsync` wipe the selection from any view.
+- **Counting** (inside the one-pass memoized `ComputeFlatCounts`): all other chip families gained
+  an `ingOk` flag (they respect the selection); the ingredient family itself counts under every
+  OTHER family — OR mode: classic contains-counts per distinct name; strict mode: **near-miss
+  counting** (`Missing==0` → shared `IngredientFullMatch`; `Missing==1` → that `SoleMissing`
+  name's count = "adding this unlocks N recipes"; a selected chip's own count is provably 0, so
+  `IngredientChipCount` shows fullMatch = the current result count on selected chips).
+- **UI (revised 2026-08-23 — the dropdown was replaced by an A–Z wall):** one slim `stat-chips`
+  row after World, only when `FlatActive`: a "Browse ingredients (358)" toggle + the "Only these"
+  toggle (appears when ≥1 picked). The toggle opens `.ingredient-wall` — a bounded scroll box
+  (max-height 360px) holding EVERY recorded ingredient as a compact `wall-chip` grouped by first
+  letter (`IngredientWallGroups`, memoized with the vocabulary), a find box (`_ingredientWallFilter`,
+  substring), live count pills (overall count with no picks; add-one count with picks; "+N" unlock
+  count in strict mode), picked chips `.selected`, and **dead chips** (`IsDeadPick`: AND mode +
+  picks + zero add-one count → `disabled` + `.empty`, because picking them could only empty the
+  result; strict mode never disables). The wall stays open across picks. A `MudAutocomplete`
+  dropdown was tried first and rejected by the user as unusable at 358 names ("a lot of them is
+  the complexity"). **Picked ingredients are plain tags in the existing Filters row** (user
+  request) — warm-wheat `--chip-color: #e8ddc9`, `×` pill, tooltip = live count + global
+  count/share, click removes; they count into `ActiveFilterChipCount` (flat view only) so the
+  Clear chip appears. Data note for future grouping work: only 74/358 ingredient names are
+  catalog foods (usable satiation groups), wiki categories for the rest are maintenance noise,
+  and recipe-slot inference from canonical recipes fails (109/931 foods have generic slots,
+  assignments confounded) — a categorized "pantry panel" would need a curated name→category map.
+- **Second source — recipe components (2026-08-23, "why doesn't butter appear?"):** the game
+  client records only the variable, quality-carrying SOURCE ingredients and **flattens
+  intermediates** — every butter dish is recorded as the milk the butter was churned from
+  (Aurochs/Cow/Goat/Sheep milk), pancakes as flour+egg — and **fixed recipe parts (leeks,
+  trout filets, cavebulb, bat wings) are never recorded at all**. "Butter" therefore occurs in
+  zero of the 49k recorded recipes; it exists only in the wiki canonical recipe text. The wall
+  now merges a second vocabulary: **component names from each food's canonical recipe tree**
+  (`ComponentsByFoodId`: direct parts + "made from" chain links + nested intermediates via the
+  same `BuildRecipeNodes` expansion the detail panel uses, prep-variants inheriting their base
+  recipe; `ComponentJunkRegex` strips wiki quantity leftovers incl. a trailing " x";
+  `ComponentDenylist` + patterns drop non-ingredient "requires" — containers/tools/stations,
+  crafting materials pulled in by deep expansion (Board/Log/Bucket/String), "X or Y" tool
+  alternatives, "…Dungeon" locations, the quest item, the "Creatures" category word, and Water).
+  Only names the recorded data never shows become component chips (dashed, paler wheat,
+  `.wall-chip.component`, legend line in the wall explains the distinction). Component picks
+  (`_selectedComponents`, own dashed Filters-row tags) filter at **food level** ("the recipe calls
+  for it", catalog + recipe index only — no rows needed in the Foods view) and AND with recorded
+  picks in both views; counts are add-one like everything else (`FlatChipCounts.Components`,
+  other families see `ingOk && compOk`). Generic slot tokens (Spices, Raw Meat, Any Flour,
+  Edible Mushroom…) are deliberately kept as pickable components. Verified: Butter → 25 foods
+  (9 direct dishes + everything whose tree reaches butter via batter/pancake/dough
+  intermediates); Butter + Cowsmilk → 852 recipes / 22 foods, all rows containing Cowsmilk.
+- **Verified live** (dev DB): pick Salt → exactly 12,525 of 49,056, all rows contain Salt, Meat
+  satiation count 14,887→4,840; +Chives OR-union → 16,199; "Only these" with {Salt, Chives} → 720
+  single-seasoning roasts, every row ⊆ selection, chips show 720; STR chip composes (9,169,
+  ingredient counts re-scope); world switch rebuilds rows in ~530ms with selection intact;
+  Foods-view round trip preserves the larder; Clear wipes it. After the AND revision: Salt +
+  Chives → 951 (= the measured pair overlap), dropdown ranks co-occurring names first.
+
+### 2026-08-22: Cookbook flat "All recipes" view (ungrouped food items)
+
+**/cookbook gained a View toggle — "Foods" (the existing one-row-per-food table) vs "Ungrouped"
+(chip label; was "All recipes" until the user renamed it on 2026-08-23 — `CookbookView.Recipes`):
+every recorded recipe variation as its own top-level row (~49k rows/tenant), Cediner-style, default
+sort best-Total first.** Users wanted to see food items individually instead of the "N recipes"
+nesting; the design question was the filters — resolution: **every facet applies per recipe row**.
+- **Filter semantics in flat mode:** text search matches food name/recipe-text (parent blob) OR the
+  variation's own ingredient list — so "fairy mushroom" finds 276 recipes where grouped mode finds 1
+  food. **Comma-separated search terms AND together** ("pork, mushroom" = rows matching both, the
+  customer's "filter ingredients for what's available" case; comma-free text stays one exact
+  phrase) — `SearchTerms` helper, applied in all three search sites: grouped `BaseFiltered`, flat
+  `FlatCountCore` (per term: parent blob OR variant blob — generic terms like "mushroom" also hit
+  the canonical recipe text, so Chantrelles-variants still match), and the per-food variations
+  filter box. FEP threshold conditions evaluate **exactly per row locally** (`TargetOf(VariantRow)`, no
+  `/filter-matches` round trip — all variants are in-circuit; the "N of M recipes" hint is
+  grouped-only); satiation/prep/New(7d) inherit from the parent food; world uses the variations
+  sub-table's bucket semantics (`WorldMatches(variant.Worlds, …)`) with world-effective values;
+  panels filter by parent food name; a focused panel chip filters to the food and pins the exact
+  variant first (`variant-focused` highlight). Chip counts count **recipes** in this mode (tooltips
+  say so via `CountNoun`), header shows "X of Y recipes", `⊞ Columns`/quality scaling/pill+cell
+  click-to-filter tools all work per row. Notification highlight deep-links force the Foods view.
+  Each row: star/drag/add-to-panel with the variant signature (favorites interop unchanged) + a
+  **ReadMore "Food details" button** that switches to Foods view focused on that food with the
+  variant pinned (row click deliberately does nothing — no expansion in flat mode).
+- **Data path:** new `GET /api/v1/cookbook/variations` (auth-only, same group as /foods) →
+  `FoodCatalogService.GetAllVariationsAsync` (ambient tenant guard + query filters; deliberately
+  uncached server-side; shared `MapVariantDto`/`ResolveContributorNamesAsync` extracted);
+  `FoodVariantDto` gained `FoodId`. Response is tens of MB → the page fetches via the **`APIUpload`**
+  client (default `API` client's 10s resilience timeout would cancel+retry it).
+- **Cross-circuit cache (`CookbookFlatCache`, Web singleton):** Blazor Server retains disconnected
+  circuits for minutes, so per-circuit copies of ~50k built rows would multiply ~100MB per refresh.
+  Rows are built once per (tenantId, world-genus) and shared; circuits keep references only
+  (memoized filtered list). Keyed by the user's `TenantId` **claim** (same claim the API resolves —
+  cache can never cross tenants); fetch delegate comes from the page (auth cookie is scoped), one
+  in-flight fetch shared via `Lazy<Task>`, 3-min refresh, 10-min idle eviction, failed fetch drops
+  the entry (page shows Retry). `CookbookVariantRow` + builder moved to
+  `Web/Services/CookbookFlatCache.cs` — the page's sub-table `VariantRow` is now a `@using` alias
+  of it, `BuildVariantRow` delegates. Foods missing from the bulk list (added after the fetch, or
+  variant-less) get a synthetic row from canonical values (empty signature = whole-food favorites).
+- **Perf:** the grouped view's recompute-per-render LINQ doesn't scale to 49k, so the flat pipeline
+  is **memoized by a filter-state key** (`FlatStateKey` — every input incl. `_flatGen` bumped on
+  entries/RebuildRows and `_panelFilterVersion` bumped wherever `_activePanelNames` changes) and all
+  chip counts are computed in **one pass** with per-family exclude-own-facet semantics
+  (`ComputeFlatCounts`, mirroring `CountBase`). Measured in dev against the prod-copy DB: facet
+  toggle ≈140ms round trip, header re-sort ≈230ms (MudTable sorts the memoized list), Web process
+  ≈190MB private with all rows loaded. World switches rebuild via `OnAfterRenderAsync` funnel
+  (`FlatRowsCurrent` world-key check → `EnsureFlatRowsAsync`), showing the skeleton meanwhile.
+- **Tests (231/231):** `FoodCatalogServiceAllVariationsTests` (4 — real SQLite with a
+  DefaultHttpContext-backed accessor so the ambient tenant filter is ACTIVE: tenant scoping,
+  FoodId set + per-food ordering, contributor resolution incl. unknown→"unknown", empty without
+  tenant context, per-food endpoint also carries FoodId). UI verified live (login → toggle →
+  str>50% =3,280 rows, +Meat =1,051, search, sort, columns, details-switch, favorites star).
+
+### 2026-08-22: WebP pyramid consistency (fixes prod black tiles at max zoom-in + ghost imagery)
+
+**Root cause of "black tiles at ?z=6/7 that show content zoomed out" (prod, tenant
+sketchbook-pot-u-2046, live map 2047 = 1953 merged at +50,−9): the 400×400 WebP pyramid the viewer
+serves had NO consistency mechanism.** Files were only overwritten by gridUpload-driven
+force-regeneration (in-memory queue, bounded 4096 DropOldest, lost on restart); the background
+scans only gap-filled missing files; merges/imports/wipes never touched the pyramid at all; and a
+Jan–Mar 2026 era (`6034628`→`a45f853`) deleted the whole z0–z6 chain on every upload, leaving
+permanent holes wherever regeneration failed. Cells whose zoom-0 rows are gone (wiped/moved by
+frame flip-flops and merges) 404 at server z0/z1 (= Leaflet z7/z6, black), while stale z2–z6 files
+ghost the old imagery. Fixes (221/221 tests):
+- **`ForceRegenerateLargeTileAsync` null → deletes the stale disk file** (emptiness propagates; a
+  transient generation error — distinguished from "no sources" — never deletes).
+  `ZoomTileProcessorService` now walks the z1–6 parent chain even when z0 regen returns null, so
+  wiped cells stop ghosting at far-out zooms. `InvalidateTenantCache` (was a no-op) and new
+  `InvalidateMapCache`/`DeleteMapWebpTiles` do real prefix eviction of the static caches.
+- **Durable backstop:** the 5-min dirty scan (`LargeTileGenerationService`) now also derives WebP
+  cells from zoom-1 `DirtyZoomTiles` rows (`WebpDirtyCellPlanner`, pure) and re-enqueues any cell
+  whose z0 file is older than its newest mark or missing-with-rows — freshness = file mtime vs row
+  CreatedAt, so nothing loops; rows are still consumed by the legacy `ZoomTileRebuildService`.
+  Queue headroom capped at 3000 so backfill can't flush live-upload requests. New
+  `ITileService.MarkParentTilesDirtyBatchAsync` (deduped diff-insert) feeds it from bulk writers:
+  **hmap import + public-map import now mark dirty rows** (they bypass TileService.SaveTileAsync
+  and previously left the pyramid permanently stale where files already existed).
+- **`MergeMapsAsync`** now deletes the source map's tile rows (all zooms — merges used to orphan
+  the source's whole tile set: ~12k dead rows across 14 deleted maps in prod, reconstructed via
+  shared-File refs 1965→1953→2047) plus its per-map tile dirs (legacy + `large/`; grid PNGs are
+  shared, never touched), and enqueues WebP regen for the merged-in target cells. `wipeTile`
+  (DeleteMapTileAsync) enqueues its cell too.
+- **Region-wipe tool:** deletes every WebP file (z0–6) whose footprint intersects the box (result
+  field `WebpTilesDeleted`) + evicts both processes' caches (new Web internal endpoint
+  `/internal/tile-cache/invalidate-map`), and its grid-PNG deletion is now **refcount-guarded** —
+  tile Files are grid-id-keyed and shared by flip-flop/merge twin rows; a file still referenced by
+  any out-of-box row survives (deleting shared files was the tool's latent data-loss bug).
+- **Repair endpoint: `POST /api/superadmin/tenants/{tenantId}/maps/{mapId}/rebuild-webp-tiles`**
+  (body echoes `confirmMapId`) — deletes the map's whole `large/` pyramid, evicts caches in both
+  processes, seeds regeneration (dirty rows for every 4×4 cell with zoom-0 rows + queue fast
+  path), bumps mapRevision, audits `SuperAdminRebuiltWebpTiles`. Viewers keep working during the
+  rebuild (on-the-fly generation). This is the fix for the existing prod drift — run it per
+  affected map; genuinely-wiped areas then read honestly empty at all zooms until re-mapped.
+  **UI:** wand button per row in SuperAdmin → Maps & Markers → All Maps (`GlobalMapsViewer.razor`),
+  confirm box → POST via the `APIUpload` client (default `API` client would 10s-timeout) →
+  snackbar with counts. Browsers cannot call `/api/superadmin/*` directly — Caddy routes generic
+  `/api/*` to the Web service; superadmin actions only work through the Blazor server-side clients.
+- **Map Integrity = the one repair console** (user request "have it all inside the map integrity
+  tool"): the scan (`MapIntegrityService`, now also injected with IConfiguration +
+  IStorageQuotaService) additionally reports **orphaned storage per tenant** — tile rows on dead
+  map ids, dead per-map tile directories (legacy `tenants/{t}/{mapId}/` + WebP
+  `tenants/{t}/large/{mapId}/`, sized from disk), and unreferenced pool PNGs in `grids/`
+  (referenced by no live-map tile row and no grid row). New
+  `POST /api/superadmin/integrity/tenants/{tenantId}/purge-orphans` (body echoes
+  `confirmTenantId`, audit `SuperAdminPurgedOrphanedMapData`): deletes dead rows FIRST, then dead
+  dirs, then unreferenced PNGs, then `RecalculateStorageUsageAsync`. **Safety guards:** a dead
+  map's dir is KEPT (with warning) if live rows reference files inside it (public-map imports
+  write zoom-0 PNGs into per-map dirs and merges copy rows with File unchanged — deleting would
+  blank live imagery); pool PNGs are kept if a grid row with that id exists (PNG can land on disk
+  before its tile row commits); **the reference set counts only LIVE-map rows** (a dead map's own
+  rows must not protect its files, or scan reports nothing while purge deletes — the exact
+  scan/purge asymmetry a test caught). `MapIntegrityPanel.razor` gained the orphan table
+  (counts-explicit confirm → `APIUpload` POST → rescan) and a per-issue-map "Rebuild WebP tiles"
+  button. Prod context: sketchbook-pot-u-2046 carries ~12.5k dead zoom-0 rows / ~61 MB dead legacy
+  pyramids (merge chain 1957/1962/1963/1965/1966→1953→2047) — the purge replaces the planned
+  manual `rm -rf` + sqlite3 entirely.
+- **WebP drift detection ("how do we know a map needs rebuild?"):** the scan also measures every
+  live map's pyramid file-by-file against its zoom-0 rows (`ScanWebpDriftAsync`): a zoom-z file at
+  (X,Y) covers base [X·4·2^z, (X+1)·4·2^z) — footprint with NO rows → **ghost** (renders
+  deleted/moved terrain), file mtime + 30-min slack older than the newest row in footprint →
+  **stale** (missing newer content); missing z0 files are informational only (on-view generation
+  heals them). Per-zoom newest-data aggregates are built by halving cell dictionaries upward; ~1
+  DB query per tenant + one dir enumeration per map. **`Tiles.Cache` is unix MILLISECONDS on
+  upload/merge/zoom paths but SECONDS on the hmap-import path** — `CacheToUtc` normalizes
+  (< 10^12 → seconds); don't compare Cache values without it. Only ghost/stale maps are reported
+  (`WebpPyramidDriftDto`, sample tiles capped at 8). **Derivation rule:** a parent file older
+  (+slack) than any of its four child files is also stale — pre-fix chain regens baked ghost
+  content from stale siblings into parents whose mtimes beat the raw data; only the child
+  comparison exposes those. **Known limitation (metadata-only detector):** a file NEWER than both
+  its footprint data and its children can still carry wrong content baked in during the broken
+  era (mixed live/dead footprint, regenerated post-damage) — prod map 2047 is exactly this and
+  passes the scan clean; such known-incident maps need one manual rebuild (All Maps wand), after
+  which the fixed pipeline keeps them correct.
+- **Rebuild-all ("superadmin control of all"):**
+  `POST /api/superadmin/integrity/rebuild-webp-drift` (body `{confirmAll:true}`, audit
+  `SuperAdminRebuiltAllDriftedWebpTiles`) — reruns the drift scan SERVER-side (never trusts a
+  client-supplied list) and rebuilds every flagged map via the shared `RebuildMapWebpCoreAsync`
+  (extracted from the per-map handler: delete pyramid + both-process cache eviction + dirty-row
+  seeding + queue fast path with shared 3000 headroom + revision bump). Any number of maps
+  completes via the 5-min backstop even when the queue fills. Panel: drift table with per-map
+  rebuild buttons + one "Rebuild all" button.
+- **Proactive detection:** new `MapIntegrityCheckService` (Api, hosted): daily (config
+  `IntegrityCheck:Enabled`/`IntervalHours`, 15-min startup delay) runs the full scan and logs one
+  WARNING summary (contested maps + worst offender, placeholder rows, orphan tenants + reclaimable
+  MB, drifted maps + worst offender) when anything is found — surfaces in Loki/Grafana without
+  opening the tab. Detection only; repair stays a human click.
+- **Fixed in passing:** `TileService.MarkParentTilesDirtyAsync` used truncating `/2` — every
+  negative base coord marked the wrong parent (e.g. −1 → 0), so the legacy rebuild refreshed the
+  wrong tiles in all-negative quadrants. Now uses floor (`Coord.Parent()`).
+- **Tests (226/226):** `LargeTileServiceTests` (5 — null-deletes-file / error-keeps-file / cache
+  eviction / pyramid delete), `WebpDirtyBackstopTests` (5 — batch marking incl. negatives +
+  planner), region-wipe +2 (shared-file survives, covering webp deleted), merge regression
+  (source rows gone + cells queued), `MapIntegrityServiceTests` +5 (orphan scan zoo /
+  purge-deletes-only-dead-data incl. quota recalc / dead-dir-referenced-by-live-rows kept /
+  drift zoo ghost+stale+missing+fresh / seconds-unit Cache normalization + clean-map absence).
+  Known leftover: `SetCoordinatesAsync` still doesn't move tile rows (separate task chip).
 
 ### 2026-08-17: Map-grid write-path hardening + region-wipe repair tool (corruption incident)
 
