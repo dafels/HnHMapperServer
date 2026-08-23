@@ -637,6 +637,37 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-23: Cookbook icon URLs — resource-name sanitizer (fixes the `f:` 404)
+
+**/cookbook requested `/f:gfx/invobjs/leaf-brassica.png`**: a stored `Foods.ResourceName` carried an
+`f:` prefix and `FoodIcons` built both the local URL and the havenandhearth.com fallback from it
+verbatim, so that food's icon could never resolve from either source.
+- **Not the wiki scraper.** `wiki-food-data.json` contains **zero** `gfx/` values, and its 59
+  `File:`/`file:` strings all sit in `.metaobj.image` (wiki page filenames like `File:Milk.png`, read
+  only through a generic key lookup). `ResourceName` is written from the client upload alone — the
+  wiki enriches values, never resource names. The prefix comes from a **game-client upload**, and
+  export→re-import preserved it verbatim, which is why it stuck.
+- **New `FoodResourceName.Normalize`** (`Core/Cookbook/` — Core because the test project references
+  Core but **not Web**, same reason `FepFilterParser`/`FepPalette` live there): strips `file:`/`f:`
+  (case-insensitive, looped), strips leading slashes (`"/" + name` would otherwise become a
+  protocol-relative `//host/...`), drops any char outside `[A-Za-z0-9/._-]`, and rejects `..` dot
+  segments. Verified lossless against **all 2504** resource names shipped under `wwwroot/gfx` — every
+  one matches `[a-z0-9/-]`.
+- **Applied at both layers:** `FoodIcons.LocalSrc`/`RemoteFallback`/`RemoteFallbackOrHide` normalize
+  when building URLs (repairs existing rows, no migration), and `FoodCatalogService` normalizes at
+  every write path — `BuildFoodEntity` (the single choke point for legacy-dump *and* client-upload
+  foods) and `ImportSnapshotAsync` — with both skip-guards now rejecting names that reduce to nothing
+  (`"f:"`) instead of storing an empty resource.
+- **Security note (why the charset filter, not just a prefix strip):** the three builders interpolate
+  `ResourceName` into a **JS string literal inside an `onerror` attribute** at 5 render sites, and
+  ingestion validated only *length*, never content — a quote in an uploaded resource name could break
+  out. Dropping non-path characters closes that without a separate escaping step.
+- **`leaf-brassica.png` genuinely does not ship** (no brassica icon among the 1991 in
+  `wwwroot/gfx/invobjs/`), so for that food the remote fallback is the correct path; the fix is what
+  makes that fallback URL well-formed rather than `.../mt/r/f:gfx/...`.
+- **Tests:** `FoodResourceNameTests` (11 cases incl. the reported value, case/repeat/whitespace
+  prefixes, leading slashes, dot segments, quote-escape, idempotence, shipped-name losslessness).
+
 ### 2026-08-23: Memory work on top of .NET 10 (branch `upgrade/net10`)
 
 **Every number here was measured on the branch against a copy of the dev DB, driving the real
