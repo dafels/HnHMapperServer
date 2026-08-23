@@ -637,6 +637,66 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-23: .NET 9/10 primitives — measured first, then adopted (or rejected)
+
+**The question was "are we actually using what .NET 10 offers?" The answer split cleanly into
+things that need no code at all and a short list of opt-in types.** Everything below was
+benchmarked against this codebase's own shapes before any edit; the harnesses were throwaway
+but the numbers are recorded here so nobody re-litigates them.
+
+**Free — already active since the recompile, no code change.** Identical source compiled for
+`net9.0` and `net10.0` and run back to back on this machine:
+
+| pattern | .NET 9 | .NET 10 | |
+|---|---|---|---|
+| `OrderBy().Contains()` ×2,000 | 26.6 ms | 0.26 ms | **102×** |
+| `Distinct().Contains()` ×2,000 | 14.4 ms | 0.25 ms | **58×** |
+| `Where().Select().Contains()` ×20,000 | 100.1 ms | 6.3 ms | **16×** |
+| `try/catch` (no throw) ×20M | 28.0 ms | 3.7 ms | **7.6×** |
+| `Skip().Take().ToList()` ×20,000 | 10.4 ms | 1.7 ms | **6×** |
+| `Dictionary<string,int>` lookups ×2M | 23.8 ms | 15.1 ms | 1.6× |
+
+The codebase leans on these hard (139 `OrderBy`, 202 `Contains`, 58 `Distinct`, 116 `Any/All`,
+608 `catch` blocks; 117 LINQ operators in `Cookbook.razor` alone). **Honest caveat:** the
+escape-analysis items from the .NET 10 blog (capturing lambdas, small arrays,
+`Stopwatch.StartNew`) showed **no change** here — allocation counts were byte-identical on both
+runtimes. Those figures apply to narrower shapes than the general case; don't plan around them.
+
+**Opt-in, measured and applied:**
+- **`[GeneratedRegex]` everywhere — no interpreted regex remains in `src` outside tests.**
+  Measured per 200k iterations: inline `Regex.Replace(text, "pattern")` **71.7 ms** (interpreted
+  *and* a pattern-cache lookup per call) · `RegexOptions.Compiled` static **22.9 ms** ·
+  source-generated **19.5 ms**. So inline sites gained ~3.6× and the `Compiled` statics a smaller
+  step plus no IL emitted at first use (startup cost in both containers). Converted:
+  `FepFilterParser` (2), `FoodCatalogService` (6), `CustomMarkerService`, `RoadService`,
+  `TenantProvisioningService` (2), `PublicContributionEndpoints`, and the Razor ones via new
+  `CookbookPatterns` / `Register.razor.cs` — **`[GeneratedRegex]` needs a partial method on a
+  partial type, which a `.razor` `@code` block cannot declare**, hence the code-behind files.
+  The three cookbook separator tidies were inline calls on the **per-keystroke** search path.
+- **`FrozenDictionary`/`FrozenSet`** for the three build-once/read-many tables (`FepPalette`
+  colours + full names, `FepFilterParser.StatKeys`): 16% on lookups (11.8 → 9.9 ms per 1M). A
+  dense render does hundreds of these, not millions — this is microseconds, taken because it is
+  free, not because it shows up.
+- **`System.Threading.Lock`** for the four gates on request-serving paths (`LruImageCache`,
+  `ZoomTileCache`, `AuthenticationStateCache`, public tile cache eviction): 28% uncontended
+  (5.7 → 4.1 ns per acquire). Also stops those fields being used as arbitrary monitor objects.
+
+**Opt-in, measured and REJECTED — the important one:**
+- **`FrozenSet` for the cookbook's ingredient selection is 35% SLOWER** at realistic sizes.
+  Full 49k-recipe scan with 5 picked ingredients: HashSet **4.7 ms** → FrozenSet **6.4 ms**. It
+  only wins at ~60 picks (5.0 → 3.2 ms), which is not how the larder facet is used.
+  `IngredientFilter` therefore keeps taking `IReadOnlySet<string>` and callers keep passing
+  `HashSet` with `OrdinalIgnoreCase`. **Do not "optimize" this without re-measuring.**
+
+**Fixed in passing:** `PublicMapService.GenerateSlug` and `CreatePublicMapDialog`'s live preview
+each carried their own copy of the slug rule (the dialog's interpreted), so the preview could
+silently stop matching the slug the server assigns. Both now call
+`Core/PublicMaps/PublicMapSlug.Generate`; server semantics preserved (blank → `public-map`), the
+dialog still shows nothing until you type. New `PublicMapSlugTests` pins it — it was untested and
+it decides the URL of every public map. Also added a sanitizer test for uppercase/multiline
+`<script>` blocks: those patterns' `IgnoreCase`/`Singleline` options moved into an attribute, and
+losing one there would silently pass markup through XSS-facing code.
+
 ### 2026-08-23: Cookbook icon URLs — resource-name sanitizer (fixes the `f:` 404)
 
 **/cookbook requested `/f:gfx/invobjs/leaf-brassica.png`**: a stored `Foods.ResourceName` carried an
