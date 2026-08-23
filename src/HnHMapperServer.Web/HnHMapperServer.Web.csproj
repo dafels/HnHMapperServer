@@ -4,6 +4,20 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!--
+      Workstation GC. The Web SDK defaults ASP.NET Core apps to Server GC, which gives
+      every core its own heap and only collects aggressively under pressure. This process
+      is latency-bound (Blazor circuits), not throughput-bound, and shares a small VPS with
+      the API container. Measured on the cookbook workload (login -> 931 foods -> 49k-row
+      ungrouped view -> 3 facet filters), 2 CPUs:
+          Server GC       467 MB working set / 358 MB private
+          Workstation GC  390 MB working set / 266 MB private   (-26% private)
+      Cost: the one-off 49k-row build goes 2.3s -> 2.9s; filter round-trips are unchanged.
+      Note this also disables DATAS, which is Server-GC-only.
+      The API keeps Server GC - it does parallel image work.
+    -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

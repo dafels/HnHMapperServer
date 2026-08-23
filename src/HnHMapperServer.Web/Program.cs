@@ -16,6 +16,7 @@ using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.Options;
+using System.Net;
 using System.Security.Claims;
 using Serilog;
 using Microsoft.AspNetCore.Components.Server;
@@ -36,8 +37,20 @@ builder.WebHost.ConfigureKestrel(serverOptions =>
 });
 
 // Configure ImageSharp for better resource management during zoom tile generation
-// Use default ArrayPool-based allocator with reasonable limits
 SixLabors.ImageSharp.Configuration.Default.MaxDegreeOfParallelism = 2;  // Limit parallel image processing to reduce memory spikes
+
+// Cap the image buffer pool. ImageSharp's allocator pools large buffers outside the GC
+// heap, so they are invisible to the GC's heap limit but very visible to the container's
+// memory limit - which is what the kernel OOM-kills on. The tile pyramid works in
+// 400x400 RGBA tiles (~640 KB each) with at most MaxDegreeOfParallelism in flight, so a
+// 32 MB retained pool is generous; the accumulative limit is a backstop against a
+// pathological image.
+SixLabors.ImageSharp.Configuration.Default.MemoryAllocator =
+    SixLabors.ImageSharp.Memory.MemoryAllocator.Create(new SixLabors.ImageSharp.Memory.MemoryAllocatorOptions
+    {
+        MaximumPoolSizeMegabytes = 32,
+        AllocationLimitMegabytes = 256
+    });
 
 // Configure Serilog
 builder.Host.UseSerilog((context, services, configuration) => configuration
@@ -146,23 +159,23 @@ builder.Services.AddSignalR(options =>
     // In Blazor Server, IBrowserFile streams go through SignalR
     options.MaximumReceiveMessageSize = 1024L * 1024 * 1024; // 1GB
 
-    // Increase parallel invocations to handle multiple concurrent JS interop calls
-    options.MaximumParallelInvocationsPerClient = 10; // Default is 1
+    // MaximumParallelInvocationsPerClient is deliberately NOT raised here. Blazor requires
+    // the default of 1: "Blazor relies on MaximumParallelInvocationsPerClient set to 1,
+    // which is the default value" - raising it breaks IBrowserFile uploads
+    // (dotnet/aspnetcore#53951), which is exactly what this app does for .hmap imports.
 });
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents(options =>
     {
-        // Temporarily enable in production for debugging circuit crashes
-        options.DetailedErrors = true; // TODO: Change back to builder.Environment.IsDevelopment() after debugging
+        options.DetailedErrors = builder.Environment.IsDevelopment();
     });
 
-// Enable detailed circuit errors only in development to diagnose UI/circuit termination issues
 builder.Services.Configure<CircuitOptions>(options =>
 {
-    // Temporarily enable in production for debugging circuit crashes
-    options.DetailedErrors = true; // TODO: Change back to builder.Environment.IsDevelopment() after debugging
+    // Detailed errors leak internals and keep extra per-circuit state; development only.
+    options.DetailedErrors = builder.Environment.IsDevelopment();
 
     // Increase JS Interop timeout to allow for initial map initialization
     // Default is 1 minute which is too short for:
@@ -171,8 +184,21 @@ builder.Services.Configure<CircuitOptions>(options =>
     // - Network latency in production environments
     options.JSInteropDefaultCallTimeout = TimeSpan.FromMinutes(2);
 
-    // Keep disconnected circuits longer for better reconnection experience
+    // Keep disconnected circuits long enough to survive a flaky connection, but bound how
+    // many we hold: every retained circuit keeps its component state (and, on /cookbook,
+    // references into the shared flat-row cache) alive until a gen2 collection. Default is
+    // 100 retained circuits - far more than this deployment ever has live users.
     options.DisconnectedCircuitRetentionPeriod = TimeSpan.FromMinutes(3);
+    options.DisconnectedCircuitMaxRetained = 20;
+
+    // .NET 10 turns circuit state persistence ON automatically with
+    // AddInteractiveServerComponents(), defaulting to 1000 persisted circuits kept for
+    // 2 hours in MemoryCache. That is a second retention tier behind the disconnected
+    // pool above, and nothing in this app opted into it. Bound it to something that
+    // matches real usage; state itself is small (no [PersistentState] properties yet),
+    // but the entries are pure overhead at those defaults.
+    options.PersistedCircuitInMemoryMaxRetained = 50;
+    options.PersistedCircuitInMemoryRetentionPeriod = TimeSpan.FromMinutes(30);
 });
 
 // Add MudBlazor services
@@ -423,7 +449,11 @@ builder.Services.AddHttpClient("APIUpload", client =>
 .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
 {
     AllowAutoRedirect = false,
-    UseCookies = false
+    UseCookies = false,
+    // This client also pulls the bulk cookbook variation list: ~36 MB of JSON that gzips
+    // to ~3.4 MB (measured). Without this the Web hop moves the whole uncompressed body
+    // through large-object-heap buffers on every cache refresh.
+    AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
 })
 .AddHttpMessageHandler<HnHMapperServer.Web.Services.AuthenticationDelegatingHandler>();
 

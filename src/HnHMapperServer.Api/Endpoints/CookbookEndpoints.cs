@@ -101,21 +101,18 @@ public static class CookbookEndpoints
     /// (FoodId on each row) — the data source of the cookbook's "All recipes" view.
     /// Large (tens of MB for a full catalog); the Web side caches it per tenant.
     /// </summary>
-    private static async Task<IResult> GetAllVariations(
+    private static IAsyncEnumerable<FoodVariantDto> GetAllVariations(
         IFoodCatalogService foodCatalogService,
-        ILogger<Program> logger)
-    {
-        try
-        {
-            var variations = await foodCatalogService.GetAllVariationsAsync();
-            return Results.Ok(variations);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error loading the bulk cookbook variation list");
-            return Results.Problem("Failed to load recipe variations");
-        }
-    }
+        CancellationToken ct)
+        // Streamed, not buffered: returning IAsyncEnumerable lets the JSON writer emit
+        // rows as the query yields them, so this ~36 MB response no longer costs the API
+        // an entity list plus a DTO list plus a serialization buffer (~400 MB measured).
+        // Note the trade-off of streaming any endpoint: the 200 and the opening bracket
+        // are already on the wire when enumeration starts, so a mid-stream failure closes
+        // a truncated body instead of returning a Problem response. The client (the Web
+        // flat-row cache) treats a malformed body as a failed fetch and retries, which is
+        // the same outcome it had for a 500.
+        => foodCatalogService.StreamAllVariationsAsync(ct);
 
     /// <summary>
     /// GET /api/v1/cookbook/filter-matches?expression=str>50%25&amp;quality=10&amp;world=b7c199a4557503a8

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -458,42 +459,106 @@ public class FoodCatalogService : IFoodCatalogService
 
     public async Task<List<FoodVariantDto>> GetAllVariationsAsync(CancellationToken ct = default)
     {
+        var result = new List<FoodVariantDto>();
+        await foreach (var dto in StreamAllVariationsAsync(ct))
+        {
+            result.Add(dto);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Streams every recorded variation of the current tenant, ordered exactly like
+    /// <see cref="GetAllVariationsAsync"/> (FoodId, then heaviest FEP total first).
+    /// <para>
+    /// The endpoint serializes this straight to the response, so the ~36 MB payload never
+    /// exists as a whole on the server. The buffering version materialized the entities,
+    /// then a DTO list, then the ordered copy, then the JSON buffer — measured at roughly
+    /// +400 MB of process memory for one call. Here only one food's variations are held at
+    /// a time (a few thousand rows for the most-cooked foods, a handful for the rest),
+    /// because the secondary sort key is computed from JSON FEPs and cannot be ordered in
+    /// SQL. Ordering by FoodId in the database is what makes that per-food grouping safe.
+    /// </para>
+    /// </summary>
+    public async IAsyncEnumerable<FoodVariantDto> StreamAllVariationsAsync(
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
         // Same tenant-context guard as GetCatalogAsync: no tenant → empty, never leak.
         var tenantId = _tenantContext.GetCurrentTenantId();
         if (string.IsNullOrEmpty(tenantId))
         {
-            return new List<FoodVariantDto>();
+            yield break;
         }
+
+        // Contributor ids first, so names resolve before any row is written. Only the
+        // id set is retained here, not the variants themselves.
+        var contributorIds = new HashSet<string>(StringComparer.Ordinal);
+        await foreach (var contributors in _dbContext.FoodVariants
+            .AsNoTracking()
+            .Select(v => v.Contributors)
+            .AsAsyncEnumerable()
+            .WithCancellation(ct))
+        {
+            foreach (var id in contributors)
+            {
+                contributorIds.Add(id);
+            }
+        }
+        var contributorNames = await ResolveContributorNamesAsync(contributorIds, ct);
 
         // Query filter scopes to the current tenant. Deliberately uncached: the flat
         // view's Web-side cache refetches per tenant only every few minutes, and holding
         // a second ~50k-DTO list per tenant in this process buys nothing for that rate.
-        var variants = await _dbContext.FoodVariants
+        var pending = new List<FoodVariantDto>();
+        var pendingFoodId = -1;
+
+        await foreach (var v in _dbContext.FoodVariants
             .AsNoTracking()
-            .ToListAsync(ct);
-
-        var contributorNames = await ResolveContributorNamesAsync(variants, ct);
-
-        return variants
-            .Select(v => MapVariantDto(v, contributorNames))
             .OrderBy(v => v.FoodId)
-            .ThenByDescending(v => v.Feps.Sum(f => f.Value))
-            .ToList();
+            .AsAsyncEnumerable()
+            .WithCancellation(ct))
+        {
+            if (v.FoodId != pendingFoodId && pending.Count > 0)
+            {
+                foreach (var dto in SortWithinFood(pending))
+                {
+                    yield return dto;
+                }
+                pending.Clear();
+            }
+
+            pendingFoodId = v.FoodId;
+            pending.Add(MapVariantDto(v, contributorNames));
+        }
+
+        foreach (var dto in SortWithinFood(pending))
+        {
+            yield return dto;
+        }
     }
 
+    /// <summary>Heaviest FEP total first — the per-food ordering callers rely on.</summary>
+    private static IEnumerable<FoodVariantDto> SortWithinFood(List<FoodVariantDto> variants) =>
+        variants.OrderByDescending(v => v.Feps.Sum(f => f.Value));
+
+    private Task<Dictionary<string, string>> ResolveContributorNamesAsync(
+        List<FoodVariantEntity> variants, CancellationToken ct) =>
+        ResolveContributorNamesAsync(
+            variants.SelectMany(v => v.Contributors).ToHashSet(StringComparer.Ordinal), ct);
+
     private async Task<Dictionary<string, string>> ResolveContributorNamesAsync(
-        List<FoodVariantEntity> variants, CancellationToken ct)
+        IReadOnlyCollection<string> contributorIds, CancellationToken ct)
     {
-        var contributorIds = variants
-            .SelectMany(v => v.Contributors)
-            .Distinct()
-            .ToList();
-        return contributorIds.Count == 0
-            ? new Dictionary<string, string>()
-            : await _dbContext.Users
-                .AsNoTracking()
-                .Where(u => contributorIds.Contains(u.Id))
-                .ToDictionaryAsync(u => u.Id, u => u.UserName ?? "unknown", ct);
+        if (contributorIds.Count == 0)
+        {
+            return new Dictionary<string, string>();
+        }
+
+        var ids = contributorIds as List<string> ?? contributorIds.ToList();
+        return await _dbContext.Users
+            .AsNoTracking()
+            .Where(u => ids.Contains(u.Id))
+            .ToDictionaryAsync(u => u.Id, u => u.UserName ?? "unknown", ct);
     }
 
     private static FoodVariantDto MapVariantDto(FoodVariantEntity v, Dictionary<string, string> contributorNames) =>

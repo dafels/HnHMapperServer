@@ -48,6 +48,12 @@ public interface IFoodCatalogService
     Task<List<FoodVariantDto>> GetAllVariationsAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// Same rows and ordering as <see cref="GetAllVariationsAsync"/>, streamed so the
+    /// bulk payload is never materialized in full on the server.
+    /// </summary>
+    IAsyncEnumerable<FoodVariantDto> StreamAllVariationsAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// Foods whose base values OR any recorded recipe variation satisfy every threshold
     /// condition in <paramref name="expression"/> (FepFilterParser syntax) at the given
     /// quality, with per-food matching-variation counts. Empty when the expression

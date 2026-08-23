@@ -95,12 +95,47 @@ public sealed class CookbookFlatCache
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan IdleEviction = TimeSpan.FromMinutes(10);
 
+    /// <summary>
+    /// How many worlds' built row sets one tenant keeps at once. Each set is a full
+    /// ~49k-row copy of the catalog (well over 100 MB for a large tenant), and it is
+    /// derived data — rebuilding it from the cached DTOs costs about two seconds. A
+    /// tenant with three worlds plus "Untagged" would otherwise hold four copies for the
+    /// life of the entry just because someone clicked through the world chips.
+    /// </summary>
+    private const int MaxWorldsPerTenant = 2;
+
     private sealed class TenantEntry
     {
         public required DateTime CreatedUtc { get; init; }
         public required Task<List<FoodVariantDto>> Variants { get; init; }
         public long LastAccessTicks;
         public readonly ConcurrentDictionary<string, IReadOnlyList<CookbookFlatEntry>> RowsByWorld = new(StringComparer.Ordinal);
+
+        /// <summary>Last-use stamp per world key, for the trim below.</summary>
+        private readonly ConcurrentDictionary<string, long> _worldTicks = new(StringComparer.Ordinal);
+
+        public void TouchWorld(string worldKey) => _worldTicks[worldKey] = DateTime.UtcNow.Ticks;
+
+        /// <summary>Drops the least recently used world row sets, never the current one.</summary>
+        public void TrimWorlds(string keepWorldKey)
+        {
+            while (RowsByWorld.Count > MaxWorldsPerTenant)
+            {
+                var victim = _worldTicks
+                    .Where(kv => kv.Key != keepWorldKey && RowsByWorld.ContainsKey(kv.Key))
+                    .OrderBy(kv => kv.Value)
+                    .Select(kv => (string?)kv.Key)
+                    .FirstOrDefault();
+
+                if (victim is null)
+                {
+                    return;
+                }
+
+                RowsByWorld.TryRemove(victim, out _);
+                _worldTicks.TryRemove(victim, out _);
+            }
+        }
     }
 
     private readonly ConcurrentDictionary<string, Lazy<TenantEntry>> _tenants = new(StringComparer.Ordinal);
@@ -138,8 +173,13 @@ public sealed class CookbookFlatCache
             throw;
         }
 
-        return entry.RowsByWorld.GetOrAdd(worldGenus ?? string.Empty, _ =>
+        var worldKey = worldGenus ?? string.Empty;
+        var rows = entry.RowsByWorld.GetOrAdd(worldKey, _ =>
             variants.Select(v => new CookbookFlatEntry(v.FoodId, CookbookRows.Build(v, worldGenus))).ToList());
+
+        entry.TouchWorld(worldKey);
+        entry.TrimWorlds(worldKey);
+        return rows;
     }
 
     /// <summary>Drops one tenant's cached data (used by the page's retry path).</summary>

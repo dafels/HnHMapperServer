@@ -60,7 +60,24 @@ public static class Extensions
             {
                 metrics.AddAspNetCoreInstrumentation()
                     .AddHttpClientInstrumentation()
-                    .AddRuntimeInstrumentation();
+                    .AddRuntimeInstrumentation()
+                    // .NET 10 meters. Blazor's are no-ops until something subscribes, so
+                    // naming them here is what turns them on.
+                    //   aspnetcore.components.circuit.active     - circuits in memory
+                    //   aspnetcore.components.circuit.connected  - circuits with a live client
+                    //   aspnetcore.components.circuit.duration    - circuit lifetime
+                    // active minus connected is the retained-circuit backlog, which is the
+                    // number that predicts Blazor Server memory. (These carry no tags, so
+                    // they cannot be split by tenant or route.)
+                    .AddMeter("Microsoft.AspNetCore.Components.Server.Circuits")
+                    .AddMeter("Microsoft.AspNetCore.Components")
+                    .AddMeter("Microsoft.AspNetCore.Components.Lifecycle")
+                    // Kestrel's pools evict idle blocks in .NET 10; these show how much is
+                    // pooled vs rented vs handed back.
+                    .AddMeter("Microsoft.AspNetCore.MemoryPool")
+                    // New in .NET 10: sign-in / authorization counters.
+                    .AddMeter("Microsoft.AspNetCore.Identity")
+                    .AddMeter("Microsoft.AspNetCore.Authorization");
             })
             .WithTracing(tracing =>
             {
@@ -73,7 +90,11 @@ public static class Extensions
                     )
                     // Uncomment the following line to enable gRPC instrumentation (requires the OpenTelemetry.Instrumentation.GrpcNetClient package)
                     //.AddGrpcClientInstrumentation()
-                    .AddHttpClientInstrumentation();
+                    .AddHttpClientInstrumentation()
+                    // .NET 10 activity sources: circuit starts, Blazor navigations and
+                    // event handling. Circuits moved to their own source in preview 6.
+                    .AddSource("Microsoft.AspNetCore.Components.Server.Circuits")
+                    .AddSource("Microsoft.AspNetCore.Components");
             });
 
         builder.AddOpenTelemetryExporters();

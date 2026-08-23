@@ -51,8 +51,20 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(optio
 });
 
 // Configure ImageSharp for better resource management during zoom tile generation
-// Use default ArrayPool-based allocator with reasonable limits
 SixLabors.ImageSharp.Configuration.Default.MaxDegreeOfParallelism = 2;  // Limit parallel image processing to reduce memory spikes
+
+// Cap the image buffer pool. ImageSharp's allocator pools large buffers outside the GC
+// heap, so they are invisible to the GC's heap limit but very visible to the container's
+// memory limit - which is what the kernel OOM-kills on. The tile pyramid works in
+// 400x400 RGBA tiles (~640 KB each) with at most MaxDegreeOfParallelism in flight, so a
+// 32 MB retained pool is generous; the accumulative limit is a backstop against a
+// pathological image.
+SixLabors.ImageSharp.Configuration.Default.MemoryAllocator =
+    SixLabors.ImageSharp.Memory.MemoryAllocator.Create(new SixLabors.ImageSharp.Memory.MemoryAllocatorOptions
+    {
+        MaximumPoolSizeMegabytes = 32,
+        AllocationLimitMegabytes = 256
+    });
 
 // Configure Serilog
 builder.Host.UseSerilog((context, services, configuration) => configuration
