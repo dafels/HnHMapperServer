@@ -33,6 +33,8 @@ public class AuthenticationDelegatingHandler : DelegatingHandler
         var httpContext = _httpContextAccessor.HttpContext;
         string? authCookiePrimary = null;
         string? authCookieLegacy = null;
+        string? clientIp = null;
+        string? clientScheme = null;
         bool usingCache = false;
 
         if (httpContext != null)
@@ -40,11 +42,17 @@ public class AuthenticationDelegatingHandler : DelegatingHandler
             // Priority 1: Get the authentication cookies from the current HTTP request
             authCookiePrimary = httpContext.Request.Cookies["HnH.Auth"];
             authCookieLegacy = httpContext.Request.Cookies["HnHMapper.Auth"];
-            
-            // Cache the primary cookie for use by background threads (SSE reconnects, etc.)
+            clientIp = httpContext.Connection.RemoteIpAddress?.ToString();
+            clientScheme = httpContext.Request.Scheme;
+
+            // Cache the primary cookie (and the browser's origin) for use by background threads (SSE reconnects, etc.)
             if (!string.IsNullOrEmpty(authCookiePrimary) && _authStateCache != null)
             {
                 _authStateCache.CookieValue = authCookiePrimary;
+            }
+            if (_authStateCache != null && !string.IsNullOrEmpty(clientIp))
+            {
+                _authStateCache.ClientOrigin = (clientIp, clientScheme);
             }
         }
         else
@@ -54,6 +62,7 @@ public class AuthenticationDelegatingHandler : DelegatingHandler
             if (_authStateCache != null)
             {
                 authCookiePrimary = _authStateCache.CookieValue;
+                (clientIp, clientScheme) = _authStateCache.ClientOrigin;
                 if (string.IsNullOrEmpty(authCookiePrimary))
                 {
                     _logger.LogWarning("HttpContext unavailable and AuthenticationStateCache.CookieValue is empty for {Method} {Uri}",
@@ -81,6 +90,20 @@ public class AuthenticationDelegatingHandler : DelegatingHandler
         {
             request.Headers.Remove("Cookie");
             request.Headers.Add("Cookie", string.Join("; ", cookies));
+        }
+
+        // Every web user's API call leaves this container from the same address. Forward the browser's origin so
+        // the API's per-IP rate limits and audit rows see the user, not the web container. The API trusts XFF
+        // only because it is not publicly reachable and Caddy rewrites the header for external traffic.
+        if (!string.IsNullOrEmpty(clientIp))
+        {
+            request.Headers.Remove("X-Forwarded-For");
+            request.Headers.TryAddWithoutValidation("X-Forwarded-For", clientIp);
+            if (!string.IsNullOrEmpty(clientScheme))
+            {
+                request.Headers.Remove("X-Forwarded-Proto");
+                request.Headers.TryAddWithoutValidation("X-Forwarded-Proto", clientScheme);
+            }
         }
 
         // Only log non-SSE requests at Info to reduce noise

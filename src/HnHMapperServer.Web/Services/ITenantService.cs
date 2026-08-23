@@ -13,12 +13,6 @@ public interface ITenantService
     Task<List<TenantDto>> GetUserTenantsAsync();
 
     /// <summary>
-    /// Switches to a different tenant (updates cookie with tenant context)
-    /// </summary>
-    /// <param name="tenantId">The tenant ID to switch to</param>
-    Task<bool> SelectTenantAsync(string tenantId);
-
-    /// <summary>
     /// Gets all pending user approvals for the specified tenant
     /// </summary>
     /// <param name="tenantId">The tenant ID</param>

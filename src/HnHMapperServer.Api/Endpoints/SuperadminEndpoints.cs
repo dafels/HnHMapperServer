@@ -5,6 +5,7 @@ using HnHMapperServer.Core.Interfaces;
 using HnHMapperServer.Infrastructure.Data;
 using HnHMapperServer.Infrastructure.Identity;
 using HnHMapperServer.Services.Interfaces;
+using HnHMapperServer.Services.Services;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
@@ -347,6 +348,7 @@ public static class SuperadminEndpoints
             var identityUser = await userManager.FindByIdAsync(tenantUser.UserId);
             if (identityUser == null) continue;
 
+            var methods = await SignInMethodResolver.ResolveAsync(db, new[] { tenantUser.UserId });
             userDtos.Add(new TenantUserDto
             {
                 Id = tenantUser.Id,
@@ -356,7 +358,10 @@ public static class SuperadminEndpoints
                 Role = tenantUser.Role.ToClaimValue(),
                 Permissions = tenantUser.Permissions.Select(p => p.Permission.ToClaimValue()).ToList(),
                 JoinedAt = tenantUser.JoinedAt,
-                PendingApproval = tenantUser.PendingApproval
+                PendingApproval = tenantUser.PendingApproval,
+                JoinSource = tenantUser.JoinSource,
+                SignInMethods = methods.TryGetValue(tenantUser.UserId, out var m) ? m.Names : new List<string>(),
+                RegistrationSource = identityUser.RegistrationSource
             });
         }
 
@@ -2321,13 +2326,13 @@ public static class SuperadminEndpoints
             if (tenant == null)
                 return Results.NotFound(new { error = "Tenant not found" });
 
-            // Check if user is already in a tenant
+            // Users may belong to several tenants; only a duplicate membership in THIS tenant is refused
             var existingAssignment = await db.TenantUsers
                 .IgnoreQueryFilters()
-                .AnyAsync(tu => tu.UserId == userId);
+                .AnyAsync(tu => tu.UserId == userId && tu.TenantId == dto.TenantId);
 
             if (existingAssignment)
-                return Results.BadRequest(new { error = "User is already assigned to a tenant" });
+                return Results.BadRequest(new { error = "User is already a member of this tenant" });
 
             // Validate role
             if (dto.Role != TenantRole.TenantAdmin.ToClaimValue() && dto.Role != TenantRole.TenantUser.ToClaimValue())
@@ -2355,7 +2360,8 @@ public static class SuperadminEndpoints
                 TenantId = dto.TenantId,
                 UserId = userId,
                 Role = dto.Role.ToTenantRole(),
-                JoinedAt = DateTime.UtcNow // Immediate approval for SuperAdmin assignment
+                JoinedAt = DateTime.UtcNow, // Immediate approval for SuperAdmin assignment
+                JoinSource = HnHMapperServer.Core.Constants.MembershipJoinSources.AdminAssigned
             };
 
             db.TenantUsers.Add(tenantUser);

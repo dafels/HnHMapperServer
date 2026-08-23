@@ -57,6 +57,12 @@ public sealed class TenantUserEntity
     /// </summary>
     public bool PendingApproval { get; set; }
 
+    /// <summary>How this membership came to exist (see Constants.MembershipJoinSources). "Legacy" for rows that predate tracking.</summary>
+    public string JoinSource { get; set; } = HnHMapperServer.Core.Constants.MembershipJoinSources.Legacy;
+
+    /// <summary>The invitation that was redeemed to create this membership, when JoinSource is InviteLink.</summary>
+    public int? InvitationId { get; set; }
+
     /// <summary>
     /// Navigation property to tenant permissions
     /// </summary>

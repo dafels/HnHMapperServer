@@ -7,16 +7,41 @@
 @inject AuthenticationStateProvider AuthenticationStateProvider
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
-@inject IJSRuntime JSRuntime
+@inject ClipboardService Clipboard
 @inject ILogger<InvitationManagement> Logger
 
 <MudPaper Class="pa-4">
     <MudStack Spacing="3">
-        <div class="d-flex justify-space-between align-center">
-            <MudText Typo="Typo.h6">
-                <MudIcon Icon="@Icons.Material.Filled.Mail" Class="me-2" />
-                Invitation Management
-            </MudText>
+        <MudText Typo="Typo.h6">
+            <MudIcon Icon="@Icons.Material.Filled.Link" Class="me-2" />
+            Invite links
+        </MudText>
+        <MudText Typo="Typo.body2" Class="ck-text-secondary">
+            Anyone with a link joins this map immediately with the access you pick &mdash; the link is the approval.
+            Links can be used by many people until they expire, run out of uses, or you revoke them.
+        </MudText>
+
+        @* Modal="false": MudSelect popovers are modal since MudBlazor 7 - with one open, the first click on the
+           button next to it would only dismiss the overlay. *@
+        <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center" Style="flex-wrap: wrap;">
+            <MudSelect T="int" @bind-Value="_expiresInDays" Label="Valid for" Dense="true" Margin="Margin.Dense"
+                       Variant="Variant.Outlined" Modal="false" Style="min-width: 130px;" Disabled="@_isCreating">
+                <MudSelectItem T="int" Value="7">7 days</MudSelectItem>
+                <MudSelectItem T="int" Value="30">30 days</MudSelectItem>
+                <MudSelectItem T="int" Value="90">90 days</MudSelectItem>
+            </MudSelect>
+            <MudSelect T="int" @bind-Value="_maxUses" Label="Uses" Dense="true" Margin="Margin.Dense"
+                       Variant="Variant.Outlined" Modal="false" Style="min-width: 130px;" Disabled="@_isCreating">
+                <MudSelectItem T="int" Value="0">Unlimited</MudSelectItem>
+                <MudSelectItem T="int" Value="1">1 person</MudSelectItem>
+                <MudSelectItem T="int" Value="5">5 people</MudSelectItem>
+                <MudSelectItem T="int" Value="25">25 people</MudSelectItem>
+            </MudSelect>
+            <MudSelect T="string" @bind-Value="_preset" Label="Access" Dense="true" Margin="Margin.Dense"
+                       Variant="Variant.Outlined" Modal="false" Style="min-width: 200px;" Disabled="@_isCreating">
+                <MudSelectItem T="string" Value="@("Full")">Full access (incl. edit/delete)</MudSelectItem>
+                <MudSelectItem T="string" Value="@("Contribute")">View + upload only</MudSelectItem>
+            </MudSelect>
             <MudButton Variant="Variant.Filled"
                       Color="Color.Primary"
                       StartIcon="@Icons.Material.Filled.Add"
@@ -29,19 +54,20 @@
                 }
                 else
                 {
-                    <span>Create Invitation</span>
+                    <span>Create invite link</span>
                 }
             </MudButton>
-        </div>
+        </MudStack>
 
         @if (!string.IsNullOrEmpty(_newInviteCode))
         {
             <MudAlert Severity="Severity.Success" Variant="Variant.Filled" Class="mb-4">
                 <MudText Typo="Typo.body1" Class="mb-2">
-                    <strong>Invitation Created!</strong>
+                    <strong>Invite link created</strong>
                 </MudText>
                 <MudText Typo="Typo.body2" Class="mb-2">
-                    Share this link with the person you want to invite. It will expire in 7 days.
+                    Share it with your village. Anyone with this link joins immediately with @(_newInvitePreset == "Contribute" ? "view + upload access" : "full access");
+                    it is valid for @_newInviteDays days@(_newInviteMaxUses > 0 ? $" and {_newInviteMaxUses} use{(_newInviteMaxUses == 1 ? "" : "s")}" : "").
                 </MudText>
                 <MudPaper Class="pa-2 d-flex justify-space-between align-center">
                     <MudText Typo="Typo.body2" Style="font-family: monospace; word-break: break-all;">
@@ -49,7 +75,7 @@
                     </MudText>
                     <MudIconButton Icon="@Icons.Material.Filled.ContentCopy"
                                   Color="Color.Default"
-                                  OnClick="@(() => CopyToClipboard(_newInviteLink))"
+                                  OnClick="@(() => Clipboard.CopyAsync(_newInviteLink!, "Invite link copied"))"
                                   Title="Copy to clipboard" />
                 </MudPaper>
                 <MudButton OnClick="@(() => _newInviteCode = null)" Class="mt-2" Size="Size.Small">
@@ -69,7 +95,7 @@
                                 IsLoading="@_isLoading" />
             </MudTabPanel>
 
-            <MudTabPanel Text="Used" Icon="@Icons.Material.Filled.Done" BadgeData="@_usedCount.ToString()">
+            <MudTabPanel Text="Used up" Icon="@Icons.Material.Filled.Done" BadgeData="@_usedCount.ToString()">
                 <InvitationTable Invitations="@_usedInvitations"
                                 Status="Used"
                                 OnCopyLink="@CopyInviteLink"
@@ -114,6 +140,13 @@
     private string? _newInviteCode;
     private string? _newInviteLink;
     private string? _currentTenantId;
+
+    private int _expiresInDays = 7;
+    private int _maxUses = 0;            // 0 = unlimited
+    private string _preset = "Full";
+    private int _newInviteDays;
+    private int _newInviteMaxUses;
+    private string _newInvitePreset = "Full";
 
     protected override async Task OnInitializedAsync()
     {
@@ -164,12 +197,12 @@
         {
             _invitations = await InvitationService.GetInvitationsAsync(_currentTenantId);
 
-            // Group by status
+            // Group by status. "Used up" = no uses left; links with uses remaining stay under Active.
             var now = DateTime.UtcNow;
-            _activeInvitations = _invitations.Where(i => i.Status == "Active" && i.ExpiresAt > now).ToList();
-            _usedInvitations = _invitations.Where(i => i.Status == "Used").ToList();
-            _expiredInvitations = _invitations.Where(i => i.ExpiresAt <= now && i.Status != "Revoked").ToList();
-            _revokedInvitations = _invitations.Where(i => i.Status == "Revoked").ToList();
+            _activeInvitations = _invitations.Where(i => i.Status == "Active" && i.ExpiresAt > now).OrderByDescending(i => i.CreatedAt).ToList();
+            _usedInvitations = _invitations.Where(i => i.Status == "Used" && i.ExpiresAt > now).OrderByDescending(i => i.UsedAt).ToList();
+            _expiredInvitations = _invitations.Where(i => i.ExpiresAt <= now && i.Status != "Revoked").OrderByDescending(i => i.ExpiresAt).ToList();
+            _revokedInvitations = _invitations.Where(i => i.Status == "Revoked").OrderByDescending(i => i.CreatedAt).ToList();
         }
         catch (Exception ex)
         {
@@ -190,12 +223,16 @@
         _isCreating = true;
         try
         {
-            var invitation = await InvitationService.CreateInvitationAsync(_currentTenantId);
+            var invitation = await InvitationService.CreateInvitationAsync(
+                _currentTenantId, _expiresInDays, _maxUses > 0 ? _maxUses : null, _preset);
             if (invitation != null)
             {
                 _newInviteCode = invitation.InviteCode;
-                _newInviteLink = $"{NavigationManager.BaseUri}register?invite={invitation.InviteCode}";
-                Snackbar.Add("Invitation created successfully!", Severity.Success);
+                _newInviteLink = InviteLinks.Build(NavigationManager.BaseUri, invitation.InviteCode);
+                _newInviteDays = _expiresInDays;
+                _newInviteMaxUses = _maxUses;
+                _newInvitePreset = invitation.Preset;
+                Snackbar.Add("Invite link created", Severity.Success);
                 await LoadInvitations();
             }
             else
@@ -214,31 +251,14 @@
         }
     }
 
-    private async Task CopyInviteLink(HnHMapperServer.Core.DTOs.InvitationDto invitation)
-    {
-        var inviteLink = $"{NavigationManager.BaseUri}register?invite={invitation.InviteCode}";
-        await CopyToClipboard(inviteLink);
-    }
-
-    private async Task CopyToClipboard(string text)
-    {
-        try
-        {
-            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", text);
-            Snackbar.Add("Link copied to clipboard!", Severity.Success);
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Failed to copy to clipboard");
-            Snackbar.Add("Failed to copy to clipboard.", Severity.Error);
-        }
-    }
+    private Task CopyInviteLink(HnHMapperServer.Core.DTOs.InvitationDto invitation) =>
+        Clipboard.CopyAsync(InviteLinks.Build(NavigationManager.BaseUri, invitation.InviteCode), "Invite link copied");
 
     private async Task RevokeInvitation(HnHMapperServer.Core.DTOs.InvitationDto invitation)
     {
         var result = await DialogService.ShowMessageBox(
-            "Revoke Invitation",
-            $"Are you sure you want to revoke this invitation? This action cannot be undone.",
+            "Revoke invite link",
+            $"Nobody will be able to join with this link anymore ({invitation.UseCount} joined so far). People who already joined keep their access.",
             yesText: "Revoke",
             cancelText: "Cancel");
 

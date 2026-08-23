@@ -81,7 +81,8 @@ public class TenantContextMiddleware
             }
             else
             {
-                _logger.LogWarning("User is authenticated but TenantId claim not found!");
+                // Normal for users who have not created/joined a tenant yet (they are routed to the create-or-join screen)
+                _logger.LogDebug("User is authenticated but has no TenantId claim (no active tenant)");
             }
         }
         else

@@ -1,4 +1,6 @@
+using HnHMapperServer.Core.Constants;
 using HnHMapperServer.Core.DTOs;
+using HnHMapperServer.Core.Extensions;
 using HnHMapperServer.Core.Interfaces;
 using HnHMapperServer.Core.Models;
 using HnHMapperServer.Infrastructure.Data;
@@ -10,6 +12,9 @@ namespace HnHMapperServer.Services.Services;
 
 public class InvitationService : IInvitationService
 {
+    private const int DefaultExpiryDays = 7;
+    private const int MaxUsesCeiling = 100;
+
     private readonly ITenantInvitationRepository _invitationRepository;
     private readonly ApplicationDbContext _context;
     private readonly ILogger<InvitationService> _logger;
@@ -24,7 +29,7 @@ public class InvitationService : IInvitationService
         _logger = logger;
     }
 
-    public async Task<InvitationDto> CreateInvitationAsync(string tenantId, string createdBy)
+    public async Task<InvitationDto> CreateInvitationAsync(string tenantId, string createdBy, int? expiresInDays = null, int? maxUses = null, string? preset = null)
     {
         // Verify tenant exists and is active
         var tenant = await _context.Tenants.FindAsync(tenantId);
@@ -38,22 +43,31 @@ public class InvitationService : IInvitationService
             throw new InvalidOperationException($"Tenant {tenantId} is not active");
         }
 
-        // Create invitation
+        // Server clamps every option: the client cannot mint a never-expiring or unlimited link by accident
+        var days = expiresInDays.HasValue && IInvitationService.AllowedExpiryDays.Contains(expiresInDays.Value)
+            ? expiresInDays.Value
+            : DefaultExpiryDays;
+        int? uses = maxUses is null or <= 0 ? null : Math.Min(maxUses.Value, MaxUsesCeiling);
+        var permissions = InvitationPresets.Expand(preset).Select(p => p.ToClaimValue()).ToList();
+
         var invitation = new TenantInvitationEntity
         {
             TenantId = tenantId,
-            InviteCode = Guid.NewGuid().ToString(),
+            InviteCode = Guid.NewGuid().ToString(),   // 122 random bits - the code IS the credential
             CreatedBy = createdBy,
             CreatedAt = DateTime.UtcNow,
-            ExpiresAt = DateTime.UtcNow.AddDays(7),
+            ExpiresAt = DateTime.UtcNow.AddDays(days),
             Status = "Active",
-            PendingApproval = false
+            PendingApproval = false,
+            MaxUses = uses,
+            UseCount = 0,
+            Permissions = permissions
         };
 
         var created = await _invitationRepository.CreateAsync(invitation);
 
-        _logger.LogInformation("Created invitation {InviteCode} for tenant {TenantId} by {CreatedBy}",
-            created.InviteCode, tenantId, createdBy);
+        _logger.LogInformation("Created invitation {InvitationId} for tenant {TenantId} by {CreatedBy} (expires {ExpiresAt:u}, maxUses={MaxUses}, preset={Preset})",
+            created.Id, tenantId, createdBy, created.ExpiresAt, uses?.ToString() ?? "unlimited", InvitationPresets.NameFor(InvitationPresets.Expand(preset)));
 
         return MapToDto(created, tenant.Name);
     }
@@ -72,50 +86,44 @@ public class InvitationService : IInvitationService
 
     public async Task<ValidateInvitationDto> ValidateInvitationAsync(string inviteCode)
     {
-        var invitation = await _invitationRepository.GetByInviteCodeAsync(inviteCode);
+        if (string.IsNullOrWhiteSpace(inviteCode))
+            return Invalid("Invitation is invalid or expired");
 
+        var invitation = await _invitationRepository.GetByInviteCodeAsync(inviteCode.Trim());
+
+        // Unknown codes get the same generic answer as dead ones - no existence oracle for guessers.
         if (invitation == null)
-        {
-            return new ValidateInvitationDto
-            {
-                IsValid = false,
-                ErrorMessage = "Invitation code not found"
-            };
-        }
+            return Invalid("Invitation is invalid or expired");
+
+        if (invitation.Status == "Revoked")
+            return Invalid("Invitation has been revoked");
+
+        if (invitation.Status == "Used" || (invitation.MaxUses.HasValue && invitation.UseCount >= invitation.MaxUses.Value))
+            return Invalid("Invitation has no remaining uses");
 
         if (invitation.Status != "Active")
-        {
-            return new ValidateInvitationDto
-            {
-                IsValid = false,
-                ErrorMessage = $"Invitation is {invitation.Status.ToLower()}"
-            };
-        }
+            return Invalid($"Invitation is {invitation.Status.ToLowerInvariant()}");
 
         if (invitation.ExpiresAt < DateTime.UtcNow)
-        {
-            return new ValidateInvitationDto
-            {
-                IsValid = false,
-                ErrorMessage = "Invitation has expired"
-            };
-        }
+            return Invalid("Invitation has expired");
 
         var tenant = await _context.Tenants.FindAsync(invitation.TenantId);
         if (tenant == null || !tenant.IsActive)
-        {
-            return new ValidateInvitationDto
-            {
-                IsValid = false,
-                ErrorMessage = "Tenant is not active"
-            };
-        }
+            return Invalid("This map is no longer active");
+
+        var memberCount = await _context.TenantUsers
+            .IgnoreQueryFilters()
+            .CountAsync(tu => tu.TenantId == tenant.Id && tu.JoinedAt != default);
 
         return new ValidateInvitationDto
         {
             IsValid = true,
             TenantId = tenant.Id,
-            TenantName = tenant.Name
+            TenantName = tenant.Name,
+            InvitedBy = invitation.CreatedBy,
+            MemberCount = memberCount,
+            ExpiresAt = invitation.ExpiresAt,
+            Preset = PresetOf(invitation)
         };
     }
 
@@ -128,17 +136,23 @@ public class InvitationService : IInvitationService
         return invitations.Select(i => MapToDto(i, tenantName)).ToList();
     }
 
-    public async Task RevokeInvitationAsync(int invitationId)
+    public async Task RevokeInvitationAsync(int invitationId, string tenantId)
     {
         var invitation = await _invitationRepository.GetByIdAsync(invitationId);
-        if (invitation == null)
+        if (invitation == null || !string.Equals(invitation.TenantId, tenantId, StringComparison.Ordinal))
         {
+            // Same answer for "not yours" and "does not exist": never confirm another tenant's invitation ids
             throw new ArgumentException($"Invitation {invitationId} not found");
         }
 
-        if (invitation.Status == "Used")
+        if (invitation.Status == "Revoked")
         {
-            throw new InvalidOperationException("Cannot revoke a used invitation");
+            return; // idempotent
+        }
+
+        if (invitation.Status == "Used" && invitation.MaxUses.HasValue && invitation.UseCount >= invitation.MaxUses.Value)
+        {
+            throw new InvalidOperationException("Invitation has already been fully used");
         }
 
         invitation.Status = "Revoked";
@@ -148,38 +162,51 @@ public class InvitationService : IInvitationService
             invitationId, invitation.TenantId);
     }
 
-    public async Task<InvitationDto> UseInvitationAsync(string inviteCode, string username)
+    public async Task<TenantInvitationEntity?> TryClaimUseAsync(string inviteCode, string redeemerUserId, CancellationToken cancellationToken = default)
     {
-        var invitation = await _invitationRepository.GetByInviteCodeAsync(inviteCode);
-        if (invitation == null)
+        var now = DateTime.UtcNow;
+
+        // Single conditional UPDATE: two redeemers racing for the last use can never both win.
+        var affected = await _context.TenantInvitations
+            .Where(i => i.InviteCode == inviteCode
+                        && i.Status == "Active"
+                        && i.ExpiresAt > now
+                        && (i.MaxUses == null || i.UseCount < i.MaxUses))
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(i => i.UseCount, i => i.UseCount + 1)
+                .SetProperty(i => i.UsedAt, now)
+                .SetProperty(i => i.UsedBy, redeemerUserId), cancellationToken);
+
+        if (affected == 0)
+            return null;
+
+        // ExecuteUpdate bypasses the change tracker: reload whatever copy the tracker holds
+        var invitation = await _context.TenantInvitations.FirstAsync(i => i.InviteCode == inviteCode, cancellationToken);
+        await _context.Entry(invitation).ReloadAsync(cancellationToken);
+
+        if (invitation.MaxUses.HasValue && invitation.UseCount >= invitation.MaxUses.Value && invitation.Status == "Active")
         {
-            throw new ArgumentException($"Invitation code {inviteCode} not found");
+            invitation.Status = "Used";
+            await _context.SaveChangesAsync(cancellationToken);
         }
 
-        // Validate invitation
-        var validation = await ValidateInvitationAsync(inviteCode);
-        if (!validation.IsValid)
-        {
-            throw new InvalidOperationException(validation.ErrorMessage ?? "Invalid invitation");
-        }
-
-        // Mark as used
-        invitation.Status = "Used";
-        invitation.UsedBy = username;
-        invitation.UsedAt = DateTime.UtcNow;
-        invitation.PendingApproval = true;
-
-        await _invitationRepository.UpdateAsync(invitation);
-
-        _logger.LogInformation("Invitation {InviteCode} used by {Username} for tenant {TenantId}",
-            inviteCode, username, invitation.TenantId);
-
-        var tenant = await _context.Tenants.FindAsync(invitation.TenantId);
-        return MapToDto(invitation, tenant?.Name ?? invitation.TenantId);
+        return invitation;
     }
+
+    private static ValidateInvitationDto Invalid(string message) =>
+        new() { IsValid = false, ErrorMessage = message };
+
+    private static string PresetOf(TenantInvitationEntity entity) =>
+        entity.Permissions.Count == 0
+            ? InvitationPresets.Full
+            : InvitationPresets.NameFor(entity.Permissions.Select(p => p.ToPermission()).ToList());
 
     private static InvitationDto MapToDto(TenantInvitationEntity entity, string tenantName)
     {
+        var permissions = entity.Permissions.Count == 0
+            ? InvitationPresets.FullPermissions.Select(p => p.ToClaimValue()).ToList()
+            : entity.Permissions.ToList();
+
         return new InvitationDto
         {
             Id = entity.Id,
@@ -192,7 +219,11 @@ public class InvitationService : IInvitationService
             UsedBy = entity.UsedBy,
             UsedAt = entity.UsedAt,
             Status = entity.Status,
-            PendingApproval = entity.PendingApproval
+            PendingApproval = entity.PendingApproval,
+            MaxUses = entity.MaxUses,
+            UseCount = entity.UseCount,
+            Preset = PresetOf(entity),
+            Permissions = permissions
         };
     }
 }

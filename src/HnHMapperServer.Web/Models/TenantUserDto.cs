@@ -39,4 +39,12 @@ public class TenantUserDto
     /// Number of tokens the user has created
     /// </summary>
     public int TokenCount { get; set; }
+
+    /// <summary>How the membership was created (InviteLink, SelfCreated, AdminAssigned, Approved, Bootstrap, Legacy).</summary>
+    public string JoinSource { get; set; } = string.Empty;
+
+    /// <summary>"Password" and/or provider names ("Steam", "Discord").</summary>
+    public List<string> SignInMethods { get; set; } = new();
+
+    public string RegistrationSource { get; set; } = string.Empty;
 }

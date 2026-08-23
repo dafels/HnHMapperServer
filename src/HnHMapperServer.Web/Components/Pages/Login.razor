@@ -2,12 +2,12 @@
 @attribute [Microsoft.AspNetCore.Authorization.AllowAnonymous]
 @rendermode InteractiveServer
 @using HnHMapperServer.Web.Models
+@using HnHMapperServer.Web.Security
 @using HnHMapperServer.Web.Services
 @inject NavigationManager NavigationManager
-@inject IConfiguration Configuration
+@inject ExternalAuthProviders ExternalProviders
+@inject HnHMapperServer.Services.Interfaces.IAuthSettingsStore AuthSettings
 @inject IHttpClientFactory HttpClientFactory
-@inject ITenantService TenantService
-@inject TenantContextService TenantContext
 @inject ISnackbar Snackbar
 @inject ILogger<Login> Logger
 @inject IJSRuntime JSRuntime
@@ -25,7 +25,14 @@
         @if (_registered)
         {
             <MudAlert Severity="Severity.Success" Variant="Variant.Outlined" Class="mb-3 glass-morphism" Dense="true">
-                Account created successfully! You can now log in after admin approval.
+                Account created. Log in to continue.
+            </MudAlert>
+        }
+
+        @if (!string.IsNullOrEmpty(Invite))
+        {
+            <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mb-3 glass-morphism" Dense="true">
+                Log in and you'll be taken back to your invite to join the map automatically.
             </MudAlert>
         }
 
@@ -36,56 +43,83 @@
             </MudAlert>
         }
 
-        <MudForm @ref="_form">
-            <MudStack Spacing="3">
-                <MudTextField @bind-Value="_username"
-                              Label="Username"
-                              Variant="Variant.Outlined"
-                              Required="true"
-                              AutoFocus="true"
-                              Disabled="@_isLoggingIn"
-                              OnKeyPress="@HandleKeyPress" />
-
-                <MudTextField @bind-Value="_password"
-                              Label="Password"
-                              Variant="Variant.Outlined"
-                              InputType="InputType.Password"
-                              Required="true"
-                              Disabled="@_isLoggingIn"
-                              OnKeyPress="@HandleKeyPress" />
-
-                <MudButton Variant="Variant.Filled"
-                           Color="Color.Primary"
-                           FullWidth="true"
-                           OnClick="HandleLogin"
-                           Disabled="@_isLoggingIn"
-                           Size="Size.Large">
-                    @if (_isLoggingIn)
-                    {
-                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
-                        <span>Logging in...</span>
-                    }
-                    else
-                    {
-                        <MudIcon Icon="@Icons.Material.Filled.Login" Class="me-2" />
-                        <span>Login</span>
-                    }
+        @if (!_showPasswordForm)
+        {
+            @* ---- Choice of sign-in methods: one button each, nothing else ---- *@
+            <MudStack Spacing="2">
+                @foreach (var provider in ExternalProviders.Enabled)
+                {
+                    <MudButton Variant="Variant.Filled" FullWidth="true" Size="Size.Large"
+                               Class="@ProviderButtonClass(provider)"
+                               StartIcon="@ProviderIcon(provider)"
+                               Href="@provider.ChallengeUrl(invite: Invite, returnUrl: EffectiveReturnUrl)">
+                        @(provider.Scheme == ExternalAuthProviders.SteamScheme ? "Sign in through Steam" : $"Continue with {provider.DisplayName}")
+                    </MudButton>
+                }
+                <MudButton Variant="Variant.Outlined" Color="Color.Primary" FullWidth="true" Size="Size.Large"
+                           StartIcon="@Icons.Material.Filled.Key"
+                           OnClick="@(() => _showPasswordForm = true)">
+                    Username and password
                 </MudButton>
             </MudStack>
-        </MudForm>
-
-        @if (_selfRegistrationEnabled)
+        }
+        else
         {
-            <MudDivider Class="my-4" />
-            <MudText Align="Align.Center" Class="mb-2">
-                To create a user
-            </MudText>
-            <MudButton Href="/register"
-                       Variant="Variant.Outlined"
-                       Color="Color.Primary"
-                       FullWidth="true">
-                Register Here
-            </MudButton>
+            @* ---- Username / password form (also the home of "create an account") ---- *@
+            <MudForm @ref="_form">
+                <MudStack Spacing="3">
+                    <MudTextField @bind-Value="_username"
+                                  Label="Username"
+                                  Variant="Variant.Outlined"
+                                  Required="true"
+                                  AutoFocus="true"
+                                  Disabled="@_isLoggingIn"
+                                  OnKeyPress="@HandleKeyPress" />
+
+                    <MudTextField @bind-Value="_password"
+                                  Label="Password"
+                                  Variant="Variant.Outlined"
+                                  InputType="InputType.Password"
+                                  Required="true"
+                                  Disabled="@_isLoggingIn"
+                                  OnKeyPress="@HandleKeyPress" />
+
+                    <MudButton Variant="Variant.Filled"
+                               Color="Color.Primary"
+                               FullWidth="true"
+                               OnClick="HandleLogin"
+                               Disabled="@_isLoggingIn"
+                               Size="Size.Large">
+                        @if (_isLoggingIn)
+                        {
+                            <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                            <span>Logging in...</span>
+                        }
+                        else
+                        {
+                            <MudIcon Icon="@Icons.Material.Filled.Login" Class="me-2" />
+                            <span>Log in</span>
+                        }
+                    </MudButton>
+                </MudStack>
+            </MudForm>
+
+            @if (_selfRegistrationEnabled || !string.IsNullOrEmpty(Invite))
+            {
+                <MudText Align="Align.Center" Class="mt-4">
+                    @(string.IsNullOrEmpty(Invite) ? "New here?" : "No account yet?")
+                    <MudLink Href="@RegisterHref" Color="Color.Primary">Create an account</MudLink>
+                </MudText>
+            }
+
+            @if (ExternalProviders.Any)
+            {
+                <MudButton Variant="Variant.Text" Color="Color.Default" FullWidth="true" Class="mt-2"
+                           StartIcon="@Icons.Material.Filled.ArrowBack"
+                           OnClick="@(() => _showPasswordForm = false)">
+                    Other sign-in options
+                </MudButton>
+            }
         }
 
         <MudText Align="Align.Center" Class="mt-3">
@@ -112,6 +146,14 @@
     [SupplyParameterFromQuery(Name = "error")]
     public string? Error { get; set; }
 
+    /// <summary>Invite code carried from an invite landing page; after login the user is sent back there to redeem it.</summary>
+    [SupplyParameterFromQuery(Name = "invite")]
+    public string? Invite { get; set; }
+
+    /// <summary>Local path to land on after login (validated server-side; non-local values are ignored).</summary>
+    [SupplyParameterFromQuery(Name = "returnUrl")]
+    public string? ReturnUrl { get; set; }
+
     private MudForm? _form;
     private string _username = string.Empty;
     private string _password = string.Empty;
@@ -119,80 +161,54 @@
     private bool _isLoggingIn;
     private bool _registered;
     private bool _selfRegistrationEnabled = true;
-    private bool _hasCheckedPendingLogin = false;
+    private bool _alreadyAuthenticated;
+    private bool _showPasswordForm;
 
-    protected override void OnInitialized()
+    private string RegisterHref => string.IsNullOrEmpty(Invite)
+        ? "/register"
+        : $"/register?invite={Uri.EscapeDataString(Invite)}";
+
+    /// <summary>Where the cookie endpoint should send the user after a successful login.</summary>
+    private string? EffectiveReturnUrl
     {
-        // Check if user is already authenticated (without pending login)
-        if (HttpContext?.User?.Identity?.IsAuthenticated == true && !_hasCheckedPendingLogin)
+        get
         {
-            // Will be handled in OnAfterRenderAsync
-            return;
-        }
-
-        // Check if self-registration is enabled (default true if not set)
-        _selfRegistrationEnabled = Configuration.GetValue<bool?>("SelfRegistration:Enabled") ?? true;
-
-        // Check for query parameters
-        _registered = Registered == "1";
-        if (Error == "1")
-        {
-            _errorMessage = "Invalid username or password";
+            if (!string.IsNullOrEmpty(Invite))
+                return $"/invite/{Uri.EscapeDataString(Invite)}";
+            return IsLocalPath(ReturnUrl) ? ReturnUrl : null;
         }
     }
 
-    protected override async Task OnAfterRenderAsync(bool firstRender)
+    protected override async Task OnInitializedAsync()
     {
-        if (!firstRender || _hasCheckedPendingLogin)
+        _alreadyAuthenticated = HttpContext?.User?.Identity?.IsAuthenticated == true;
+
+        // Superadmin-managed (SuperAdmin → Sign-in & onboarding)
+        _selfRegistrationEnabled = (await AuthSettings.GetPolicyAsync()).SelfRegistrationEnabled;
+
+        // Three buttons by default (Steam / Discord / username+password). The password form opens directly when
+        // it is the only option, after a failed password login, or right after creating a password account.
+        _showPasswordForm = !ExternalProviders.Any || Registered == "1" || Error == "1";
+
+        // Check for query parameters
+        _registered = Registered == "1";
+        _errorMessage = Error switch
+        {
+            "1" => "Invalid username or password",
+            "steam" => "Steam sign-in failed. Try again or log in with your password.",
+            "discord" => "Discord sign-in failed. Try again or log in with your password.",
+            "external" => "Sign-in with that provider failed. Try again or log in with your password.",
+            _ => string.Empty
+        };
+    }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (!firstRender || !_alreadyAuthenticated)
             return;
 
-        _hasCheckedPendingLogin = true;
-
-        // Check if we just logged in and have pending tenants in sessionStorage
-        try
-        {
-            var pendingTenantsJson = await JSRuntime.InvokeAsync<string>("sessionStorage.getItem", "pendingTenants");
-            if (!string.IsNullOrEmpty(pendingTenantsJson))
-            {
-                // Clear sessionStorage
-                await JSRuntime.InvokeVoidAsync("sessionStorage.removeItem", "pendingTenants");
-                await JSRuntime.InvokeVoidAsync("sessionStorage.removeItem", "pendingUsername");
-
-                // Deserialize tenants and complete login flow
-                var tenants = System.Text.Json.JsonSerializer.Deserialize<List<TenantDto>>(pendingTenantsJson);
-                if (tenants != null && tenants.Count > 0)
-                {
-                    TenantContext.ClearCache();
-
-                    if (tenants.Count == 1)
-                    {
-                        // Auto-select the only tenant
-                        var tenant = tenants[0];
-                        var selectSuccess = await TenantService.SelectTenantAsync(tenant.Id);
-
-                        if (selectSuccess)
-                        {
-                            TenantContext.SetCurrentTenant(tenant);
-                            NavigationManager.NavigateTo("/", forceLoad: true);
-                        }
-                        else
-                        {
-                            Logger.LogError("Failed to select tenant {TenantId}", tenant.Id);
-                            NavigationManager.NavigateTo("/login?error=1", forceLoad: true);
-                        }
-                    }
-                    else
-                    {
-                        // Multiple tenants - navigate to selector
-                        NavigationManager.NavigateTo("/tenant/select", forceLoad: true);
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Error completing login after authentication");
-        }
+        // Already signed in (e.g. bounced here by a stale circuit): go where the user was heading.
+        NavigationManager.NavigateTo(EffectiveReturnUrl ?? "/", forceLoad: true);
     }
 
     private async Task HandleKeyPress(KeyboardEventArgs e)
@@ -216,50 +232,29 @@
 
         try
         {
-            // Call the API to validate credentials and get tenant list
+            // Pre-flight against the API so we can show a friendly error without a full page round-trip.
+            // The actual browser session is created by the Web /api/login form post below, which also decides
+            // where the user lands (their map, the invite they came from, or the create-or-join screen).
             var apiClient = HttpClientFactory.CreateClient("API");
             var loginData = new { Username = _username, Password = _password };
             var apiResponse = await apiClient.PostAsJsonAsync("/api/auth/login", loginData);
 
             if (!apiResponse.IsSuccessStatusCode)
             {
-                Logger.LogError("API login failed: Status={Status}", apiResponse.StatusCode);
+                Logger.LogWarning("API login pre-flight failed: Status={Status}", apiResponse.StatusCode);
 
                 _errorMessage = apiResponse.StatusCode switch
                 {
                     System.Net.HttpStatusCode.Unauthorized => "Invalid username or password",
-                    System.Net.HttpStatusCode.Forbidden => "Your account is pending approval or has been disabled",
+                    System.Net.HttpStatusCode.Forbidden => "Your account has been disabled",
+                    System.Net.HttpStatusCode.TooManyRequests => "Too many login attempts. Please wait a moment and try again.",
                     _ => $"Login failed: {apiResponse.StatusCode}"
                 };
                 return;
             }
 
-            // Parse tenant list from API
-            var loginResponse = await apiResponse.Content.ReadFromJsonAsync<LoginResponse>(
-                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
-            // Check if user is awaiting tenant assignment
-            if (loginResponse?.HasNoTenant == true)
-            {
-                Logger.LogInformation("User {Username} is awaiting tenant assignment", _username);
-                NavigationManager.NavigateTo("/pending-assignment");
-                return;
-            }
-
-            if (loginResponse?.Tenants == null || loginResponse.Tenants.Count == 0)
-            {
-                _errorMessage = "Your account does not have access to any organizations. Please contact an administrator.";
-                Logger.LogWarning("User {Username} has no tenant access", _username);
-                return;
-            }
-
-            // Store tenant info in sessionStorage before form submission
-            // After /api/login sets the cookie and reloads, we'll complete tenant selection
-            var tenantsJson = System.Text.Json.JsonSerializer.Serialize(loginResponse.Tenants);
-            await JSRuntime.InvokeVoidAsync("sessionStorage.setItem", "pendingTenants", tenantsJson);
-            await JSRuntime.InvokeVoidAsync("sessionStorage.setItem", "pendingUsername", _username);
-
-            // Submit form to /api/login using JavaScript to establish authentication cookie
+            // Submit a form to /api/login using JavaScript to establish the authentication cookie
+            var returnUrlJs = System.Text.Json.JsonSerializer.Serialize(EffectiveReturnUrl ?? string.Empty);
             await JSRuntime.InvokeVoidAsync("eval", $@"
                 const form = document.createElement('form');
                 form.method = 'POST';
@@ -276,6 +271,12 @@
                 passInput.name = 'pass';
                 passInput.value = {System.Text.Json.JsonSerializer.Serialize(_password)};
                 form.appendChild(passInput);
+
+                const returnInput = document.createElement('input');
+                returnInput.type = 'hidden';
+                returnInput.name = 'returnUrl';
+                returnInput.value = {returnUrlJs};
+                form.appendChild(returnInput);
 
                 document.body.appendChild(form);
                 form.submit();
@@ -297,11 +298,23 @@
         }
     }
 
-    private class LoginResponse
+    private static string ProviderButtonClass(ExternalAuthProvider provider) => provider.Scheme switch
     {
-        public string? UserId { get; set; }
-        public string? Username { get; set; }
-        public List<TenantDto> Tenants { get; set; } = new();
-        public bool HasNoTenant { get; set; }
-    }
+        ExternalAuthProviders.SteamScheme => "invite-landing-provider invite-landing-steam",
+        ExternalAuthProviders.DiscordScheme => "invite-landing-provider invite-landing-discord",
+        _ => "invite-landing-provider"
+    };
+
+    private static string ProviderIcon(ExternalAuthProvider provider) => provider.Scheme switch
+    {
+        ExternalAuthProviders.SteamScheme => Icons.Custom.Brands.Steam,
+        ExternalAuthProviders.DiscordScheme => Icons.Custom.Brands.Discord,
+        _ => Icons.Material.Filled.Login
+    };
+
+    private static bool IsLocalPath(string? url) =>
+        !string.IsNullOrWhiteSpace(url)
+        && url.StartsWith('/')
+        && !url.StartsWith("//", StringComparison.Ordinal)
+        && !url.StartsWith("/\\", StringComparison.Ordinal);
 }

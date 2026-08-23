@@ -125,13 +125,51 @@ On first deployment:
 - Bootstrap admin assigned to this tenant with TenantAdmin role
 - All permissions granted (Map, Markers, Pointer, Upload, Writer)
 
-### User Registration
+### User Registration and Self-Service Onboarding (2026-08-23)
 
-**Self-registration is disabled in production.** New users must:
-1. Receive an invitation code from a TenantAdmin
-2. Register at `/register` with the invitation code
-3. Wait for admin approval (appear in "Pending Users" tab)
-4. Admin approves and assigns permissions
+Onboarding is self-service — no admin approval queue. **All of it is configured in the web UI:
+SuperAdmin → Sign-in** (toggles, credentials and step-by-step setup guides; changes apply instantly, no
+restart, no compose edits). Stored in the database with secrets encrypted by the shared DataProtection keys.
+
+- **Create a map:** any signed-in player can create a map (tenant) from the welcome screen or the map menu
+  and becomes its admin. Toggle, server-decided quota (never client-supplied) and per-player cap live in
+  SuperAdmin → Sign-in; plus an IP rate limit of 3 creations/hour.
+- **Join a map:** a map admin shares an invite link (`/invite/{code}`). Anyone with the link joins
+  **immediately** with the link's access preset — the link is the approval. Links are multi-use, expire
+  (7/30/90 days) and can be capped (uses) and revoked. Presets: *Full access* (all five permissions,
+  including Writer) or *View + upload* (no Writer).
+- **Accounts:** "Open registration" (SuperAdmin → Sign-in) controls whether someone WITHOUT an invite link
+  can create a password account. A valid invite link always permits registration. **Steam** and **Discord**
+  sign-in are switched on there too (Steam needs nothing but an optional free Web API key; Discord needs a
+  Discord application with the redirect URL the page shows you); first sign-in creates the account, and an
+  invite link carried through the sign-in joins the map in the same step. The compose files carry no
+  provider settings — `SelfRegistration__Enabled` on the api service only seeds the very first start.
+
+#### Security notes for self-service onboarding
+
+- **Invite links are bearer credentials.** Whoever holds one joins with the preset's permissions — with
+  *Full access* that includes deleting tiles and markers. Use *View + upload* and a use cap for links shared
+  in large channels; revoke links you no longer need (Map admin → Invite links). Every redemption is an
+  audit row (`InvitationRedeemed`) and every member list shows how each member got in.
+- **Rate limits** (per client IP; the web service forwards the browser's address to the API):
+  register 5/h, login 20/min, map creation 3/h, invite redeem 10/min, invite validate 30/min.
+- **XFF trust:** both services trust `X-Forwarded-For` from any source (`KnownProxies` cleared). That is
+  only safe because Caddy rewrites the header for external traffic and the API port 8080 is never
+  published. Do not expose the API container directly.
+- **TLS:** cookies are issued with `SecurePolicy=SameAsRequest`. On plain-HTTP deployments sessions and
+  invite-link clicks travel in cleartext — with open registration and external providers, run on a domain
+  with Caddy TLS. Discord additionally requires the exact HTTPS redirect URI `https://{domain}/signin-discord`
+  to be registered in its developer portal; Steam works on HTTP too but shows the bare IP as the realm.
+- **Secrets:** the Steam key and Discord client secret are entered once in SuperAdmin → Sign-in and stored
+  encrypted (DataProtection, same key ring both services share - keep `/data/DataProtection-Keys` in your
+  backups or the secrets must be re-entered). They are never shown again in the UI and never logged.
+  Provider tokens are never persisted; only the provider's user id is stored (AspNetUserLogins). Switching a
+  provider off removes its sign-in route immediately.
+- **Overview:** SuperAdmin → Accounts lists every account with its sign-in methods, registration source,
+  last login and memberships (joined via invite link / created the map / added by admin).
+
+Legacy note: the old single-use invitation codes and the "Pending Users" approval queue still work for
+rows created before this change; new links never produce pending users.
 
 ### Roles and Permissions
 

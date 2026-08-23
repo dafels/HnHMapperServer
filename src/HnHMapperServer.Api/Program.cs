@@ -133,6 +133,12 @@ builder.Services.AddScoped<IRoadService, RoadService>();
 builder.Services.AddScoped<IPingService, PingService>();
 builder.Services.AddScoped<ITenantService, TenantService>();
 builder.Services.AddScoped<IInvitationService, InvitationService>();
+builder.Services.AddScoped<ITenantMembershipService, TenantMembershipService>();
+builder.Services.AddScoped<ITenantProvisioningService, TenantProvisioningService>();
+builder.Services.AddScoped<IAccountOverviewService, AccountOverviewService>();
+builder.Services.AddSingleton<AuthSettingsCache>();
+builder.Services.AddSingleton(new AuthSettingsStoreOptions { DecryptSecrets = false });   // the API never needs the provider secrets
+builder.Services.AddScoped<IAuthSettingsStore, AuthSettingsStore>();
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<TokenMigrationService>();
 builder.Services.AddScoped<TenantNameService>();
@@ -263,7 +269,7 @@ builder.Services
     })
     .AddEntityFrameworkStores<ApplicationDbContext>()
     .AddDefaultTokenProviders()
-    .AddClaimsPrincipalFactory<HnHMapperServer.Api.Security.TenantClaimsPrincipalFactory>();
+    .AddClaimsPrincipalFactory<HnHMapperServer.Infrastructure.Identity.TenantClaimsPrincipalFactory>();
 
 // Configure security stamp validation interval for fast role/permission updates
 builder.Services.Configure<SecurityStampValidatorOptions>(options =>
@@ -411,6 +417,34 @@ builder.Services.AddRateLimiter(options =>
                 QueueLimit = 5
             });
     });
+
+    // Self-service onboarding limits. All keyed by client IP: the limiter runs before authentication, and the
+    // Web app forwards the browser's address in X-Forwarded-For (otherwise every web user would share the
+    // web container's bucket).
+    static string ClientIp(HttpContext httpContext)
+    {
+        var forwardedFor = httpContext.Request.Headers["X-Forwarded-For"].FirstOrDefault();
+        return !string.IsNullOrEmpty(forwardedFor)
+            ? forwardedFor.Split(',')[0].Trim()
+            : httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    }
+
+    static RateLimitPartition<string> FixedWindow(string name, HttpContext httpContext, int permits, TimeSpan window) =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: $"{name}:{ClientIp(httpContext)}",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = permits,
+                Window = window,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            });
+
+    options.AddPolicy("Register", httpContext => FixedWindow("register", httpContext, 5, TimeSpan.FromHours(1)));
+    options.AddPolicy("Login", httpContext => FixedWindow("login", httpContext, 20, TimeSpan.FromMinutes(1)));
+    options.AddPolicy("TenantCreate", httpContext => FixedWindow("tenant-create", httpContext, 3, TimeSpan.FromHours(1)));
+    options.AddPolicy("InviteRedeem", httpContext => FixedWindow("invite-redeem", httpContext, 10, TimeSpan.FromMinutes(1)));
+    options.AddPolicy("InviteValidate", httpContext => FixedWindow("invite-validate", httpContext, 30, TimeSpan.FromMinutes(1)));
 
     // Anonymous .hmap contributions: 2 per hour per IP
     options.AddPolicy("HmapContribution", httpContext =>
@@ -630,7 +664,8 @@ using (var scope = app.Services.CreateScope())
                         UserId = user.Id,
                         Role = TenantRole.TenantAdmin,
                         JoinedAt = DateTime.UtcNow,
-                        PendingApproval = false
+                        PendingApproval = false,
+                        JoinSource = HnHMapperServer.Core.Constants.MembershipJoinSources.Bootstrap
                     };
                     db.TenantUsers.Add(tenantUser);
                     await db.SaveChangesAsync();
@@ -665,7 +700,8 @@ using (var scope = app.Services.CreateScope())
                     UserId = user.Id,
                     Role = TenantRole.TenantAdmin,
                     JoinedAt = DateTime.UtcNow,
-                    PendingApproval = false
+                    PendingApproval = false,
+                    JoinSource = HnHMapperServer.Core.Constants.MembershipJoinSources.Bootstrap
                 };
                 db.TenantUsers.Add(tenantUser);
                 await db.SaveChangesAsync();
@@ -785,6 +821,8 @@ app.MapPingEndpoints();
 app.MapNotificationEndpoints(); // Notification system endpoints
 app.MapTimerEndpoints(); // Timer system endpoints
 app.MapInvitationEndpoints();
+app.MapTenantSelfServiceEndpoints();
+app.MapSuperadminAccountEndpoints();
 app.MapTenantAdminEndpoints(); // Phase 5: Tenant admin endpoints (RBAC)
 app.MapMapAdminEndpoints(); // Map admin endpoints (tenant-scoped map management)
 app.MapSuperadminEndpoints(); // Phase 5: Superadmin endpoints (global tenant management)

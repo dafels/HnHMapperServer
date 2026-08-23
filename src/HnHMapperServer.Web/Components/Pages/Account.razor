@@ -1,0 +1,154 @@
+@page "/account"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@using HnHMapperServer.Infrastructure.Identity
+@using HnHMapperServer.Web.Security
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Identity
+@inject UserManager<ApplicationUser> UserManager
+@inject AuthenticationStateProvider AuthStateProvider
+@inject ExternalAuthProviders ExternalProviders
+@inject ILogger<Account> Logger
+
+<PageTitle>Account - HnH Mapper</PageTitle>
+
+<MudContainer MaxWidth="MaxWidth.Small" Class="mt-6 mb-10">
+    <MudPaper Elevation="0" Class="pa-6 glass-morphism">
+        <MudText Typo="Typo.h4" Class="mb-1">
+            <MudIcon Icon="@Icons.Material.Filled.ManageAccounts" Class="me-2" />
+            Account
+        </MudText>
+        <MudText Typo="Typo.body2" Class="ck-text-secondary mb-4">
+            Signed in as <strong>@_username</strong>@(string.IsNullOrEmpty(_discordName) ? "" : $" · Discord: {_discordName}")
+        </MudText>
+
+        @if (!string.IsNullOrEmpty(_banner))
+        {
+            <MudAlert Severity="@_bannerSeverity" Dense="true" Class="mb-4">@_banner</MudAlert>
+        }
+
+        <MudText Typo="Typo.h6" Class="mb-2">Sign-in methods</MudText>
+
+        @if (_loading)
+        {
+            <MudProgressLinear Indeterminate="true" />
+        }
+        else
+        {
+            <MudList T="string" Dense="true">
+                <MudListItem T="string" Icon="@Icons.Material.Filled.Key">
+                    <div class="d-flex align-center justify-space-between" style="gap: 12px; flex-wrap: wrap;">
+                        <div>
+                            <MudText Typo="Typo.body1">Password</MudText>
+                            <MudText Typo="Typo.caption" Class="ck-text-secondary">
+                                @(_hasPassword ? "Set" : "Not set - you sign in with a provider below")
+                            </MudText>
+                        </div>
+                        @if (_hasPassword)
+                        {
+                            <MudButton Variant="Variant.Outlined" Size="Size.Small" Href="/password">Change</MudButton>
+                        }
+                    </div>
+                </MudListItem>
+
+                @foreach (var provider in ExternalProviders.Enabled)
+                {
+                    var linked = _linkedProviders.Contains(provider.Scheme);
+                    <MudListItem T="string" Icon="@ProviderIcon(provider)">
+                        <div class="d-flex align-center justify-space-between" style="gap: 12px; flex-wrap: wrap;">
+                            <div>
+                                <MudText Typo="Typo.body1">@provider.DisplayName</MudText>
+                                <MudText Typo="Typo.caption" Class="ck-text-secondary">
+                                    @(linked ? "Linked - you can sign in with it" : "Not linked")
+                                </MudText>
+                            </div>
+                            @if (linked)
+                            {
+                                <form method="post" action="@($"/auth/{provider.Scheme.ToLowerInvariant()}/unlink")">
+                                    <AntiforgeryToken />
+                                    <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Text" Color="Color.Error" Size="Size.Small"
+                                               Disabled="@(!_hasPassword && _linkedProviders.Count <= 1)"
+                                               title="@(!_hasPassword && _linkedProviders.Count <= 1 ? "This is your only way to sign in" : null)">
+                                        Unlink
+                                    </MudButton>
+                                </form>
+                            }
+                            else
+                            {
+                                <form method="post" action="@($"/auth/{provider.Scheme.ToLowerInvariant()}/link")">
+                                    <AntiforgeryToken />
+                                    <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Outlined" Size="Size.Small">
+                                        Link @provider.DisplayName
+                                    </MudButton>
+                                </form>
+                            }
+                        </div>
+                    </MudListItem>
+                }
+            </MudList>
+
+            @if (!ExternalProviders.Any)
+            {
+                <MudText Typo="Typo.caption" Class="ck-text-secondary">No external sign-in providers are configured on this server.</MudText>
+            }
+        }
+    </MudPaper>
+</MudContainer>
+
+@code {
+    [SupplyParameterFromQuery(Name = "link")] public string? LinkOutcomeParam { get; set; }
+    [SupplyParameterFromQuery(Name = "unlink")] public string? UnlinkOutcomeParam { get; set; }
+    [SupplyParameterFromQuery(Name = "provider")] public string? ProviderParam { get; set; }
+
+    private bool _loading = true;
+    private string _username = string.Empty;
+    private string? _discordName;
+    private bool _hasPassword;
+    private HashSet<string> _linkedProviders = new(StringComparer.OrdinalIgnoreCase);
+    private string? _banner;
+    private Severity _bannerSeverity = Severity.Info;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var providerName = ExternalProviders.Find(ProviderParam)?.DisplayName ?? ProviderParam ?? "provider";
+        (_banner, _bannerSeverity) = (LinkOutcomeParam?.ToLowerInvariant(), UnlinkOutcomeParam?.ToLowerInvariant()) switch
+        {
+            ("linked", _) => ($"{providerName} is now linked to your account.", Severity.Success),
+            ("linkedtoanotheraccount", _) => ($"That {providerName} account is already linked to a different HnH Mapper account.", Severity.Error),
+            ("provideralreadylinked", _) => ($"Your account already has a {providerName} login linked. Unlink it first to link a different one.", Severity.Warning),
+            (_, "unlinked") => ($"{providerName} has been unlinked.", Severity.Success),
+            (_, "lastsigninmethod") => ($"{providerName} is your only way to sign in - set a password or link another provider first.", Severity.Error),
+            (_, "notlinked") => ($"{providerName} wasn't linked.", Severity.Info),
+            _ => (null, Severity.Info)
+        };
+
+        try
+        {
+            var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+            var user = await UserManager.GetUserAsync(authState.User);
+            if (user != null)
+            {
+                _username = user.UserName ?? string.Empty;
+                _discordName = user.DiscordName;
+                _hasPassword = await UserManager.HasPasswordAsync(user);
+                var logins = await UserManager.GetLoginsAsync(user);
+                _linkedProviders = logins.Select(l => l.LoginProvider).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not load account sign-in methods");
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private static string ProviderIcon(ExternalAuthProvider provider) => provider.Scheme switch
+    {
+        ExternalAuthProviders.SteamScheme => Icons.Custom.Brands.Steam,
+        ExternalAuthProviders.DiscordScheme => Icons.Custom.Brands.Discord,
+        _ => Icons.Material.Filled.Login
+    };
+}

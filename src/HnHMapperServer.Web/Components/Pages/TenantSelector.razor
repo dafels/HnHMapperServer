@@ -1,117 +1,130 @@
 @page "/tenant/select"
 @rendermode InteractiveServer
 @attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@using HnHMapperServer.Core.Constants
+@using HnHMapperServer.Web.Components.Shared
 @using HnHMapperServer.Web.Models
 @using HnHMapperServer.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
 @inject ITenantService TenantService
-@inject TenantContextService TenantContext
 @inject NavigationManager Navigation
 @inject ISnackbar Snackbar
+@inject AuthenticationStateProvider AuthStateProvider
 
-<PageTitle>Select Tenant - HnH Mapper</PageTitle>
+<PageTitle>@(_tenants.Count == 0 ? "Welcome" : "Your maps") - HnH Mapper</PageTitle>
 
-<MudContainer MaxWidth="MaxWidth.Medium" Class="mt-8">
-    <MudPaper Elevation="0" Class="pa-8">
-        <MudText Typo="Typo.h4" Align="Align.Center" Class="mb-2">
-            <MudIcon Icon="@Icons.Material.Filled.Business" Class="me-2" />
-            Select Your Organization
+<MudContainer MaxWidth="MaxWidth.Large" Class="mt-6 mb-10">
+    @if (!string.IsNullOrEmpty(_bannerError))
+    {
+        <MudAlert Severity="Severity.Warning" Class="mb-4" Dense="true">@_bannerError</MudAlert>
+    }
+
+    @if (_loading)
+    {
+        <div class="d-flex justify-center align-center" style="min-height: 240px;">
+            <MudProgressCircular Indeterminate="true" Size="Size.Large" />
+        </div>
+    }
+    else if (_tenants.Count == 0)
+    {
+        @* ---------- Welcome state: exactly one decision to make ---------- *@
+        <MudPaper Elevation="2" Class="pa-6 mb-4 onboarding-card">
+            <MudText Typo="Typo.h3">Welcome, @_username</MudText>
+            <MudText Typo="Typo.h6" Class="ck-text-secondary mt-1">
+                You're not on a map yet. Pick one of the two:
+            </MudText>
+        </MudPaper>
+
+        <MudGrid Spacing="4">
+            <MudItem xs="12" md="6">
+                <CreateMapCard Highlight="@(Action == "create")" />
+            </MudItem>
+            <MudItem xs="12" md="6">
+                <JoinMapCard Highlight="@(Action == "join")" />
+            </MudItem>
+        </MudGrid>
+
+        <MudText Typo="Typo.body2" Align="Align.Center" Class="ck-text-secondary mt-6">
+            You can do either later from the map menu at the top of every page.
         </MudText>
+    }
+    else
+    {
+        @* ---------- Your maps + the same two actions ---------- *@
+        <MudPaper Elevation="2" Class="pa-6 mb-4 onboarding-card">
+            <MudText Typo="Typo.h4">
+                <MudIcon Icon="@Icons.Material.Filled.Map" Class="me-2" />
+                Your maps
+            </MudText>
+            <MudText Typo="Typo.body2" Class="ck-text-secondary mt-1">
+                Click a map to open it. The one with a checkmark is the map you're currently in.
+            </MudText>
+        </MudPaper>
 
-        <MudText Typo="Typo.body2" Align="Align.Center" Class="mb-6" Color="Color.Secondary">
-            You belong to multiple organizations. Please select one to continue.
-        </MudText>
-
-        @if (_loading)
-        {
-            <div class="d-flex justify-center align-center" style="min-height: 200px;">
-                <MudProgressCircular Indeterminate="true" Size="Size.Large" />
-            </div>
-        }
-        else if (_tenants.Count == 0)
-        {
-            <MudAlert Severity="Severity.Warning">
-                You don't have access to any organizations. Please contact an administrator.
-            </MudAlert>
-
-            <MudButton Variant="Variant.Outlined"
-                       Color="Color.Primary"
-                       FullWidth="true"
-                       Class="mt-4"
-                       Href="/api/logout">
-                Logout
-            </MudButton>
-        }
-        else
-        {
-            <MudGrid>
-                @foreach (var tenant in _tenants)
-                {
-                    <MudItem xs="12" md="6">
-                        <MudCard Outlined="true" Class="cursor-pointer hover-card" @onclick="@(() => SelectTenant(tenant))">
-                            <MudCardContent>
-                                <div class="d-flex align-items-center mb-2">
-                                    <MudIcon Icon="@GetTenantIcon(tenant.Id)" Size="Size.Large" Class="me-3" />
-                                    <div>
-                                        <MudText Typo="Typo.h6">@tenant.Name</MudText>
-                                        <MudChip T="string" Size="Size.Small" Color="@GetRoleColor(tenant.Role)">@tenant.Role</MudChip>
-                                    </div>
+        <MudGrid Spacing="3" Class="mb-6">
+            @foreach (var tenant in _tenants)
+            {
+                var isCurrent = tenant.Id == _activeTenantId;
+                <MudItem xs="12" sm="6" md="4">
+                    <MudCard Outlined="true" Class="@($"cursor-pointer hover-card onboarding-card h-100 {(isCurrent ? "current-map-card" : "")}")"
+                             @onclick="@(() => SelectTenant(tenant))">
+                        <MudCardContent>
+                            <div class="d-flex align-center mb-2">
+                                <MudIcon Icon="@(isCurrent ? Icons.Material.Filled.CheckCircle : Icons.Material.Filled.Map)"
+                                         Color="@(isCurrent ? Color.Success : Color.Default)"
+                                         Size="Size.Large" Class="me-3" />
+                                <div style="min-width: 0;">
+                                    <MudText Typo="Typo.h6" Style="word-break: break-word;">@tenant.Name</MudText>
+                                    <MudChip T="string" Size="Size.Small" Color="@GetRoleColor(tenant.Role)">@RoleLabel(tenant.Role)</MudChip>
                                 </div>
+                            </div>
 
-                                <MudDivider Class="my-2" />
+                            @if (tenant.StorageQuotaMB > 0)
+                            {
+                                <MudText Typo="Typo.caption" Class="ck-text-secondary">
+                                    Storage: @tenant.StorageUsageMB.ToString("F1") / @tenant.StorageQuotaMB MB (@tenant.StorageUsagePercentage%)
+                                </MudText>
+                                <MudProgressLinear Value="@tenant.StorageUsagePercentage"
+                                                   Color="@GetStorageColor(tenant.StorageUsagePercentage)"
+                                                   Size="Size.Small" Class="mt-1" />
+                            }
+                        </MudCardContent>
+                    </MudCard>
+                </MudItem>
+            }
+        </MudGrid>
 
-                                <MudText Typo="Typo.caption" Class="mb-1"><strong>Permissions:</strong></MudText>
-                                <div class="d-flex flex-wrap gap-1">
-                                    @if (tenant.Permissions.Count > 0)
-                                    {
-                                        @foreach (var permission in tenant.Permissions)
-                                        {
-                                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">@permission</MudChip>
-                                        }
-                                    }
-                                    else
-                                    {
-                                        <MudText Typo="Typo.caption" Color="Color.Secondary">No permissions</MudText>
-                                    }
-                                </div>
+        <MudText Typo="Typo.h5" Class="mb-3">Want another map?</MudText>
+        <MudGrid Spacing="4">
+            <MudItem xs="12" md="6">
+                <CreateMapCard Compact="true" Highlight="@(Action == "create")" />
+            </MudItem>
+            <MudItem xs="12" md="6">
+                <JoinMapCard Compact="true" Highlight="@(Action == "join")" />
+            </MudItem>
+        </MudGrid>
+    }
 
-                                @if (tenant.StorageQuotaMB > 0)
-                                {
-                                    <MudDivider Class="my-2" />
-                                    <MudText Typo="Typo.caption" Class="mb-1">
-                                        <strong>Storage:</strong> @tenant.StorageUsageMB.ToString("F1") / @tenant.StorageQuotaMB MB
-                                        (@tenant.StorageUsagePercentage%)
-                                    </MudText>
-                                    <MudProgressLinear Value="@tenant.StorageUsagePercentage"
-                                                       Color="@GetStorageColor(tenant.StorageUsagePercentage)"
-                                                       Size="Size.Small" />
-                                }
-                            </MudCardContent>
-                        </MudCard>
-                    </MudItem>
-                }
-            </MudGrid>
-
-            <MudDivider Class="my-4" />
-
-            <MudButton Variant="Variant.Outlined"
-                       Color="Color.Default"
-                       FullWidth="true"
-                       Href="/api/logout">
-                <MudIcon Icon="@Icons.Material.Filled.Logout" Class="me-2" />
-                Logout
-            </MudButton>
-        }
-    </MudPaper>
+    <div class="d-flex justify-center mt-8">
+        <MudButton Variant="Variant.Text" Color="Color.Default" Href="/api/logout" StartIcon="@Icons.Material.Filled.Logout">
+            Log out
+        </MudButton>
+    </div>
 </MudContainer>
 
 <style>
     .hover-card {
-        transition: all 0.2s ease-in-out;
+        transition: transform 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
     }
 
     .hover-card:hover {
-        transform: translateY(-4px);
+        transform: translateY(-3px);
         box-shadow: 0 8px 16px rgba(0,0,0,0.15) !important;
+    }
+
+    .current-map-card {
+        border-color: var(--mud-palette-success) !important;
+        border-width: 2px !important;
     }
 
     .cursor-pointer {
@@ -120,24 +133,40 @@
 </style>
 
 @code {
+    /// <summary>"create" or "join" - focuses that card (used by the top-bar map menu).</summary>
+    [SupplyParameterFromQuery(Name = "action")]
+    public string? Action { get; set; }
+
+    /// <summary>Set by the switch endpoint when a switch was refused.</summary>
+    [SupplyParameterFromQuery(Name = "error")]
+    public string? Error { get; set; }
+
     private List<TenantDto> _tenants = new();
     private bool _loading = true;
+    private string _username = string.Empty;
+    private string? _activeTenantId;
+    private string? _bannerError;
 
     protected override async Task OnInitializedAsync()
     {
+        _bannerError = Error switch
+        {
+            "not_member" => "You're not a member of that map (or it has been suspended). Pick one of your maps below.",
+            "missing" => "No map was selected.",
+            _ => null
+        };
+
         try
         {
-            _tenants = await TenantService.GetUserTenantsAsync();
+            var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+            _username = authState.User.Identity?.Name ?? "hearthling";
+            _activeTenantId = authState.User.FindFirst(AuthorizationConstants.ClaimTypes.TenantId)?.Value;
 
-            // If user has exactly one tenant, auto-select it
-            if (_tenants.Count == 1)
-            {
-                await SelectTenant(_tenants[0]);
-            }
+            _tenants = await TenantService.GetUserTenantsAsync();
         }
         catch (Exception ex)
         {
-            Snackbar.Add($"Error loading tenants: {ex.Message}", Severity.Error);
+            Snackbar.Add($"Error loading your maps: {ex.Message}", Severity.Error);
         }
         finally
         {
@@ -145,69 +174,31 @@
         }
     }
 
-    private async Task SelectTenant(TenantDto tenant)
+    private void SelectTenant(TenantDto tenant)
     {
-        try
-        {
-            var success = await TenantService.SelectTenantAsync(tenant.Id);
-            if (success)
-            {
-                TenantContext.SetCurrentTenant(tenant);
-                Snackbar.Add($"Selected {tenant.Name}", Severity.Success);
-
-                // Redirect to dashboard
-                Navigation.NavigateTo("/", forceLoad: true);
-            }
-            else
-            {
-                Snackbar.Add("Failed to select tenant", Severity.Error);
-            }
-        }
-        catch (Exception ex)
-        {
-            Snackbar.Add($"Error selecting tenant: {ex.Message}", Severity.Error);
-        }
+        // Switching re-issues the auth cookie, which only the Web endpoint can do -> full navigation.
+        Navigation.NavigateTo(TenantSwitchUrl.For(tenant.Id, "/"), forceLoad: true);
     }
 
-    private string GetTenantIcon(string tenantId)
+    private static string RoleLabel(string role) => role.ToLowerInvariant() switch
     {
-        var parts = tenantId.Split('-');
-        if (parts.Length == 0) return Icons.Material.Filled.Business;
+        "tenantadmin" => "Admin",
+        "tenantuser" => "Member",
+        "superadmin" => "SuperAdmin",
+        _ => role
+    };
 
-        return parts[0].ToLower() switch
-        {
-            "warrior" => Icons.Material.Filled.Shield,
-            "dragon" => "🐉",
-            "wizard" => "🧙",
-            "castle" => "🏰",
-            "sword" => "⚔️",
-            "shield" => Icons.Material.Filled.Shield,
-            "crown" => "👑",
-            "hammer" => "🔨",
-            "bow" => "🏹",
-            "staff" => "🪄",
-            _ => Icons.Material.Filled.Business
-        };
-    }
-
-    private Color GetRoleColor(string role)
+    private static Color GetRoleColor(string role) => role.ToLowerInvariant() switch
     {
-        return role.ToLower() switch
-        {
-            "superadmin" => Color.Error,
-            "tenantadmin" => Color.Primary,
-            "tenantuser" => Color.Default,
-            _ => Color.Default
-        };
-    }
+        "superadmin" => Color.Error,
+        "tenantadmin" => Color.Primary,
+        _ => Color.Default
+    };
 
-    private Color GetStorageColor(int percentage)
+    private static Color GetStorageColor(int percentage) => percentage switch
     {
-        return percentage switch
-        {
-            >= 90 => Color.Error,
-            >= 70 => Color.Warning,
-            _ => Color.Success
-        };
-    }
+        >= 90 => Color.Error,
+        >= 70 => Color.Warning,
+        _ => Color.Success
+    };
 }

@@ -23,7 +23,7 @@
 
         <AuthorizeView>
             <Authorized>
-                <!-- Tenant Selector (only show if user has multiple tenants) -->
+                <!-- Map menu: current map, switch, create / join / copy invite link (always visible) -->
                 <TenantSelectorDropdown />
 
                 <!-- Notification Center -->
@@ -62,7 +62,7 @@
                         <MudButton StartIcon="@Icons.Material.Filled.AdminPanelSettings"
                                    Color="Color.Inherit"
                                    Href="/admin">
-                            <span class="d-none d-md-inline">Organization</span>
+                            <span class="d-none d-md-inline">Map admin</span>
                         </MudButton>
                     </Authorized>
                 </AuthorizeView>
@@ -71,6 +71,7 @@
                          Color="Color.Inherit"
                          Dense="true"
                          AriaLabel="User account menu">
+                    <MudMenuItem Href="/account" Icon="@Icons.Material.Filled.ManageAccounts">Account &amp; sign-in</MudMenuItem>
                     <MudMenuItem Href="/password" Icon="@Icons.Material.Filled.Lock">Change Password</MudMenuItem>
                     <MudMenuItem Href="/api/logout" Icon="@Icons.Material.Filled.Logout">Logout</MudMenuItem>
                 </MudMenu>

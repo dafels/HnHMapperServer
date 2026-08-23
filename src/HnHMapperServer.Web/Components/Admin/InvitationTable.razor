@@ -15,18 +15,24 @@ else
     <MudTable Items="@Invitations" Hover="true" Dense="true">
         <HeaderContent>
             <MudTh>Code</MudTh>
+            <MudTh>Access</MudTh>
+            <MudTh>Uses</MudTh>
             <MudTh>Created</MudTh>
             <MudTh>Expires</MudTh>
-            @if (Status == "Used")
-            {
-                <MudTh>Used By</MudTh>
-                <MudTh>Used At</MudTh>
-            }
+            <MudTh>Last used</MudTh>
             <MudTh>Actions</MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd DataLabel="Code">
                 <code>@MaskCode(context.InviteCode)</code>
+            </MudTd>
+            <MudTd DataLabel="Access">
+                <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="@(context.Preset == "Contribute" ? Color.Default : Color.Primary)">
+                    @(context.Preset == "Contribute" ? "View + upload" : "Full access")
+                </MudChip>
+            </MudTd>
+            <MudTd DataLabel="Uses">
+                @context.UseCount / @(context.MaxUses?.ToString() ?? "∞")
             </MudTd>
             <MudTd DataLabel="Created">
                 @context.CreatedAt.ToString("yyyy-MM-dd HH:mm")
@@ -34,15 +40,9 @@ else
             <MudTd DataLabel="Expires">
                 @context.ExpiresAt.ToString("yyyy-MM-dd HH:mm")
             </MudTd>
-            @if (Status == "Used")
-            {
-                <MudTd DataLabel="Used By">
-                    @(context.UsedBy ?? "-")
-                </MudTd>
-                <MudTd DataLabel="Used At">
-                    @(context.UsedAt?.ToString("yyyy-MM-dd HH:mm") ?? "-")
-                </MudTd>
-            }
+            <MudTd DataLabel="Last used">
+                @(context.UsedAt?.ToString("yyyy-MM-dd HH:mm") ?? "-")
+            </MudTd>
             <MudTd DataLabel="Actions">
                 @if (ShowCopy)
                 {

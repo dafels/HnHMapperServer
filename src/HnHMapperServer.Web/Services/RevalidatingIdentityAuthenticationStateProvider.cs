@@ -1,3 +1,6 @@
+using HnHMapperServer.Core.Constants;
+using HnHMapperServer.Infrastructure.Data;
+using HnHMapperServer.Infrastructure.Identity;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Server;
 using Microsoft.AspNetCore.Identity;
@@ -8,7 +11,11 @@ namespace HnHMapperServer.Web.Services;
 
 /// <summary>
 /// Revalidating authentication state provider that checks security stamps
-/// to ensure users are logged out when their roles/permissions change
+/// to ensure users are logged out when their roles/permissions change.
+/// It also invalidates a circuit whose principal no longer reflects the user's persisted active tenant
+/// (switched on another tab/device, membership removed, tenant suspended): returning <c>false</c> sends the
+/// circuit through RedirectToLogin, where the browser's (already refreshed) cookie signs it straight back in
+/// with the correct tenant claims.
 /// </summary>
 public class RevalidatingIdentityAuthenticationStateProvider<TUser>
     : RevalidatingServerAuthenticationStateProvider where TUser : class
@@ -45,6 +52,19 @@ public class RevalidatingIdentityAuthenticationStateProvider<TUser>
             return false;
         }
 
+        // Active tenant drift: the circuit's claims say one tenant, the persisted selection resolves to another.
+        if (user is ApplicationUser appUser)
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var expectedTenantId = await ActiveTenantMembershipResolver.ResolveTenantIdAsync(
+                db, appUser.Id, appUser.ActiveTenantId, cancellationToken);
+            var circuitTenantId = principal.FindFirstValue(AuthorizationConstants.ClaimTypes.TenantId);
+            if (!string.Equals(expectedTenantId, circuitTenantId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
         // If security stamp isn't supported, accept as valid
         if (!userManager.SupportsUserSecurityStamp)
         {
@@ -79,4 +99,3 @@ public class RevalidatingIdentityAuthenticationStateProvider<TUser>
         }
     }
 }
-

@@ -10,6 +10,11 @@ namespace HnHMapperServer.Api.Authorization;
 /// Succeeds if:
 /// 1. User has SuperAdmin role (global bypass), OR
 /// 2. User has TenantAdmin role in the current tenant
+///
+/// INVARIANT (multi-membership): the TenantRole claim describes the user's ACTIVE tenant only. This policy
+/// therefore proves "admin of the active tenant", not "admin of the tenant named in the route". Every
+/// /api/tenants/{tenantId}/... handler must additionally compare the route tenantId with the TenantId claim
+/// (SuperAdmins excepted) - see TenantAdminEndpoints.GetTenantUsers for the canonical check.
 /// </summary>
 public class TenantAdminHandler : AuthorizationHandler<TenantAdminRequirement>
 {

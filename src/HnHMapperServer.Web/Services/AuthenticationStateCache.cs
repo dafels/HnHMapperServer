@@ -15,6 +15,31 @@ public class AuthenticationStateCache
     private string? _cookieValue;
     private ClaimsPrincipal? _user;
     private DateTime _lastUpdated;
+    private string? _clientIp;
+    private string? _clientScheme;
+
+    /// <summary>
+    /// The browser's address (already de-proxied by the forwarded-headers middleware) and scheme, captured
+    /// while an HttpContext is available so circuit/background requests to the API can still carry them.
+    /// </summary>
+    public (string? Ip, string? Scheme) ClientOrigin
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return (_clientIp, _clientScheme);
+            }
+        }
+        set
+        {
+            lock (_lock)
+            {
+                _clientIp = value.Ip;
+                _clientScheme = value.Scheme;
+            }
+        }
+    }
 
     public string? CookieValue
     {

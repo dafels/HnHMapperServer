@@ -46,6 +46,18 @@
                     </MudStack>
                 </CellTemplate>
             </TemplateColumn>
+            <TemplateColumn Title="Sign-in">
+                <CellTemplate>
+                    <SignInMethodIcons Methods="@context.Item.SignInMethods" />
+                </CellTemplate>
+            </TemplateColumn>
+            <TemplateColumn Title="Joined via">
+                <CellTemplate>
+                    <MudTooltip Text="@($"Joined {context.Item.JoinedAt:yyyy-MM-dd}")">
+                        <span>@JoinSourceLabel(context.Item.JoinSource)</span>
+                    </MudTooltip>
+                </CellTemplate>
+            </TemplateColumn>
             <TemplateColumn Title="Status">
                 <CellTemplate>
                     @if (context.Item.PendingApproval)
@@ -88,6 +100,16 @@
 
 @code {
     private List<TenantUserDto> users = new();
+
+    private static string JoinSourceLabel(string? source) => source switch
+    {
+        "InviteLink" => "Invite link",
+        "SelfCreated" => "Created this map",
+        "AdminAssigned" => "Added by admin",
+        "Approved" => "Approved",
+        "Bootstrap" => "Bootstrap",
+        _ => "—"
+    };
     private bool isLoading = true;
 
     protected override async Task OnInitializedAsync()

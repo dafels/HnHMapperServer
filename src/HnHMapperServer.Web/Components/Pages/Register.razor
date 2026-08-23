@@ -4,31 +4,58 @@
 @using HnHMapperServer.Web.Services
 @inject IHttpClientFactory HttpClientFactory
 @inject NavigationManager NavigationManager
+@inject HnHMapperServer.Services.Interfaces.IAuthSettingsStore AuthSettings
 @inject ISnackbar Snackbar
 @inject IInvitationService InvitationService
+@inject IJSRuntime JSRuntime
+@inject ILogger<Register> Logger
 
-<PageTitle>Register - HnH Mapper</PageTitle>
+<PageTitle>Create an account - HnH Mapper</PageTitle>
 
 <div class="auth-page">
 <MudContainer MaxWidth="MaxWidth.Small" Class="mt-8">
     <MudPaper Elevation="0" Class="pa-8">
-        @if (_invitationValid)
+        @if (_loading)
+        {
+            <div class="d-flex justify-center align-center" style="min-height: 300px;">
+                <MudProgressCircular Indeterminate="true" Size="Size.Large" />
+            </div>
+        }
+        else if (!_canRegister)
+        {
+            <MudText Typo="Typo.h4" Align="Align.Center" Class="mb-4" Color="Color.Error">
+                <MudIcon Icon="@Icons.Material.Filled.Error" Class="me-2" />
+                @(_inviteBlocked ? "Invalid invitation" : "Registration is closed")
+            </MudText>
+
+            <MudAlert Severity="Severity.Error" Class="mb-4">
+                @_errorMessage
+            </MudAlert>
+
+            <MudButton Variant="Variant.Outlined"
+                       Color="Color.Primary"
+                       FullWidth="true"
+                       Href="/login">
+                Go to login
+            </MudButton>
+        }
+        else
         {
             <MudText Typo="Typo.h4" Align="Align.Center" Class="mb-2">
                 <MudIcon Icon="@Icons.Material.Filled.PersonAdd" Class="me-2" />
-                Create Account
+                Create an account
             </MudText>
 
             @if (_invitation != null)
             {
-                <MudAlert Severity="Severity.Info" Dense="true" Class="mb-4">
-                    You've been invited to join <strong>@_invitation.TenantName</strong>
+                <MudAlert Severity="Severity.Success" Dense="true" Class="mb-4" Icon="@Icons.Material.Filled.Map">
+                    You'll join <strong>@_invitation.TenantName</strong> right after creating your account.
                 </MudAlert>
             }
-            else if (string.IsNullOrWhiteSpace(InviteCode))
+            else
             {
                 <MudAlert Severity="Severity.Info" Dense="true" Class="mb-4">
-                    Register your account. An administrator will assign you to a tenant after registration.
+                    After creating your account you can start a new map or join one with an invite link.
                 </MudAlert>
             }
 
@@ -40,7 +67,7 @@
                                   RequiredError="Username is required"
                                   Validation="@(new Func<string, string?>(ValidateUsername))"
                                   Variant="Variant.Outlined"
-                                  HelperText="3-20 alphanumeric characters or underscore"
+                                  HelperText="3-20 letters, numbers or underscores"
                                   OnKeyPress="@HandleKeyPress" />
 
                     <MudTextField @bind-Value="_discordName"
@@ -49,7 +76,7 @@
                                   RequiredError="Discord name is required"
                                   Validation="@(new Func<string, string?>(ValidateDiscordName))"
                                   Variant="Variant.Outlined"
-                                  HelperText="Your Discord name"
+                                  HelperText="So your village knows who you are"
                                   OnKeyPress="@HandleKeyPress" />
 
                     <MudTextField @bind-Value="_password"
@@ -62,7 +89,7 @@
                                   OnKeyPress="@HandleKeyPress" />
 
                     <MudTextField @bind-Value="_confirmPassword"
-                                  Label="Confirm Password"
+                                  Label="Confirm password"
                                   InputType="InputType.Password"
                                   Required="true"
                                   Validation="@(new Func<string, string?>(ValidateConfirmPassword))"
@@ -83,73 +110,29 @@
                         @if (_isRegistering)
                         {
                             <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
-                            <span>Creating Account...</span>
+                            <span>Creating account...</span>
                         }
                         else
                         {
                             <MudIcon Icon="@Icons.Material.Filled.PersonAdd" Class="me-2" />
-                            <span>Create Account</span>
+                            <span>@(_invitation != null ? $"Create account and join {_invitation.TenantName}" : "Create account")</span>
                         }
                     </MudButton>
-
-                    @* Debug info *@
-                    @if (!_isFormValid)
-                    {
-                        <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">
-                            Please fill in all required fields correctly. Form is currently invalid.
-                        </MudAlert>
-                    }
 
                     <MudDivider />
 
                     <MudText Align="Align.Center">
                         Already have an account?
-                        <MudLink Href="/login" Color="Color.Primary">Sign in</MudLink>
+                        <MudLink Href="@LoginHref" Color="Color.Primary">Log in</MudLink>
+                        @if (_invitation != null)
+                        {
+                            <span> — you'll still join automatically.</span>
+                        }
                     </MudText>
                 </MudStack>
             </MudForm>
         }
-        else if (_loading)
-        {
-            <div class="d-flex justify-center align-center" style="min-height: 300px;">
-                <MudProgressCircular Indeterminate="true" Size="Size.Large" />
-            </div>
-        }
-        else
-        {
-            <MudText Typo="Typo.h4" Align="Align.Center" Class="mb-4" Color="Color.Error">
-                <MudIcon Icon="@Icons.Material.Filled.Error" Class="me-2" />
-                Invalid Invitation
-            </MudText>
-
-            <MudAlert Severity="Severity.Error" Class="mb-4">
-                @_errorMessage
-            </MudAlert>
-
-            <MudButton Variant="Variant.Outlined"
-                       Color="Color.Primary"
-                       FullWidth="true"
-                       Href="/login">
-                Return to Login
-            </MudButton>
-        }
     </MudPaper>
-
-    @if (_invitationValid)
-    {
-        @if (_invitation != null)
-        {
-            <MudText Typo="Typo.caption" Align="Align.Center" Class="mt-4" Color="Color.Secondary">
-                Your account will be pending admin approval after registration.
-            </MudText>
-        }
-        else
-        {
-            <MudText Typo="Typo.caption" Align="Align.Center" Class="mt-4" Color="Color.Secondary">
-                Your account will be created and an administrator will assign you to a tenant.
-            </MudText>
-        }
-    }
 </MudContainer>
 </div>
 
@@ -161,7 +144,8 @@
     private bool _isFormValid;
     private bool _isRegistering;
     private bool _loading = true;
-    private bool _invitationValid;
+    private bool _canRegister;
+    private bool _inviteBlocked;
 
     private string _username = string.Empty;
     private string _discordName = string.Empty;
@@ -169,45 +153,42 @@
     private string _confirmPassword = string.Empty;
     private string _errorMessage = string.Empty;
 
-    private HnHMapperServer.Core.DTOs.InvitationDto? _invitation;
+    private ValidateInvitationDto? _invitation;
+
+    private string LoginHref => string.IsNullOrWhiteSpace(InviteCode)
+        ? "/login"
+        : $"/login?invite={Uri.EscapeDataString(InviteCode.Trim())}";
 
     protected override async Task OnInitializedAsync()
     {
-        // Invitation code is now optional
-        // If no invitation code, user can register but will need SuperAdmin assignment
         if (string.IsNullOrWhiteSpace(InviteCode))
         {
-            _invitationValid = true; // Allow registration without invitation
+            // Open registration is a superadmin decision (Sign-in & onboarding); a valid invite link always works regardless.
+            _canRegister = (await AuthSettings.GetPolicyAsync()).SelfRegistrationEnabled;
+            if (!_canRegister)
+                _errorMessage = "New accounts need an invitation link from a map admin. Ask your village for one.";
             _loading = false;
             return;
         }
 
-        // If invitation code provided, validate it
         try
         {
-            _invitation = await InvitationService.ValidateInvitationAsync(InviteCode);
-
-            // Check if invitation is valid
-            var isValid = _invitation != null &&
-                         _invitation.Status == "Active" &&
-                         _invitation.ExpiresAt > DateTime.UtcNow;
-
-            if (!isValid)
+            var validation = await InvitationService.ValidateInvitationAsync(InviteCode.Trim());
+            if (validation.IsValid)
             {
-                _errorMessage = _invitation == null
-                    ? "Invitation not found or has expired."
-                    : "This invitation has already been used or is no longer valid.";
-                _invitationValid = false;
+                _invitation = validation;
+                _canRegister = true;
             }
             else
             {
-                _invitationValid = true;
+                _inviteBlocked = true;
+                _errorMessage = validation.ErrorMessage ?? "Invitation is invalid or expired.";
             }
         }
         catch (Exception ex)
         {
+            _inviteBlocked = true;
             _errorMessage = $"Error validating invitation: {ex.Message}";
-            _invitationValid = false;
         }
         finally
         {
@@ -273,7 +254,6 @@
 
     private async Task HandleRegister()
     {
-        // Validate form
         if (_form != null)
         {
             await _form.Validate();
@@ -291,7 +271,7 @@
             {
                 Username = _username,
                 Password = _password,
-                InviteCode = InviteCode,
+                InviteCode = InviteCode?.Trim(),
                 DiscordName = _discordName
             };
 
@@ -299,54 +279,95 @@
 
             if (response.IsSuccessStatusCode)
             {
-                var responseContent = await response.Content.ReadAsStringAsync();
-                var responseObj = System.Text.Json.JsonSerializer.Deserialize<RegisterResponse>(responseContent,
+                var responseObj = await response.Content.ReadFromJsonAsync<RegisterResponse>(
                     new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
-                // Check if user is awaiting assignment (no invitation code used)
-                if (responseObj?.AwaitingAssignment == true)
+                if (responseObj?.Joined == true)
                 {
-                    // Navigate to pending assignment page
-                    NavigationManager.NavigateTo("/pending-assignment");
+                    Snackbar.Add($"Welcome to {responseObj.TenantName}!", Severity.Success);
                 }
-                else
+                else if (!string.IsNullOrEmpty(responseObj?.InviteError))
                 {
-                    // Store tenant name for pending approval page (invitation code flow)
-                    var tenantName = _invitation?.TenantName ?? "the organization";
+                    Snackbar.Add($"Account created, but the invitation could not be used: {responseObj.InviteError}", Severity.Warning);
+                }
 
-                    // Navigate to pending approval page
-                    NavigationManager.NavigateTo($"/register/pending?tenant={Uri.EscapeDataString(tenantName)}");
-                }
+                // Sign the new account in right away (same cookie form post the login page uses); the server
+                // lands them inside their new map, or on the create-or-join screen when there is none.
+                await SubmitLoginFormAsync(responseObj?.Joined == true ? "/" : "/tenant/select");
+                return;
             }
-            else
+
+            var errorContent = await response.Content.ReadAsStringAsync();
+            try
             {
-                var errorContent = await response.Content.ReadAsStringAsync();
-                try
-                {
-                    var errorObj = System.Text.Json.JsonSerializer.Deserialize<ErrorResponse>(errorContent);
-                    _errorMessage = errorObj?.Error ?? "Registration failed";
-                }
-                catch
-                {
-                    _errorMessage = response.StatusCode switch
-                    {
-                        System.Net.HttpStatusCode.Conflict => "Username already exists",
-                        System.Net.HttpStatusCode.BadRequest => "Invalid invitation code or registration data",
-                        System.Net.HttpStatusCode.Forbidden => "This invitation has already been used",
-                        _ => "Registration failed. Please try again."
-                    };
-                }
-                StateHasChanged(); // Force UI update to display error message
+                var errorObj = System.Text.Json.JsonSerializer.Deserialize<ErrorResponse>(errorContent,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                _errorMessage = errorObj?.Error ?? "Registration failed";
             }
+            catch
+            {
+                _errorMessage = response.StatusCode switch
+                {
+                    System.Net.HttpStatusCode.Conflict => "Username already exists",
+                    System.Net.HttpStatusCode.BadRequest => "Invalid invitation code or registration data",
+                    System.Net.HttpStatusCode.Forbidden => "Registration requires an invitation link",
+                    System.Net.HttpStatusCode.TooManyRequests => "Too many attempts. Please wait a moment and try again.",
+                    _ => "Registration failed. Please try again."
+                };
+            }
+            StateHasChanged();
         }
         catch (Exception ex)
         {
+            Logger.LogError(ex, "Registration failed");
             _errorMessage = $"Error: {ex.Message}";
-            StateHasChanged(); // Force UI update to display error message
+            StateHasChanged();
         }
         finally
         {
             _isRegistering = false;
+        }
+    }
+
+    /// <summary>
+    /// Posts the just-entered credentials to the Web cookie endpoint. If anything goes wrong the user simply
+    /// lands on the login page with an "account created" note - never stuck.
+    /// </summary>
+    private async Task SubmitLoginFormAsync(string returnUrl)
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("eval", $@"
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = '/api/login';
+
+                const userInput = document.createElement('input');
+                userInput.type = 'hidden';
+                userInput.name = 'user';
+                userInput.value = {System.Text.Json.JsonSerializer.Serialize(_username)};
+                form.appendChild(userInput);
+
+                const passInput = document.createElement('input');
+                passInput.type = 'hidden';
+                passInput.name = 'pass';
+                passInput.value = {System.Text.Json.JsonSerializer.Serialize(_password)};
+                form.appendChild(passInput);
+
+                const returnInput = document.createElement('input');
+                returnInput.type = 'hidden';
+                returnInput.name = 'returnUrl';
+                returnInput.value = {System.Text.Json.JsonSerializer.Serialize(returnUrl)};
+                form.appendChild(returnInput);
+
+                document.body.appendChild(form);
+                form.submit();
+            ");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Auto sign-in after registration failed; sending user to login");
+            NavigationManager.NavigateTo("/login?registered=1", forceLoad: true);
         }
     }
 
@@ -360,8 +381,10 @@
         public string UserId { get; set; } = string.Empty;
         public string Username { get; set; } = string.Empty;
         public string? TenantId { get; set; }
-        public bool PendingApproval { get; set; }
+        public string? TenantName { get; set; }
+        public bool Joined { get; set; }
         public bool AwaitingAssignment { get; set; }
+        public string? InviteError { get; set; }
         public string Message { get; set; } = string.Empty;
     }
 }

@@ -131,10 +131,17 @@ namespace HnHMapperServer.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("MaxUses")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool>("PendingApproval")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER")
                         .HasDefaultValue(false);
+
+                    b.PrimitiveCollection<string>("Permissions")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -145,6 +152,11 @@ namespace HnHMapperServer.Infrastructure.Migrations
                     b.Property<string>("TenantId")
                         .IsRequired()
                         .HasColumnType("TEXT");
+
+                    b.Property<int>("UseCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0);
 
                     b.Property<DateTime?>("UsedAt")
                         .HasColumnType("TEXT");
@@ -192,6 +204,15 @@ namespace HnHMapperServer.Infrastructure.Migrations
                     b.Property<int>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
+
+                    b.Property<int?>("InvitationId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("JoinSource")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT")
+                        .HasDefaultValue("Legacy");
 
                     b.Property<DateTime>("JoinedAt")
                         .HasColumnType("TEXT");
@@ -1617,6 +1638,9 @@ namespace HnHMapperServer.Infrastructure.Migrations
                     b.Property<int>("AccessFailedCount")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("ActiveTenantId")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("ConcurrencyStamp")
                         .IsConcurrencyToken()
                         .HasColumnType("TEXT");
@@ -1633,6 +1657,9 @@ namespace HnHMapperServer.Infrastructure.Migrations
 
                     b.Property<bool>("EmailConfirmed")
                         .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("LastLoginAt")
+                        .HasColumnType("TEXT");
 
                     b.Property<bool>("LockoutEnabled")
                         .HasColumnType("INTEGER");
@@ -1656,6 +1683,10 @@ namespace HnHMapperServer.Infrastructure.Migrations
 
                     b.Property<bool>("PhoneNumberConfirmed")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("RegistrationSource")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("SecurityStamp")
                         .HasColumnType("TEXT");

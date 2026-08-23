@@ -44,36 +44,6 @@ public class TenantService : ITenantService
         }
     }
 
-    public async Task<bool> SelectTenantAsync(string tenantId)
-    {
-        try
-        {
-            _logger.LogInformation("SelectTenantAsync: Calling POST /api/auth/select-tenant with TenantId={TenantId}", tenantId);
-            var client = _httpClientFactory.CreateClient("API");
-            var payload = new { TenantId = tenantId };
-            var response = await client.PostAsJsonAsync("/api/auth/select-tenant", payload);
-
-            _logger.LogInformation("SelectTenantAsync: Response Status={StatusCode}", response.StatusCode);
-
-            if (response.IsSuccessStatusCode)
-            {
-                _logger.LogInformation("SelectTenantAsync: Success for tenant {TenantId}", tenantId);
-                return true;
-            }
-            else
-            {
-                var errorBody = await response.Content.ReadAsStringAsync();
-                _logger.LogWarning("Failed to select tenant {TenantId}: {StatusCode}, Body={Body}", tenantId, response.StatusCode, errorBody);
-                return false;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error selecting tenant {TenantId}", tenantId);
-            return false;
-        }
-    }
-
     public async Task<List<PendingUserDto>> GetPendingUsersAsync(string tenantId)
     {
         try

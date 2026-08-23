@@ -142,7 +142,9 @@ else
                     <MudTh>Username</MudTh>
                     <MudTh>Role</MudTh>
                     <MudTh>Permissions</MudTh>
+                    <MudTh>Sign-in</MudTh>
                     <MudTh>Joined</MudTh>
+                    <MudTh>Joined via</MudTh>
                     <MudTh>Status</MudTh>
                     <MudTh>Actions</MudTh>
                 </HeaderContent>
@@ -161,7 +163,9 @@ else
                             }
                         </MudStack>
                     </MudTd>
+                    <MudTd DataLabel="Sign-in"><SignInMethodIcons Methods="@context.SignInMethods" /></MudTd>
                     <MudTd DataLabel="Joined">@context.JoinedAt.ToString("yyyy-MM-dd")</MudTd>
+                    <MudTd DataLabel="Joined via">@JoinSourceLabel(context.JoinSource)</MudTd>
                     <MudTd DataLabel="Status">
                         @if (context.PendingApproval)
                         {
@@ -210,6 +214,16 @@ else
     [Parameter] public string TenantId { get; set; } = string.Empty;
 
     private TenantDetailsDto? _tenant;
+
+    private static string JoinSourceLabel(string? source) => source switch
+    {
+        "InviteLink" => "Invite link",
+        "SelfCreated" => "Created this map",
+        "AdminAssigned" => "Added by admin",
+        "Approved" => "Approved",
+        "Bootstrap" => "Bootstrap",
+        _ => "—"
+    };
     private bool _isLoading = true;
 
     private List<BreadcrumbItem> _breadcrumbItems = new()

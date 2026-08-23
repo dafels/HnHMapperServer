@@ -1,0 +1,40 @@
+@* One icon per way an account can sign in: key = password, brand icons for external providers. *@
+<MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center">
+    @if (Methods == null || Methods.Count == 0)
+    {
+        <MudTooltip Text="No sign-in method recorded">
+            <MudIcon Icon="@Icons.Material.Outlined.HelpOutline" Size="Size.Small" Class="ck-text-secondary" />
+        </MudTooltip>
+    }
+    else
+    {
+        @foreach (var method in Methods)
+        {
+            <MudTooltip Text="@TooltipFor(method)">
+                <MudIcon Icon="@IconFor(method)" Size="Size.Small" />
+            </MudTooltip>
+        }
+    }
+</MudStack>
+
+@code {
+    [Parameter] public List<string>? Methods { get; set; }
+
+    /// <summary>Optional provider → external id, shown in the tooltip (superadmin overview).</summary>
+    [Parameter] public Dictionary<string, string>? ExternalIds { get; set; }
+
+    private string TooltipFor(string method)
+    {
+        if (ExternalIds != null && ExternalIds.TryGetValue(method, out var id))
+            return $"{method}: {id}";
+        return method == "Password" ? "Password" : $"{method} sign-in";
+    }
+
+    private static string IconFor(string method) => method switch
+    {
+        "Password" => Icons.Material.Filled.Key,
+        "Steam" => Icons.Custom.Brands.Steam,
+        "Discord" => Icons.Custom.Brands.Discord,
+        _ => Icons.Material.Filled.Login
+    };
+}

@@ -13,6 +13,7 @@ using HnHMapperServer.Core.Enums;
 using HnHMapperServer.Core.Extensions;
 using HnHMapperServer.Core.Constants;
 using HnHMapperServer.Core.Interfaces;
+using HnHMapperServer.Core.DTOs;
 
 namespace HnHMapperServer.Api.Endpoints;
 
@@ -22,9 +23,9 @@ public static class IdentityEndpoints
 	{
 		var group = app.MapGroup("/api/auth");
 
-		group.MapPost("/login", Login).DisableAntiforgery();
+		group.MapPost("/login", Login).RequireRateLimiting("Login").DisableAntiforgery();
 		group.MapPost("/logout", Logout).DisableAntiforgery();
-		group.MapPost("/register", Register).DisableAntiforgery();
+		group.MapPost("/register", Register).RequireRateLimiting("Register").DisableAntiforgery();
 		group.MapPost("/select-tenant", SelectTenant).RequireAuthorization().DisableAntiforgery();
 		group.MapGet("/me", Me).DisableAntiforgery();
 		group.MapGet("/tenants", GetUserTenants).RequireAuthorization().DisableAntiforgery();
@@ -113,20 +114,25 @@ public static class IdentityEndpoints
 		return Results.Ok();
 	}
 
+	/// <summary>
+	/// POST /api/auth/register - creates a password account.
+	/// With a valid invite link the user joins that tenant IMMEDIATELY (the link is the approval) - this works
+	/// even when open self-registration is disabled. Without a link, registration is gated by
+	/// SelfRegistration:Enabled and the new account lands on the create-or-join screen.
+	/// </summary>
 	private static async Task<IResult> Register(
 		[FromBody] RegisterRequest request,
 		UserManager<ApplicationUser> userManager,
 		IConfiguration configuration,
 		IInvitationService invitationService,
-		ApplicationDbContext db)
+		ITenantMembershipService membershipService,
+		IAuthSettingsStore authSettings,
+		IAuditService auditService,
+		ILogger<object> logger)
 	{
 		// Validate inputs
 		if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
 			return Results.BadRequest(new { error = "Username and password are required" });
-
-		// Invitation code is now optional
-		// If provided: user assigned to tenant with pending approval
-		// If not provided: user created but not assigned to any tenant (SuperAdmin assigns later)
 
 		// Password validation (6+ chars minimum)
 		if (request.Password.Length < 6)
@@ -136,22 +142,22 @@ public static class IdentityEndpoints
 		if (discordName.Length < 2 || discordName.Length > 32)
 			return Results.BadRequest(new { error = "Discord name is required (2-32 characters)" });
 
-		// Validate invitation code (if provided)
-		bool hasInvitation = !string.IsNullOrWhiteSpace(request.InviteCode);
-		HnHMapperServer.Core.DTOs.InvitationDto? usedInvitation = null;
+		var inviteCode = request.InviteCode?.Trim();
+		var hasInvitation = !string.IsNullOrWhiteSpace(inviteCode);
 
 		if (hasInvitation)
 		{
-			try
-			{
-				var invitation = await invitationService.ValidateInvitationAsync(request.InviteCode!);
-				if (!invitation.IsValid)
-					return Results.BadRequest(new { error = invitation.ErrorMessage ?? "Invalid invitation code" });
-			}
-			catch (Exception ex)
-			{
-				return Results.BadRequest(new { error = ex.Message });
-			}
+			// Validate BEFORE creating the account so a dead link never leaves an orphan user behind
+			var invitation = await invitationService.ValidateInvitationAsync(inviteCode!);
+			if (!invitation.IsValid)
+				return Results.BadRequest(new { error = invitation.ErrorMessage ?? "Invitation is invalid or expired" });
+		}
+		else
+		{
+			// Superadmin-managed (SuperAdmin → Sign-in & onboarding); deployment config only seeds the default
+			var policy = await authSettings.GetPolicyAsync();
+			if (!policy.SelfRegistrationEnabled)
+				return Results.Json(new { error = "Registration requires an invitation link" }, statusCode: StatusCodes.Status403Forbidden);
 		}
 
 		// Check if username already exists
@@ -159,13 +165,13 @@ public static class IdentityEndpoints
 		if (existingUser != null)
 			return Results.Conflict(new { error = "Username already exists" });
 
-		// Create new user with Identity
 		var user = new ApplicationUser
 		{
 			UserName = request.Username,
 			Email = string.Empty,
 			DiscordName = discordName,
-			CreatedAt = DateTime.UtcNow
+			CreatedAt = DateTime.UtcNow,
+			RegistrationSource = RegistrationSources.Password
 		};
 		var result = await userManager.CreateAsync(user, request.Password);
 
@@ -175,45 +181,55 @@ public static class IdentityEndpoints
 			return Results.BadRequest(new { error = errors });
 		}
 
-		// If invitation code provided: assign user to tenant with pending approval
-		if (hasInvitation)
+		await auditService.LogAsync(new AuditEntry
 		{
-			// Use invitation code to create TenantUser with pending approval
-			usedInvitation = await invitationService.UseInvitationAsync(request.InviteCode!, user.Id);
+			UserId = user.Id,
+			Action = "UserRegistered",
+			EntityType = "User",
+			EntityId = user.Id,
+			NewValue = $"source={RegistrationSources.Password}; invite={(hasInvitation ? "yes" : "no")}"
+		});
 
-			// Create TenantUser entry with pending approval (JoinedAt = default)
-			var tenantUser = new TenantUserEntity
-			{
-				TenantId = usedInvitation.TenantId,
-				UserId = user.Id,
-				Role = TenantRole.TenantUser,
-				JoinedAt = default // Pending approval - will be set when approved
-			};
-			db.TenantUsers.Add(tenantUser);
-			await db.SaveChangesAsync();
-
-			// Success - user created with pending approval
+		if (!hasInvitation)
+		{
+			// No invite: the account exists, the welcome screen offers "create a map" / "join with a code"
 			return Results.Created($"/api/auth/users/{user.UserName}", new
 			{
 				userId = user.Id,
 				username = user.UserName,
-				tenantId = usedInvitation.TenantId,
-				pendingApproval = true,
-				message = "Registration successful. Waiting for tenant admin approval."
-			});
-		}
-		else
-		{
-			// No invitation code - user created but not assigned to any tenant
-			// SuperAdmin will assign them later
-			return Results.Created($"/api/auth/users/{user.UserName}", new
-			{
-				userId = user.Id,
-				username = user.UserName,
+				joined = false,
 				awaitingAssignment = true,
-				message = "Registration successful. Waiting for administrator to assign you to a tenant."
+				message = "Registration successful."
 			});
 		}
+
+		var redeem = await membershipService.RedeemInvitationAsync(inviteCode!, user.Id);
+		if (!redeem.Succeeded)
+		{
+			// The link died between validation and redemption (revoked / last use taken). The account still
+			// exists and can redeem another link from the welcome screen.
+			logger.LogWarning("User {UserId} registered but invite redemption failed: {Error}", user.Id, redeem.Error);
+			return Results.Created($"/api/auth/users/{user.UserName}", new
+			{
+				userId = user.Id,
+				username = user.UserName,
+				joined = false,
+				awaitingAssignment = true,
+				inviteError = redeem.Error,
+				message = "Account created, but the invitation could no longer be used."
+			});
+		}
+
+		return Results.Created($"/api/auth/users/{user.UserName}", new
+		{
+			userId = user.Id,
+			username = user.UserName,
+			joined = true,
+			tenantId = redeem.TenantId,
+			tenantName = redeem.TenantName,
+			permissions = redeem.Permissions.Select(p => p.ToClaimValue()).ToList(),
+			message = $"Welcome to {redeem.TenantName}."
+		});
 	}
 
 	private static IResult Me(ClaimsPrincipal user)
@@ -247,7 +263,9 @@ public static class IdentityEndpoints
 		// Get all tenants user belongs to (approved only)
 		var tenantUsers = await db.TenantUsers
 			.IgnoreQueryFilters()
+			.Include(tu => tu.Permissions)
 			.Where(tu => tu.UserId == identityUser.Id && tu.JoinedAt != default)
+			.OrderBy(tu => tu.JoinedAt)
 			.ToListAsync();
 
 		var tenants = new List<object>();
@@ -264,18 +282,29 @@ public static class IdentityEndpoints
 			{
 				tenantId = tenant.Id,
 				tenantName = tenant.Name,
-				role = tenantUser.Role.ToClaimValue()
+				role = tenantUser.Role.ToClaimValue(),
+				permissions = tenantUser.Permissions.Select(p => p.Permission.ToClaimValue()).ToList(),
+				storageUsageMB = tenant.CurrentStorageMB,
+				storageQuotaMB = tenant.StorageQuotaMB,
+				isActive = tenant.IsActive,
+				joinedAt = tenantUser.JoinedAt,
+				joinSource = tenantUser.JoinSource
 			});
 		}
 
 		return Results.Ok(tenants);
 	}
 
+	/// <summary>
+	/// POST /api/auth/select-tenant - persists the user's active tenant. Programmatic use only: this process
+	/// cannot re-issue the browser cookie (the Web app owns it - see Web /api/tenant/select), but the shared
+	/// claims factory reads ActiveTenantId on the next revalidation, so API-side tenant context follows within
+	/// the validation interval.
+	/// </summary>
 	private static async Task<IResult> SelectTenant(
 		[FromBody] SelectTenantRequest request,
 		ClaimsPrincipal user,
 		UserManager<ApplicationUser> userManager,
-		SignInManager<ApplicationUser> signInManager,
 		ApplicationDbContext db)
 	{
 		if (string.IsNullOrWhiteSpace(request.TenantId))
@@ -289,49 +318,31 @@ public static class IdentityEndpoints
 		if (identityUser == null)
 			return Results.Unauthorized();
 
-		// Verify user is member of requested tenant
+		// Verify user is an approved member of an active tenant
 		var tenantUser = await db.TenantUsers
 			.IgnoreQueryFilters()
 			.FirstOrDefaultAsync(tu => tu.UserId == identityUser.Id && tu.TenantId == request.TenantId);
 
-		if (tenantUser == null)
-			return Results.StatusCode(403); // User not member of this tenant
+		if (tenantUser == null || tenantUser.JoinedAt == default)
+			return Results.StatusCode(403); // not a member, or legacy pending approval
 
-		// Skip pending approval users
-		if (tenantUser.JoinedAt == default)
-			return Results.StatusCode(403); // User pending approval in this tenant
+		var tenantActive = await db.Tenants
+			.IgnoreQueryFilters()
+			.AnyAsync(t => t.Id == request.TenantId && t.IsActive);
+		if (!tenantActive)
+			return Results.StatusCode(403);
 
-		// Get permissions for this tenant
 		var permissions = await db.TenantPermissions
 			.IgnoreQueryFilters()
 			.Where(tp => tp.TenantUserId == tenantUser.Id)
 			.Select(tp => tp.Permission)
 			.ToListAsync();
 
-		// Update cookie claims to add TenantId and TenantRole
-		var claims = new List<Claim>
+		if (!string.Equals(identityUser.ActiveTenantId, request.TenantId, StringComparison.Ordinal))
 		{
-			new Claim(ClaimTypes.NameIdentifier, identityUser.Id),
-			new Claim(ClaimTypes.Name, identityUser.UserName ?? string.Empty),
-			new Claim(AuthorizationConstants.ClaimTypes.TenantId, request.TenantId),
-			new Claim(AuthorizationConstants.ClaimTypes.TenantRole, tenantUser.Role.ToClaimValue()),
-			new Claim(ClaimTypes.Role, tenantUser.Role.ToClaimValue())  // Add as Role claim for [Authorize(Roles=...)]
-		};
-
-		// Add permission claims (must match TenantPermissionHandler)
-		foreach (var permission in permissions)
-		{
-			claims.Add(new Claim(AuthorizationConstants.ClaimTypes.TenantPermission, permission.ToClaimValue()));
+			identityUser.ActiveTenantId = request.TenantId;
+			await userManager.UpdateAsync(identityUser);
 		}
-
-		var claimsIdentity = new ClaimsIdentity(claims, IdentityConstants.ApplicationScheme);
-		var claimsPrincipal = new ClaimsPrincipal(claimsIdentity);
-
-		// Sign in with updated claims
-		await signInManager.SignInAsync(identityUser, new Microsoft.AspNetCore.Authentication.AuthenticationProperties
-		{
-			IsPersistent = true
-		}, IdentityConstants.ApplicationScheme);
 
 		return Results.Ok(new
 		{

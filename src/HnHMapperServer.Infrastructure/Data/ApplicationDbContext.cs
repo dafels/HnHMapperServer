@@ -429,6 +429,9 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
 
             entity.Property(e => e.JoinedAt).IsRequired();
 
+            // How the membership was created; rows that predate tracking read "Legacy" (column default)
+            entity.Property(e => e.JoinSource).IsRequired().HasDefaultValue(HnHMapperServer.Core.Constants.MembershipJoinSources.Legacy);
+
             // Unique constraint on TenantId + UserId
             entity.HasIndex(e => new { e.TenantId, e.UserId }).IsUnique();
             entity.HasIndex(e => e.UserId);
@@ -476,6 +479,9 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
             entity.Property(e => e.ExpiresAt).IsRequired();
             entity.Property(e => e.Status).IsRequired().HasDefaultValue("Active");
             entity.Property(e => e.PendingApproval).IsRequired().HasDefaultValue(false);
+            // Multi-use links: MaxUses null = unlimited (pre-existing links back-filled to 1 by migration),
+            // UseCount incremented atomically on redemption. Permissions is a primitive collection (JSON TEXT).
+            entity.Property(e => e.UseCount).IsRequired().HasDefaultValue(0);
 
             entity.HasIndex(e => e.InviteCode).IsUnique();
             entity.HasIndex(e => e.TenantId);

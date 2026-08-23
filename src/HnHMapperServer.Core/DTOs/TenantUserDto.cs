@@ -13,6 +13,15 @@ public class TenantUserDto
     public List<string> Permissions { get; set; } = new();
     public DateTime JoinedAt { get; set; }
     public bool PendingApproval { get; set; }
+
+    /// <summary>How the membership was created (Constants.MembershipJoinSources); "Legacy" for old rows.</summary>
+    public string JoinSource { get; set; } = string.Empty;
+
+    /// <summary>Every way the account can sign in: "Password" and/or provider names ("Steam", "Discord").</summary>
+    public List<string> SignInMethods { get; set; } = new();
+
+    /// <summary>How the account was created: "Password", "Steam", "Discord".</summary>
+    public string RegistrationSource { get; set; } = string.Empty;
 }
 
 /// <summary>

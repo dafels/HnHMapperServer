@@ -1,13 +1,209 @@
 @page "/invite/{code}"
-@inject NavigationManager NavigationManager
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+@using HnHMapperServer.Core.DTOs
+@using HnHMapperServer.Web.Security
+@using HnHMapperServer.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
+@inject IInvitationService InvitationService
+@inject ExternalAuthProviders ExternalProviders
+@inject NavigationManager Navigation
+@inject AuthenticationStateProvider AuthStateProvider
+
+@inject ISnackbar Snackbar
+@inject ILogger<InviteRedirect> Logger
+
+<PageTitle>@(_preview is { IsValid: true } ? $"Join {_preview.TenantName}" : "Invitation") - HnH Mapper</PageTitle>
+
+<div class="auth-page">
+<MudContainer MaxWidth="MaxWidth.Small" Class="mt-12">
+    <MudPaper Elevation="0" Class="pa-8 glass-morphism">
+        @if (_loading)
+        {
+            <div class="d-flex justify-center align-center" style="min-height: 220px;">
+                <MudProgressCircular Indeterminate="true" Size="Size.Large" />
+            </div>
+        }
+        else if (_preview is not { IsValid: true })
+        {
+            <MudAvatar Color="Color.Error" Variant="Variant.Filled" Size="Size.Large" Class="mb-3">
+                <MudIcon Icon="@Icons.Material.Filled.LinkOff" />
+            </MudAvatar>
+            <MudText Typo="Typo.h5" Class="mb-2">This invite can't be used</MudText>
+            <MudText Typo="Typo.body1" Class="ck-text-secondary mb-4">
+                @(_preview?.ErrorMessage ?? "Invitation is invalid or expired.")
+                Ask the person who invited you for a new link.
+            </MudText>
+            <MudButton Variant="Variant.Outlined" Color="Color.Primary" FullWidth="true" Href="@(_isAuthenticated ? "/tenant/select" : "/login")">
+                @(_isAuthenticated ? "Back to your maps" : "Go to login")
+            </MudButton>
+        }
+        else
+        {
+            <MudAvatar Color="Color.Secondary" Variant="Variant.Filled" Size="Size.Large" Class="mb-3">
+                <MudIcon Icon="@Icons.Material.Filled.MarkEmailRead" />
+            </MudAvatar>
+            <MudText Typo="Typo.body2" Class="ck-text-secondary">You're invited to join</MudText>
+            <MudText Typo="Typo.h4" Class="mb-1">@_preview.TenantName</MudText>
+            <MudText Typo="Typo.caption" Class="ck-text-secondary d-block mb-4">
+                Invited by @_preview.InvitedBy
+                &middot; @_preview.MemberCount member@(_preview.MemberCount == 1 ? "" : "s")
+                @if (_preview.ExpiresAt.HasValue)
+                {
+                    <span> &middot; link valid @DaysLeft(_preview.ExpiresAt.Value)</span>
+                }
+            </MudText>
+
+            @if (!string.IsNullOrEmpty(_error))
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mb-3">@_error</MudAlert>
+            }
+
+            @if (_isAuthenticated)
+            {
+                <MudText Typo="Typo.body2" Class="mb-3">
+                    Signed in as <strong>@_username</strong>.
+                    @(_preview.Preset == "Contribute" ? "You'll be able to view the map and upload to it." : "You'll get full access to the map.")
+                </MudText>
+                <MudButton Variant="Variant.Filled" Color="Color.Secondary" FullWidth="true" Size="Size.Large"
+                           StartIcon="@Icons.Material.Filled.Login" Disabled="@_busy" OnClick="JoinAsync">
+                    @if (_busy)
+                    {
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                        <span>Joining...</span>
+                    }
+                    else
+                    {
+                        <span>Join @_preview.TenantName</span>
+                    }
+                </MudButton>
+                <MudText Typo="Typo.caption" Align="Align.Center" Class="ck-text-secondary d-block mt-3">
+                    Not you? <MudLink Href="/api/logout">Log out</MudLink> and open the link again.
+                </MudText>
+            }
+            else
+            {
+                <MudText Typo="Typo.body2" Class="mb-3">Sign in and you'll be added to the map automatically.</MudText>
+
+                <MudStack Spacing="2">
+                    @foreach (var provider in ExternalProviders.Enabled)
+                    {
+                        <MudButton Variant="Variant.Filled" FullWidth="true" Size="Size.Large"
+                                   Class="@ProviderButtonClass(provider)"
+                                   StartIcon="@ProviderIcon(provider)"
+                                   Href="@provider.ChallengeUrl(invite: Code, returnUrl: ReturnToThisPage)">
+                            Continue with @provider.DisplayName
+                        </MudButton>
+                    }
+
+                    @if (ExternalProviders.Any)
+                    {
+                        <div class="d-flex align-center my-1">
+                            <MudDivider Class="flex-grow-1" />
+                            <MudText Typo="Typo.caption" Class="mx-2 ck-text-secondary">or</MudText>
+                            <MudDivider Class="flex-grow-1" />
+                        </div>
+                    }
+
+                    <MudButton Variant="Variant.Outlined" Color="Color.Primary" FullWidth="true" Size="Size.Large"
+                               StartIcon="@Icons.Material.Filled.PersonAdd" Href="@RegisterHref">
+                        Create an account with a password
+                    </MudButton>
+
+                    <MudText Typo="Typo.body2" Align="Align.Center" Class="mt-2">
+                        Already have an account? <MudLink Href="@LoginHref">Log in</MudLink> &mdash; you'll still join automatically.
+                    </MudText>
+                </MudStack>
+            }
+        }
+    </MudPaper>
+</MudContainer>
+</div>
 
 @code {
     [Parameter]
     public string Code { get; set; } = string.Empty;
 
-    protected override void OnInitialized()
+    private bool _loading = true;
+    private bool _busy;
+    private bool _isAuthenticated;
+    private string _username = string.Empty;
+    private string? _error;
+    private ValidateInvitationDto? _preview;
+
+    private string ReturnToThisPage => $"/invite/{Uri.EscapeDataString(Code)}";
+    private string RegisterHref => $"/register?invite={Uri.EscapeDataString(Code)}";
+    private string LoginHref => $"/login?invite={Uri.EscapeDataString(Code)}";
+
+    protected override async Task OnInitializedAsync()
     {
-        // Redirect to registration page with invite code as query parameter
-        NavigationManager.NavigateTo($"/register?invite={Uri.EscapeDataString(Code)}");
+        try
+        {
+            var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+            _isAuthenticated = authState.User.Identity?.IsAuthenticated == true;
+            _username = authState.User.Identity?.Name ?? string.Empty;
+
+            _preview = await InvitationService.ValidateInvitationAsync(Code);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Invite landing page could not validate the code");
+            _preview = new ValidateInvitationDto { IsValid = false, ErrorMessage = "Could not check the invitation right now. Please try again." };
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task JoinAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var (result, error) = await InvitationService.RedeemInvitationAsync(Code);
+            if (result == null)
+            {
+                _error = error ?? "Could not join the map.";
+                return;
+            }
+
+            Snackbar.Add(result.AlreadyMember ? $"You're already a member of {result.TenantName}." : $"Welcome to {result.TenantName}!", Severity.Success);
+            // Switch re-issues the cookie with the new map's claims and lands on the dashboard
+            Navigation.NavigateTo(TenantSwitchUrl.For(result.TenantId, "/"), forceLoad: true);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Invite redemption failed");
+            _error = "Could not reach the server. Please try again.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private static string ProviderButtonClass(ExternalAuthProvider provider) => provider.Scheme switch
+    {
+        ExternalAuthProviders.SteamScheme => "invite-landing-provider invite-landing-steam",
+        ExternalAuthProviders.DiscordScheme => "invite-landing-provider invite-landing-discord",
+        _ => "invite-landing-provider"
+    };
+
+    private static string ProviderIcon(ExternalAuthProvider provider) => provider.Scheme switch
+    {
+        ExternalAuthProviders.SteamScheme => Icons.Custom.Brands.Steam,
+        ExternalAuthProviders.DiscordScheme => Icons.Custom.Brands.Discord,
+        _ => Icons.Material.Filled.Login
+    };
+
+    private static string DaysLeft(DateTime expiresAt)
+    {
+        var remaining = expiresAt - DateTime.UtcNow;
+        if (remaining.TotalHours < 1) return "less than an hour";
+        if (remaining.TotalDays < 1) return $"{(int)Math.Ceiling(remaining.TotalHours)} more hours";
+        var days = (int)Math.Ceiling(remaining.TotalDays);
+        return days == 1 ? "1 more day" : $"{days} more days";
     }
 }

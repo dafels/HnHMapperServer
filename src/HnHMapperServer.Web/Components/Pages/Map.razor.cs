@@ -4,11 +4,13 @@ using HnHMapperServer.Web.Services.Map;
 using HnHMapperServer.Web.Components.Map;
 using HnHMapperServer.Web.Components.Map.Sidebar;
 using HnHMapperServer.Web.Components.Map.Dialogs;
+using HnHMapperServer.Core.Constants;
 using HnHMapperServer.Core.Enums;
 using HnHMapperServer.Core.Extensions;
 using HnHMapperServer.Core.DTOs;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.JSInterop;
 using MudBlazor;
@@ -45,6 +47,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
     [Inject] private MapDataService MapData { get; set; } = default!;
     [Inject] private NavigationManager Navigation { get; set; } = default!;
+    [Inject] private AuthenticationStateProvider AuthStateProvider { get; set; } = default!;
     [Inject] private ILogger<Map> Logger { get; set; } = default!;
     [Inject] private IHttpClientFactory HttpClientFactory { get; set; } = default!;
     [Inject] private AuthenticationStateCache AuthStateCache { get; set; } = default!;
@@ -250,8 +253,22 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
     #region Lifecycle Methods
 
+    /// <summary>Non-null only during the static prerender pass, where NavigateTo would throw NavigationException.</summary>
+    [CascadingParameter]
+    public HttpContext? HttpContext { get; set; }
+
     protected override async Task OnInitializedAsync()
     {
+        // No active tenant: nothing to show until the user creates or joins a map. Navigate only in the
+        // interactive pass - during prerendering NavigateTo throws NavigationException by design.
+        var initialAuth = await AuthStateProvider.GetAuthenticationStateAsync();
+        if (string.IsNullOrEmpty(initialAuth.User.FindFirst(AuthorizationConstants.ClaimTypes.TenantId)?.Value))
+        {
+            if (HttpContext == null)
+                Navigation.NavigateTo("/tenant/select");
+            return;
+        }
+
         try
         {
             // Parse query string parameters for bookmark support

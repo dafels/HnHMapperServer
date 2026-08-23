@@ -1,0 +1,178 @@
+@using HnHMapperServer.Web.Services
+@inject IHttpClientFactory HttpClientFactory
+@inject NavigationManager Navigation
+@inject ISnackbar Snackbar
+@inject ILogger<CreateMapCard> Logger
+
+<MudPaper Elevation="3" Class="@($"pa-6 onboarding-card h-100 {(Highlight ? "onboarding-card-focus" : "")}")" id="create-map-card">
+    <MudStack Spacing="3" Class="h-100">
+        <MudAvatar Color="Color.Primary" Variant="Variant.Filled" Size="Size.Large">
+            <MudIcon Icon="@Icons.Material.Filled.AddLocationAlt" />
+        </MudAvatar>
+
+        <MudText Typo="@(Compact ? Typo.h6 : Typo.h5)">Create a new map</MudText>
+        <MudText Typo="Typo.body2" Class="ck-text-secondary">
+            Start a fresh map for your village or group. You become its admin and get an invite link to share.
+        </MudText>
+
+        @if (_disabled)
+        {
+            <MudAlert Severity="Severity.Info" Dense="true">
+                Creating new maps is switched off on this server. Ask a superadmin.
+            </MudAlert>
+        }
+        else if (!_eligible)
+        {
+            <MudAlert Severity="Severity.Info" Dense="true" Icon="@Icons.Material.Filled.VerifiedUser">
+                Starting a map needs a verified Steam or Discord identity. Password accounts can join a map with an
+                invite link, or a superadmin can create the map and add you.
+            </MudAlert>
+            <MudSpacer />
+            <MudButton Variant="Variant.Outlined" Color="Color.Primary" FullWidth="true" Size="Size.Large"
+                       StartIcon="@Icons.Material.Filled.Link" Href="/account">
+                Link Steam or Discord to this account
+            </MudButton>
+        }
+        else
+        {
+            <MudTextField @bind-Value="_name"
+                          Label="Map name (optional)"
+                          Placeholder="Northwind Village"
+                          Variant="Variant.Outlined"
+                          Immediate="true"
+                          MaxLength="40"
+                          HelperText="3-40 characters. Leave empty to use the generated name."
+                          Disabled="@_busy"
+                          OnKeyDown="@HandleKeyDown" />
+
+            @if (!string.IsNullOrEmpty(_error))
+            {
+                <MudAlert Severity="Severity.Error" Dense="true">@_error</MudAlert>
+            }
+
+            <MudSpacer />
+
+            <MudButton Variant="Variant.Filled"
+                       Color="Color.Primary"
+                       FullWidth="true"
+                       Size="Size.Large"
+                       StartIcon="@Icons.Material.Filled.Add"
+                       Disabled="@_busy"
+                       OnClick="CreateAsync">
+                @if (_busy)
+                {
+                    <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                    <span>Creating your map...</span>
+                }
+                else
+                {
+                    <span>Create map</span>
+                }
+            </MudButton>
+        }
+    </MudStack>
+</MudPaper>
+
+@code {
+    /// <summary>Smaller typography for the "you already have maps" variant.</summary>
+    [Parameter] public bool Compact { get; set; }
+
+    /// <summary>Visually emphasise the card (deep link ?action=create).</summary>
+    [Parameter] public bool Highlight { get; set; }
+
+    private string _name = string.Empty;
+    private string? _error;
+    private bool _busy;
+    private bool _disabled;
+    private bool _eligible = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var options = await client.GetFromJsonAsync<OptionsResponse>("/api/tenants/self/options");
+            _disabled = options?.Enabled == false;
+            _eligible = options?.Eligible ?? true;
+        }
+        catch (Exception ex)
+        {
+            // Not fatal: the create call itself reports a disabled feature too
+            Logger.LogDebug(ex, "Could not read self-service options");
+        }
+    }
+
+    private async Task HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !_busy)
+            await CreateAsync();
+    }
+
+    private async Task CreateAsync()
+    {
+        _error = null;
+        var name = _name.Trim();
+        if (name.Length > 0 && name.Length < 3)
+        {
+            _error = "Map name must be at least 3 characters (or leave it empty).";
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var client = HttpClientFactory.CreateClient("API");
+            var response = await client.PostAsJsonAsync("/api/tenants/self", new { name = name.Length == 0 ? null : name });
+
+            if (response.IsSuccessStatusCode)
+            {
+                var created = await response.Content.ReadFromJsonAsync<CreatedResponse>(
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (created?.TenantId == null)
+                {
+                    _error = "Unexpected response from the server.";
+                    return;
+                }
+
+                Snackbar.Add($"{created.TenantName} is ready - you're its admin.", Severity.Success);
+                // Switching re-issues the auth cookie with the new map's admin claims -> full navigation
+                Navigation.NavigateTo(TenantSwitchUrl.For(created.TenantId, "/"), forceLoad: true);
+                return;
+            }
+
+            _error = await ReadErrorAsync(response) ?? response.StatusCode switch
+            {
+                System.Net.HttpStatusCode.TooManyRequests => "You're creating maps too quickly. Please wait a while.",
+                System.Net.HttpStatusCode.Forbidden => "Creating new maps is switched off on this server.",
+                _ => "Could not create the map. Please try again."
+            };
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Self-service map creation failed");
+            _error = "Could not reach the server. Please try again.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private static async Task<string?> ReadErrorAsync(HttpResponseMessage response)
+    {
+        try
+        {
+            var payload = await response.Content.ReadFromJsonAsync<ErrorResponse>(
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            return string.IsNullOrWhiteSpace(payload?.Error) ? null : payload.Error;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private sealed class OptionsResponse { public bool Enabled { get; set; } = true; public bool Eligible { get; set; } = true; public string? Reason { get; set; } }
+    private sealed class CreatedResponse { public string? TenantId { get; set; } public string? TenantName { get; set; } }
+    private sealed class ErrorResponse { public string? Error { get; set; } }
+}

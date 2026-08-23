@@ -1,0 +1,289 @@
+@using System.Security.Claims
+@using HnHMapperServer.Core.DTOs
+@using HnHMapperServer.Services.Interfaces
+@using HnHMapperServer.Web.Security
+@using HnHMapperServer.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
+@inject IAuthSettingsStore SettingsStore
+@inject ExternalAuthProviders ExternalProviders
+@inject AuthenticationStateProvider AuthStateProvider
+@inject NavigationManager Navigation
+@inject ClipboardService Clipboard
+@inject ISnackbar Snackbar
+@inject ILogger<OnboardingSettings> Logger
+
+@* Defence in depth: the hosting page is SuperAdmin-only, but this component refuses anyone else on its own too. *@
+<AuthorizeView Roles="SuperAdmin">
+    <NotAuthorized>
+        <MudAlert Severity="Severity.Error">Only superadmins can view or change sign-in settings.</MudAlert>
+    </NotAuthorized>
+    <Authorized>
+<MudPaper Class="pa-4">
+<MudStack Spacing="4">
+    <div>
+        <MudText Typo="Typo.h6">
+            <MudIcon Icon="@Icons.Material.Filled.Login" Class="me-2" />
+            Sign-in &amp; onboarding
+        </MudText>
+        <MudText Typo="Typo.body2" Class="ck-text-secondary">
+            How players get an account and a map. Everything here applies immediately — no restart, no
+            deployment change. Secrets are stored encrypted and never shown again after saving.
+        </MudText>
+    </div>
+
+    @if (_view == null)
+    {
+        <MudProgressLinear Indeterminate="true" />
+    }
+    else
+    {
+        @* ---------------------------------------------------------------- Accounts & maps *@
+        <MudPaper Outlined="true" Class="pa-4">
+            <MudText Typo="Typo.subtitle1" Class="mb-2"><strong>Accounts and maps</strong></MudText>
+
+            <MudSwitch T="bool" @bind-Value="_form.SelfRegistrationEnabled" Color="Color.Primary"
+                       Label="Anyone can create a password account (open registration)" />
+            <MudText Typo="Typo.caption" Class="ck-text-secondary d-block mb-3 ms-12">
+                Off = new password accounts need an invite link. A valid invite link always works, and Steam / Discord
+                sign-in (below) always creates accounts when enabled.
+            </MudText>
+
+            <MudSwitch T="bool" @bind-Value="_form.SelfServiceTenantsEnabled" Color="Color.Primary"
+                       Label="Players can create their own maps" />
+            <MudText Typo="Typo.caption" Class="ck-text-secondary d-block mb-2 ms-12">
+                The creator becomes the map's admin and gets an invite link to share. Off = only superadmins create maps.
+            </MudText>
+            <MudCheckBox T="bool" @bind-Value="_form.SelfServiceTenantsRequireExternalIdentity" Color="Color.Primary" Dense="true"
+                         Class="ms-12" Disabled="@(!_form.SelfServiceTenantsEnabled)"
+                         Label="Only accounts with a verified Steam or Discord identity may create maps" />
+            <MudText Typo="Typo.caption" Class="ck-text-secondary d-block mb-3 ms-12">
+                Password-only accounts then join with an invite link or wait for a superadmin to create the map and add
+                them (SuperAdmin → Unassigned Users). Linking Steam/Discord to a password account makes it eligible.
+            </MudText>
+
+            <MudStack Row="true" Spacing="3" Style="flex-wrap: wrap;" Class="ms-12">
+                <MudNumericField T="int" @bind-Value="_form.SelfServiceDefaultQuotaMB" Label="Storage quota per new map (MB)"
+                                 Min="1" Max="1000000" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width: 260px;"
+                                 Disabled="@(!_form.SelfServiceTenantsEnabled)" />
+                <MudNumericField T="int" @bind-Value="_form.SelfServiceMaxOwnedTenants" Label="Maps one player may administer"
+                                 Min="1" Max="1000" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width: 260px;"
+                                 Disabled="@(!_form.SelfServiceTenantsEnabled)" />
+            </MudStack>
+        </MudPaper>
+
+        @* ---------------------------------------------------------------- Steam *@
+        <MudPaper Outlined="true" Class="pa-4">
+            <div class="d-flex align-center justify-space-between" style="flex-wrap: wrap; gap: 8px;">
+                <MudText Typo="Typo.subtitle1">
+                    <MudIcon Icon="@Icons.Custom.Brands.Steam" Class="me-2" />
+                    <strong>Sign in through Steam</strong>
+                </MudText>
+                <MudChip T="string" Size="Size.Small" Color="@(_view.SteamActive ? Color.Success : Color.Default)" Variant="Variant.Filled">
+                    @(_view.SteamActive ? "Live" : "Off")
+                </MudChip>
+            </div>
+            <MudText Typo="Typo.body2" Class="ck-text-secondary mb-2">
+                The same login Haven &amp; Hearth's own website uses. Players click "Sign in through Steam", approve on
+                steamcommunity.com, and get an account here — no password to invent.
+            </MudText>
+
+            <MudSwitch T="bool" @bind-Value="_form.SteamEnabled" Color="Color.Primary" Label="Enable Steam sign-in" />
+
+            <MudTextField T="string" @bind-Value="_form.SteamApplicationKey"
+                          Label="Steam Web API key (optional but recommended)"
+                          InputType="InputType.Password"
+                          Variant="Variant.Outlined" Margin="Margin.Dense" Class="mt-2" Style="max-width: 520px;"
+                          Placeholder="@(_view.SteamApplicationKeyConfigured ? "Configured — leave empty to keep the stored key" : "Paste the 32-character key")"
+                          HelperText="@(_view.SteamApplicationKeyConfigured ? "A key is stored. Paste a new one to replace it." : "Without a key players get a generic username instead of their Steam name.")" />
+            @if (_view.SteamApplicationKeyConfigured)
+            {
+                <MudCheckBox T="bool" @bind-Value="_form.ClearSteamApplicationKey" Label="Remove the stored key" Dense="true" />
+            }
+
+            <MudExpansionPanels Elevation="0" Class="mt-2">
+                <MudExpansionPanel Text="How to set up Steam sign-in">
+                    <ol class="setup-steps">
+                        <li>Steam sign-in works without any registration — switching it on is enough. Players are sent to
+                            steamcommunity.com and back to <code>@(_baseUri)signin-steam</code>.</li>
+                        <li>For players' <em>Steam names</em> to become their usernames, get a free Steam Web API key:
+                            open <MudLink Href="https://steamcommunity.com/dev/apikey" Target="_blank">steamcommunity.com/dev/apikey</MudLink>
+                            while logged in to any Steam account, enter your site's domain name
+                            (<code>@_host</code>) in the form, and copy the key.</li>
+                        <li>Paste the key above, enable the switch, save. That's it — the button appears on the login page and
+                            on invite landing pages immediately.</li>
+                        <li>Works over plain http too; the Steam page shows your site address (<code>@_host</code>) as the
+                            realm players are logging in to. A real domain name looks more trustworthy than an IP address.</li>
+                    </ol>
+                </MudExpansionPanel>
+            </MudExpansionPanels>
+        </MudPaper>
+
+        @* ---------------------------------------------------------------- Discord *@
+        <MudPaper Outlined="true" Class="pa-4">
+            <div class="d-flex align-center justify-space-between" style="flex-wrap: wrap; gap: 8px;">
+                <MudText Typo="Typo.subtitle1">
+                    <MudIcon Icon="@Icons.Custom.Brands.Discord" Class="me-2" />
+                    <strong>Continue with Discord</strong>
+                </MudText>
+                <MudChip T="string" Size="Size.Small" Color="@(_view.DiscordActive ? Color.Success : Color.Default)" Variant="Variant.Filled">
+                    @(_view.DiscordActive ? "Live" : (_form.DiscordEnabled ? "Missing credentials" : "Off"))
+                </MudChip>
+            </div>
+            <MudText Typo="Typo.body2" Class="ck-text-secondary mb-2">
+                Villages live on Discord. A Discord sign-in also fills in the player's verified Discord name.
+                Only the <code>identify</code> scope is requested — no e-mail, no server list, no bot.
+            </MudText>
+
+            <MudSwitch T="bool" @bind-Value="_form.DiscordEnabled" Color="Color.Primary" Label="Enable Discord sign-in" />
+
+            <MudStack Spacing="2" Class="mt-2" Style="max-width: 520px;">
+                <MudTextField T="string" @bind-Value="_form.DiscordClientId" Label="Client ID"
+                              Variant="Variant.Outlined" Margin="Margin.Dense" Placeholder="18-19 digit application id" />
+                <MudTextField T="string" @bind-Value="_form.DiscordClientSecret" Label="Client secret"
+                              InputType="InputType.Password" Variant="Variant.Outlined" Margin="Margin.Dense"
+                              Placeholder="@(_view.DiscordClientSecretConfigured ? "Configured — leave empty to keep the stored secret" : "Paste the client secret")"
+                              HelperText="@(_view.DiscordClientSecretConfigured ? "A secret is stored. Paste a new one to replace it." : null)" />
+                @if (_view.DiscordClientSecretConfigured)
+                {
+                    <MudCheckBox T="bool" @bind-Value="_form.ClearDiscordClientSecret" Label="Remove the stored secret" Dense="true" />
+                }
+            </MudStack>
+
+            <MudExpansionPanels Elevation="0" Class="mt-2">
+                <MudExpansionPanel Text="How to set up Discord sign-in" Expanded="@(!_view.DiscordClientSecretConfigured)">
+                    <ol class="setup-steps">
+                        <li>Open the <MudLink Href="https://discord.com/developers/applications" Target="_blank">Discord Developer Portal</MudLink>
+                            and click <strong>New Application</strong> (any name, e.g. "HnH Mapper").</li>
+                        <li>In the application go to <strong>OAuth2</strong>. Under <strong>Redirects</strong> add exactly this URL
+                            and save:
+                            <div class="d-flex align-center mt-1 mb-1" style="gap: 6px;">
+                                <code style="word-break: break-all;">@(_baseUri)signin-discord</code>
+                                <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Title="Copy redirect URL"
+                                               OnClick="@(() => Clipboard.CopyAsync($"{_baseUri}signin-discord", "Redirect URL copied"))" />
+                            </div>
+                            Discord requires an <strong>https</strong> address for public sites (http is accepted only for localhost),
+                            so your map server must be reachable over https for this to work.</li>
+                        <li>Still on the OAuth2 page, copy the <strong>Client ID</strong>, then click <strong>Reset Secret</strong>
+                            and copy the <strong>Client Secret</strong> (it is shown once).</li>
+                        <li>Paste both above, enable the switch, save. No bot, no server permissions and no scopes other than
+                            <code>identify</code> are needed.</li>
+                    </ol>
+                </MudExpansionPanel>
+            </MudExpansionPanels>
+        </MudPaper>
+
+        <div class="d-flex align-center" style="gap: 12px; flex-wrap: wrap;">
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Save"
+                       OnClick="SaveAsync" Disabled="@_saving">
+                @(_saving ? "Saving..." : "Save settings")
+            </MudButton>
+            <MudText Typo="Typo.caption" Class="ck-text-secondary">
+                Live now: @(ExternalProviders.Any ? string.Join(", ", ExternalProviders.Enabled.Select(p => p.DisplayName)) : "password sign-in only")
+            </MudText>
+        </div>
+    }
+</MudStack>
+</MudPaper>
+    </Authorized>
+</AuthorizeView>
+
+<style>
+    .setup-steps { padding-left: 1.25rem; line-height: 1.6; }
+    .setup-steps li { margin-bottom: 6px; }
+</style>
+
+@code {
+    private AuthSettingsView? _view;
+    private AuthSettingsUpdate _form = new();
+    private bool _saving;
+    private string _baseUri = string.Empty;
+    private string _host = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _baseUri = Navigation.BaseUri;
+        _host = new Uri(Navigation.BaseUri).Host;
+        if (!await IsSuperAdminAsync())
+            return;   // nothing is loaded for anyone else - the markup above shows the refusal
+        await LoadAsync();
+    }
+
+    /// <summary>Server-side check independent of the markup: the store itself trusts its caller.</summary>
+    private async Task<bool> IsSuperAdminAsync()
+    {
+        var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        return authState.User.IsInRole(HnHMapperServer.Core.Constants.AuthorizationConstants.Roles.SuperAdmin);
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            // The store re-checks the SuperAdmin role (claim + database) and never returns secrets
+            var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+            _view = await SettingsStore.GetViewAsync(authState.User);
+            _form = new AuthSettingsUpdate
+            {
+                SelfRegistrationEnabled = _view.SelfRegistrationEnabled,
+                SelfServiceTenantsEnabled = _view.SelfServiceTenantsEnabled,
+                SelfServiceTenantsRequireExternalIdentity = _view.SelfServiceTenantsRequireExternalIdentity,
+                SelfServiceDefaultQuotaMB = _view.SelfServiceDefaultQuotaMB,
+                SelfServiceMaxOwnedTenants = _view.SelfServiceMaxOwnedTenants,
+                SteamEnabled = _view.SteamEnabled,
+                DiscordEnabled = _view.DiscordEnabled,
+                DiscordClientId = _view.DiscordClientId
+            };
+        }
+        catch (UnauthorizedAccessException)
+        {
+            Snackbar.Add("Only superadmins can view sign-in settings.", Severity.Error);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load sign-in settings");
+            Snackbar.Add("Could not load the sign-in settings.", Severity.Error);
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (!await IsSuperAdminAsync())
+        {
+            Snackbar.Add("Only superadmins can change sign-in settings.", Severity.Error);
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            // Authorization + audit actor are decided by the store from the server-validated principal
+            var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+            var saved = await SettingsStore.SaveAsync(_form, authState.User);
+            _view = saved;
+            _form.SteamApplicationKey = null;
+            _form.DiscordClientSecret = null;
+            _form.ClearSteamApplicationKey = false;
+            _form.ClearDiscordClientSecret = false;
+
+            var live = new List<string>();
+            if (saved.SteamActive) live.Add("Steam");
+            if (saved.DiscordActive) live.Add("Discord");
+            var warning = saved.DiscordEnabled && !saved.DiscordActive ? " Discord stays off until both credentials are filled in." : string.Empty;
+            Snackbar.Add($"Settings saved. External sign-in live: {(live.Count == 0 ? "none" : string.Join(", ", live))}.{warning}",
+                warning.Length > 0 ? Severity.Warning : Severity.Success);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            Snackbar.Add("Only superadmins can change sign-in settings.", Severity.Error);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to save sign-in settings");
+            Snackbar.Add($"Could not save: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+}

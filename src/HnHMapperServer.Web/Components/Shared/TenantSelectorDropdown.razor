@@ -1,33 +1,52 @@
+@using HnHMapperServer.Core.Constants
 @using HnHMapperServer.Web.Models
 @using HnHMapperServer.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
 @inject TenantContextService TenantContext
-@inject ITenantService TenantService
+@inject IInvitationService InvitationService
+@inject ClipboardService Clipboard
 @inject NavigationManager Navigation
 @inject ISnackbar Snackbar
+@inject AuthenticationStateProvider AuthStateProvider
+@inject ILogger<TenantSelectorDropdown> Logger
 
-@if (ShowSelector && _tenants.Count > 1)
+@if (ShowSelector)
 {
-    <MudMenu Icon="@Icons.Material.Filled.Business"
+    <MudMenu Icon="@Icons.Material.Filled.Map"
              Color="Color.Inherit"
              Label="@CurrentTenantName"
              Dense="true"
-             Class="ml-2">
+             Class="ml-2"
+             AriaLabel="Map menu">
         <ChildContent>
-            @foreach (var tenant in _tenants)
+            @if (_tenants.Count > 0)
             {
-                <MudMenuItem OnClick="@(() => SelectTenant(tenant))">
-                    <div class="d-flex align-items-center">
-                        <MudIcon Icon="@GetTenantIcon(tenant.Id)" Class="mr-2" Size="Size.Small" />
+                @foreach (var tenant in _tenants)
+                {
+                    var isCurrent = tenant.Id == _activeTenantId;
+                    <MudMenuItem OnClick="@(() => SelectTenant(tenant))" Icon="@(isCurrent ? Icons.Material.Filled.Check : Icons.Material.Outlined.Map)">
                         <div>
-                            <div>@tenant.Name</div>
-                            <div class="text-caption text-muted">@tenant.Role</div>
+                            <div style="@(isCurrent ? "font-weight: 600;" : "")">@tenant.Name</div>
+                            <div class="text-caption ck-text-secondary">@RoleLabel(tenant.Role)</div>
                         </div>
-                        @if (tenant.Id == TenantContext.CurrentTenant?.Id)
-                        {
-                            <MudIcon Icon="@Icons.Material.Filled.Check" Class="ml-2" Color="Color.Success" Size="Size.Small" />
-                        }
-                    </div>
+                    </MudMenuItem>
+                }
+                <MudDivider Class="my-1" />
+            }
+
+            <MudMenuItem Href="/tenant/select?action=create" Icon="@Icons.Material.Filled.AddLocationAlt">Create a new map</MudMenuItem>
+            <MudMenuItem Href="/tenant/select?action=join" Icon="@Icons.Material.Filled.Groups">Join a map with an invite</MudMenuItem>
+
+            @if (_isAdminOfCurrent && _activeTenantId != null)
+            {
+                <MudMenuItem OnClick="CopyInviteLinkAsync" Icon="@Icons.Material.Filled.Link" Disabled="@_copying">
+                    Copy invite link for @CurrentTenantName
                 </MudMenuItem>
+            }
+
+            @if (_tenants.Count > 0)
+            {
+                <MudMenuItem Href="/tenant/select" Icon="@Icons.Material.Filled.ViewModule">All your maps</MudMenuItem>
             }
         </ChildContent>
     </MudMenu>
@@ -35,78 +54,84 @@
 
 @code {
     private List<TenantDto> _tenants = new();
-    private bool _loading = true;
+    private string? _activeTenantId;
+    private bool _isAdminOfCurrent;
+    private bool _copying;
 
     [Parameter]
     public bool ShowSelector { get; set; } = true;
 
-    private string CurrentTenantName => TenantContext.CurrentTenant?.Name ?? "Select Tenant";
+    private string CurrentTenantName =>
+        _tenants.FirstOrDefault(t => t.Id == _activeTenantId)?.Name ?? (_tenants.Count == 0 ? "No map yet" : "Select a map");
 
     protected override async Task OnInitializedAsync()
     {
         try
         {
+            var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+            _activeTenantId = authState.User.FindFirst(AuthorizationConstants.ClaimTypes.TenantId)?.Value;
+            var tenantRole = authState.User.FindFirst(AuthorizationConstants.ClaimTypes.TenantRole)?.Value;
+            _isAdminOfCurrent = string.Equals(tenantRole, "TenantAdmin", StringComparison.OrdinalIgnoreCase)
+                                || authState.User.IsInRole(AuthorizationConstants.Roles.SuperAdmin);
+
             _tenants = await TenantContext.GetTenantsAsync();
         }
         catch (Exception ex)
         {
-            Snackbar.Add($"Error loading tenants: {ex.Message}", Severity.Error);
-        }
-        finally
-        {
-            _loading = false;
+            Logger.LogWarning(ex, "Could not load the map list for the menu");
         }
     }
 
-    private async Task SelectTenant(TenantDto tenant)
+    private void SelectTenant(TenantDto tenant)
     {
-        if (tenant.Id == TenantContext.CurrentTenant?.Id)
-        {
-            // Already on this tenant
+        if (tenant.Id == _activeTenantId)
             return;
-        }
 
+        // Switching re-issues the auth cookie (Web endpoint) and reloads the current page in the new map.
+        var returnUrl = new Uri(Navigation.Uri).PathAndQuery;
+        Navigation.NavigateTo(TenantSwitchUrl.For(tenant.Id, returnUrl), forceLoad: true);
+    }
+
+    /// <summary>Reuses the newest live shareable link (or creates a 7-day unlimited one) and copies it.</summary>
+    private async Task CopyInviteLinkAsync()
+    {
+        if (_activeTenantId == null || _copying)
+            return;
+
+        _copying = true;
         try
         {
-            var success = await TenantService.SelectTenantAsync(tenant.Id);
-            if (success)
-            {
-                TenantContext.SetCurrentTenant(tenant);
-                Snackbar.Add($"Switched to {tenant.Name}", Severity.Success);
+            var now = DateTime.UtcNow;
+            var existing = (await InvitationService.GetInvitationsAsync(_activeTenantId))
+                .Where(i => i.Status == "Active" && i.ExpiresAt > now.AddHours(1) && (i.MaxUses == null || i.UseCount < i.MaxUses))
+                .OrderByDescending(i => i.CreatedAt)
+                .FirstOrDefault();
 
-                // Reload the page to refresh all components with new tenant context
-                Navigation.NavigateTo(Navigation.Uri, forceLoad: true);
-            }
-            else
+            existing ??= await InvitationService.CreateInvitationAsync(_activeTenantId);
+            if (existing == null)
             {
-                Snackbar.Add("Failed to switch tenant", Severity.Error);
+                Snackbar.Add("Couldn't create an invite link. Try again from the admin panel.", Severity.Error);
+                return;
             }
+
+            await Clipboard.CopyAsync(InviteLinks.Build(Navigation.BaseUri, existing.InviteCode),
+                $"Invite link copied - anyone with it joins {CurrentTenantName} right away.");
         }
         catch (Exception ex)
         {
-            Snackbar.Add($"Error switching tenant: {ex.Message}", Severity.Error);
+            Logger.LogError(ex, "Copy invite link failed");
+            Snackbar.Add("Couldn't get an invite link right now.", Severity.Error);
+        }
+        finally
+        {
+            _copying = false;
         }
     }
 
-    private string GetTenantIcon(string tenantId)
+    private static string RoleLabel(string role) => role.ToLowerInvariant() switch
     {
-        // Extract first icon word from tenant ID (e.g., "warrior" from "warrior-shield-42")
-        var parts = tenantId.Split('-');
-        if (parts.Length == 0) return Icons.Material.Filled.Business;
-
-        return parts[0].ToLower() switch
-        {
-            "warrior" => Icons.Material.Filled.Shield,
-            "dragon" => "🐉",
-            "wizard" => "🧙",
-            "castle" => "🏰",
-            "sword" => "⚔️",
-            "shield" => Icons.Material.Filled.Shield,
-            "crown" => "👑",
-            "hammer" => "🔨",
-            "bow" => "🏹",
-            "staff" => "🪄",
-            _ => Icons.Material.Filled.Business
-        };
-    }
+        "tenantadmin" => "Admin",
+        "tenantuser" => "Member",
+        _ => role
+    };
 }

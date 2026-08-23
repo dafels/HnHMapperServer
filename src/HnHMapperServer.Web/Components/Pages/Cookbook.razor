@@ -1777,12 +1777,24 @@
         ? FlatCounts.NewCount
         : CountBase(includeSatiation: true, includePrep: true, includeStat: true).Count(IsNewFood);
 
+    /// <summary>Non-null only during the static prerender pass.</summary>
+    [CascadingParameter]
+    public HttpContext? HttpContext { get; set; }
+
     protected override async Task OnInitializedAsync()
     {
         // TenantId claim = key of the cross-circuit flat-row cache. Same claim the API
         // resolves the tenant from, so cached data can never cross tenants.
         var authState = await AuthStateProvider.GetAuthenticationStateAsync();
         _tenantId = authState.User.FindFirst("TenantId")?.Value;
+        if (string.IsNullOrEmpty(_tenantId))
+        {
+            // No active tenant: nothing to show until the user creates or joins a map. Navigate only in the
+            // interactive pass - during prerendering (HttpContext != null) NavigateTo throws NavigationException.
+            if (HttpContext == null)
+                Navigation.NavigateTo("/tenant/select");
+            return;
+        }
 
         await Task.WhenAll(LoadCatalogAsync(), LoadPanelsAsync());
     }

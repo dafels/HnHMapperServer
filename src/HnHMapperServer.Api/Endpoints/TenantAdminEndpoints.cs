@@ -114,6 +114,7 @@ public static class TenantAdminEndpoints
             .Include(tu => tu.Permissions)
             .ToListAsync();
 
+        var signInMethods = await SignInMethodResolver.ResolveAsync(db, tenantUsers.Select(tu => tu.UserId).ToList());
         var userDtos = new List<TenantUserDto>();
 
         foreach (var tenantUser in tenantUsers)
@@ -130,7 +131,10 @@ public static class TenantAdminEndpoints
                 Role = tenantUser.Role.ToClaimValue(),
                 Permissions = tenantUser.Permissions.Select(p => p.Permission.ToClaimValue()).ToList(),
                 JoinedAt = tenantUser.JoinedAt,
-                PendingApproval = tenantUser.PendingApproval
+                PendingApproval = tenantUser.PendingApproval,
+                JoinSource = tenantUser.JoinSource,
+                SignInMethods = signInMethods.TryGetValue(tenantUser.UserId, out var m) ? m.Names : new List<string>(),
+                RegistrationSource = identityUser.RegistrationSource
             });
         }
 
@@ -196,13 +200,18 @@ public static class TenantAdminEndpoints
     /// POST /api/tenants/{tenantId}/users/{userId}/approve
     /// Approves a pending user and grants specified permissions.
     /// </summary>
+    /// <summary>
+    /// LEGACY: approves a pending registration (JoinedAt == default). The current invite flow joins users
+    /// immediately, so this only ever sees rows created before 2026-08-23.
+    /// </summary>
     private static async Task<IResult> ApproveUser(
         string tenantId,
         string userId,
         ApproveTenantUserDto dto,
         ApplicationDbContext db,
         HttpContext context,
-        IAuditService auditService,
+        ITenantMembershipService membershipService,
+        UserManager<ApplicationUser> userManager,
         ILogger<Program> logger)
     {
         // Verify user has access to this tenant (unless SuperAdmin)
@@ -233,53 +242,38 @@ public static class TenantAdminEndpoints
         }
 
         // Find pending user
-        var tenantUser = await db.TenantUsers
-            .Include(tu => tu.Permissions)
-            .FirstOrDefaultAsync(tu => tu.UserId == userId && tu.TenantId == tenantId && tu.JoinedAt == default);
+        var isPending = await db.TenantUsers
+            .IgnoreQueryFilters()
+            .AnyAsync(tu => tu.UserId == userId && tu.TenantId == tenantId && tu.JoinedAt == default);
 
-        if (tenantUser == null)
+        if (!isPending)
         {
             return Results.NotFound(new { error = "Pending user not found" });
         }
 
-        // Approve user by setting JoinedAt and clearing PendingApproval
-        tenantUser.JoinedAt = DateTime.UtcNow;
-        tenantUser.PendingApproval = false;
+        var actor = await userManager.GetUserAsync(context.User);
 
-        // Also update the invitation's PendingApproval flag to prevent cleanup service from deleting this user
-        var invitation = await db.TenantInvitations
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(i => i.UsedBy == userId && i.TenantId == tenantId && i.PendingApproval);
-        if (invitation != null)
+        // The membership service flips the pending row in place, merges permissions and clears the legacy
+        // invitation flag so the 7-day purge leaves the user alone.
+        var result = await membershipService.AddMemberAsync(new AddMemberRequest
         {
-            invitation.PendingApproval = false;
-        }
+            TenantId = tenantId,
+            UserId = userId,
+            Role = TenantRole.TenantUser,
+            Permissions = dto.Permissions.Select(p => p.ToPermission()).Distinct().ToList(),
+            PerformedByUserId = actor?.Id ?? context.User.Identity?.Name ?? "unknown",
+            AuditAction = "UserApproved",
+            JoinSource = MembershipJoinSources.Approved
+        });
 
-        // Add permissions
-        foreach (var permission in dto.Permissions)
+        if (!result.Succeeded)
         {
-            db.TenantPermissions.Add(new HnHMapperServer.Core.Models.TenantPermissionEntity
-            {
-                TenantUserId = tenantUser.Id,
-                Permission = permission.ToPermission()
-            });
+            return Results.BadRequest(new { error = result.Outcome == MembershipOutcome.TenantInactive ? "Tenant is not active" : "Tenant not found" });
         }
-
-        await db.SaveChangesAsync();
 
         logger.LogInformation(
             "Approved user {UserId} in tenant {TenantId} with permissions: {Permissions}",
             userId, tenantId, string.Join(", ", dto.Permissions));
-
-        // Audit log
-        await auditService.LogAsync(new AuditEntry
-        {
-            TenantId = tenantId,
-            Action = "UserApproved",
-            EntityType = "User",
-            EntityId = userId,
-            NewValue = string.Join(", ", dto.Permissions)
-        });
 
         return Results.Ok(new { message = "User approved successfully" });
     }

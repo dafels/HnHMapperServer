@@ -1,0 +1,195 @@
+@using HnHMapperServer.Core.DTOs
+@using HnHMapperServer.Web.Services
+@inject IInvitationService InvitationService
+@inject NavigationManager Navigation
+@inject ISnackbar Snackbar
+@inject ILogger<JoinMapCard> Logger
+@implements IDisposable
+
+<MudPaper Elevation="3" Class="@($"pa-6 onboarding-card h-100 {(Highlight ? "onboarding-card-focus" : "")}")" id="join-map-card">
+    <MudStack Spacing="3" Class="h-100">
+        <MudAvatar Color="Color.Secondary" Variant="Variant.Filled" Size="Size.Large">
+            <MudIcon Icon="@Icons.Material.Filled.Groups" />
+        </MudAvatar>
+
+        <MudText Typo="@(Compact ? Typo.h6 : Typo.h5)">Join an existing map</MudText>
+        <MudText Typo="Typo.body2" Class="ck-text-secondary">
+            Got an invite from your village? Paste the link or code and you're in right away.
+        </MudText>
+
+        <MudTextField Value="@_input"
+                      ValueChanged="@((string v) => OnInputChanged(v))"
+                      T="string"
+                      Label="Invite link or code"
+                      Placeholder="@($"{Navigation.BaseUri}invite/...")"
+                      Variant="Variant.Outlined"
+                      Immediate="true"
+                      Disabled="@_busy"
+                      Adornment="Adornment.Start"
+                      AdornmentIcon="@Icons.Material.Filled.Link"
+                      OnKeyDown="@HandleKeyDown" />
+
+        @if (_checking)
+        {
+            <MudText Typo="Typo.body2" Class="ck-text-secondary">
+                <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" /> Checking the invite...
+            </MudText>
+        }
+        else if (_preview is { IsValid: true })
+        {
+            <MudAlert Severity="Severity.Success" Dense="true" Icon="@Icons.Material.Filled.CheckCircle">
+                Invite to <strong>@_preview.TenantName</strong>
+                &middot; @_preview.MemberCount member@(_preview.MemberCount == 1 ? "" : "s")
+                @if (_preview.ExpiresAt.HasValue)
+                {
+                    <span> &middot; valid @DaysLeft(_preview.ExpiresAt.Value)</span>
+                }
+            </MudAlert>
+        }
+        else if (!string.IsNullOrEmpty(_error))
+        {
+            <MudAlert Severity="Severity.Error" Dense="true">@_error</MudAlert>
+        }
+
+        <MudSpacer />
+
+        <MudButton Variant="Variant.Filled"
+                   Color="Color.Secondary"
+                   FullWidth="true"
+                   Size="Size.Large"
+                   StartIcon="@Icons.Material.Filled.Login"
+                   Disabled="@(_busy || _preview is not { IsValid: true })"
+                   OnClick="JoinAsync">
+            @if (_busy)
+            {
+                <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                <span>Joining...</span>
+            }
+            else if (_preview is { IsValid: true })
+            {
+                <span>Join @_preview.TenantName</span>
+            }
+            else
+            {
+                <span>Join map</span>
+            }
+        </MudButton>
+    </MudStack>
+</MudPaper>
+
+@code {
+    [Parameter] public bool Compact { get; set; }
+    [Parameter] public bool Highlight { get; set; }
+
+    private string _input = string.Empty;
+    private string? _code;
+    private string? _error;
+    private bool _busy;
+    private bool _checking;
+    private ValidateInvitationDto? _preview;
+    private CancellationTokenSource? _debounce;
+
+    private void OnInputChanged(string value)
+    {
+        _input = value;
+        _preview = null;
+        _error = null;
+        _code = InviteLinks.TryExtractCode(value);
+
+        _debounce?.Cancel();
+        if (_code == null)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                _error = "That doesn't look like an invite link or code.";
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _debounce = cts;
+        _ = DebouncedValidateAsync(_code, cts.Token);
+    }
+
+    private async Task DebouncedValidateAsync(string code, CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(350, token);
+            _checking = true;
+            await InvokeAsync(StateHasChanged);
+
+            var result = await InvitationService.ValidateInvitationAsync(code);
+            if (token.IsCancellationRequested) return;
+
+            _preview = result;
+            _error = result.IsValid ? null : result.ErrorMessage;
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Invite preview failed");
+            _error = "Could not check the invite right now.";
+        }
+        finally
+        {
+            if (!token.IsCancellationRequested)
+            {
+                _checking = false;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private async Task HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && _preview is { IsValid: true } && !_busy)
+            await JoinAsync();
+    }
+
+    private async Task JoinAsync()
+    {
+        if (_code == null || _preview is not { IsValid: true })
+            return;
+
+        _busy = true;
+        _error = null;
+        try
+        {
+            var (result, error) = await InvitationService.RedeemInvitationAsync(_code);
+            if (result == null)
+            {
+                _error = error ?? "Could not join the map.";
+                return;
+            }
+
+            Snackbar.Add(result.AlreadyMember ? $"You're already a member of {result.TenantName}." : $"Welcome to {result.TenantName}!", Severity.Success);
+            Navigation.NavigateTo(TenantSwitchUrl.For(result.TenantId, "/"), forceLoad: true);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Invite redemption failed");
+            _error = "Could not reach the server. Please try again.";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private static string DaysLeft(DateTime expiresAt)
+    {
+        var remaining = expiresAt - DateTime.UtcNow;
+        if (remaining.TotalHours < 1) return "less than an hour";
+        if (remaining.TotalDays < 1) return $"{(int)Math.Ceiling(remaining.TotalHours)} more hours";
+        var days = (int)Math.Ceiling(remaining.TotalDays);
+        return days == 1 ? "1 more day" : $"{days} more days";
+    }
+
+    public void Dispose()
+    {
+        _debounce?.Cancel();
+        _debounce?.Dispose();
+    }
+}

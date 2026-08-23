@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using Serilog;
 using Microsoft.AspNetCore.Components.Server;
@@ -107,6 +108,7 @@ builder.Services.AddScoped<HnHMapperServer.Services.Interfaces.ILargeTileService
 builder.Services.AddScoped<HnHMapperServer.Web.Services.TenantContextService>();
 builder.Services.AddScoped<HnHMapperServer.Web.Services.ITenantService, HnHMapperServer.Web.Services.TenantService>();
 builder.Services.AddScoped<HnHMapperServer.Web.Services.IInvitationService, HnHMapperServer.Web.Services.InvitationService>();
+builder.Services.AddScoped<HnHMapperServer.Web.Services.ClipboardService>();
 
 // Register Map feature services (scoped to Blazor circuit for per-user state)
 builder.Services.AddScoped<HnHMapperServer.Web.Services.Map.CharacterTrackingService>();
@@ -223,7 +225,7 @@ builder.Services.AddDataProtection()
 
 // Configure Cookie Authentication to match API cookie
 // Use Identity.Application scheme so SignInManager works
-builder.Services.AddAuthentication(IdentityConstants.ApplicationScheme)
+var authBuilder = builder.Services.AddAuthentication(IdentityConstants.ApplicationScheme)
     .AddCookie(IdentityConstants.ApplicationScheme, options =>
     {
         options.Cookie.Name = "HnH.Auth";
@@ -267,10 +269,24 @@ builder.Services.AddAuthentication(IdentityConstants.ApplicationScheme)
                 var currentStamp = await userManager.GetSecurityStampAsync(user);
 
                 var roles = await userManager.GetRolesAsync(user);
-                var principalRoles = principal.FindAll(ClaimTypes.Role).Select(c => c.Value).OrderBy(x => x).ToArray();
+                // The cookie also carries the active tenant's role as a Role claim, so compare only the
+                // Identity roles (e.g. SuperAdmin) - the tenant role is covered by the active-tenant check below.
+                var tenantRoleClaim = principal.FindFirstValue(AuthorizationConstants.ClaimTypes.TenantRole);
+                var principalRoles = principal.FindAll(ClaimTypes.Role)
+                    .Select(c => c.Value)
+                    .Where(r => !string.Equals(r, tenantRoleClaim, StringComparison.Ordinal))
+                    .OrderBy(x => x).ToArray();
                 var rolesChanged = !roles.OrderBy(x => x).SequenceEqual(principalRoles);
 
-                if (string.IsNullOrEmpty(principalStamp) || principalStamp != currentStamp || rolesChanged)
+                // Active tenant changed (switched on this or another device, membership removed, tenant
+                // suspended) -> rebuild so the cookie follows the persisted selection without a stamp bump.
+                var db = services.GetRequiredService<HnHMapperServer.Infrastructure.Data.ApplicationDbContext>();
+                var expectedTenantId = await HnHMapperServer.Infrastructure.Identity.ActiveTenantMembershipResolver
+                    .ResolveTenantIdAsync(db, user.Id, user.ActiveTenantId);
+                var cookieTenantId = principal.FindFirstValue(AuthorizationConstants.ClaimTypes.TenantId);
+                var tenantChanged = !string.Equals(expectedTenantId, cookieTenantId, StringComparison.Ordinal);
+
+                if (string.IsNullOrEmpty(principalStamp) || principalStamp != currentStamp || rolesChanged || tenantChanged)
                 {
                     // Build fresh principal (includes custom auth claims via ClaimsPrincipalFactory)
                     var newPrincipal = await signInManager.CreateUserPrincipalAsync(user);
@@ -294,7 +310,7 @@ builder.Services
     })
     .AddRoles<IdentityRole>()
     .AddSignInManager() // Required for security stamp validation
-    .AddClaimsPrincipalFactory<HnHMapperServer.Web.Security.TenantClaimsPrincipalFactory>()
+    .AddClaimsPrincipalFactory<HnHMapperServer.Infrastructure.Identity.TenantClaimsPrincipalFactory>()
     .AddEntityFrameworkStores<HnHMapperServer.Infrastructure.Data.ApplicationDbContext>()
     .AddDefaultTokenProviders();
 
@@ -303,6 +319,62 @@ builder.Services.Configure<SecurityStampValidatorOptions>(options =>
 {
     options.ValidationInterval = TimeSpan.FromSeconds(10);
 });
+
+// ---------------------------------------------------------------------------------------------
+// External sign-in: Steam (OpenID 2.0) and Discord (OAuth2). Both handlers are registered here once; whether
+// a scheme is LIVE, and which key/secret it uses, is decided by the superadmin at runtime
+// (SuperAdmin → Sign-in & onboarding, stored in the database). DynamicAuthSchemeManager adds/removes the
+// schemes and DynamicAuthOptionsConfigurator injects the stored credentials whenever the options are rebuilt.
+// Deployment configuration (Authentication:Steam:*, Authentication:Discord:*) only seeds the initial values.
+// ---------------------------------------------------------------------------------------------
+authBuilder.AddCookie(IdentityConstants.ExternalScheme, options =>
+{
+    // Short-lived cookie that carries the provider's identity between the callback and our own sign-in
+    options.Cookie.Name = "HnH.External";
+    options.Cookie.HttpOnly = true;
+    options.Cookie.SameSite = SameSiteMode.Lax;
+    options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+    options.ExpireTimeSpan = TimeSpan.FromMinutes(15);
+    options.SlidingExpiration = false;
+});
+
+authBuilder.AddSteam(options =>
+{
+    options.SignInScheme = IdentityConstants.ExternalScheme;
+    // Lax (not the handler default None): None is rejected by browsers without Secure, i.e. on plain HTTP;
+    // Lax still rides the top-level GET that Steam redirects back with.
+    options.CorrelationCookie.SameSite = SameSiteMode.Lax;
+    options.CorrelationCookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+});
+
+authBuilder.AddDiscord(options =>
+{
+    options.SignInScheme = IdentityConstants.ExternalScheme;
+    options.Scope.Clear();
+    options.Scope.Add("identify");          // no email scope: we never collect e-mail addresses
+    options.UsePkce = true;
+    options.SaveTokens = false;             // provider tokens are never persisted
+    options.CorrelationCookie.SameSite = SameSiteMode.Lax;
+    options.CorrelationCookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+});
+
+// Runtime credentials + scheme toggling (registered AFTER AddSteam/AddDiscord so the configurator runs last)
+builder.Services.AddSingleton<HnHMapperServer.Services.Interfaces.AuthSettingsCache>();
+builder.Services.AddSingleton<IConfigureOptions<AspNet.Security.OpenId.Steam.SteamAuthenticationOptions>, HnHMapperServer.Web.Security.DynamicAuthOptionsConfigurator>();
+builder.Services.AddSingleton<IConfigureOptions<AspNet.Security.OAuth.Discord.DiscordAuthenticationOptions>, HnHMapperServer.Web.Security.DynamicAuthOptionsConfigurator>();
+builder.Services.AddSingleton<HnHMapperServer.Web.Security.DynamicAuthSchemeManager>();
+builder.Services.AddSingleton<HnHMapperServer.Web.Security.ExternalAuthProviders>();
+
+// Services the external callback and the settings page need IN-PROCESS (no HnH.Auth cookie exists during the
+// callback, so it cannot go through the API; the settings must be applied in the process hosting the handlers)
+builder.Services.AddScoped<HnHMapperServer.Core.Interfaces.ITenantInvitationRepository, HnHMapperServer.Infrastructure.Repositories.TenantInvitationRepository>();
+builder.Services.AddScoped<HnHMapperServer.Services.Interfaces.IAuditService, HnHMapperServer.Services.Services.AuditService>();
+builder.Services.AddScoped<HnHMapperServer.Services.Interfaces.IInvitationService, HnHMapperServer.Services.Services.InvitationService>();
+builder.Services.AddScoped<HnHMapperServer.Services.Interfaces.ITenantMembershipService, HnHMapperServer.Services.Services.TenantMembershipService>();
+builder.Services.AddScoped<HnHMapperServer.Services.Interfaces.IExternalUserProvisioner, HnHMapperServer.Services.Services.ExternalUserProvisioner>();
+// The Web process is the ONLY one that decrypts the provider secrets (it configures the handlers)
+builder.Services.AddSingleton(new HnHMapperServer.Services.Interfaces.AuthSettingsStoreOptions { DecryptSecrets = true });
+builder.Services.AddScoped<HnHMapperServer.Services.Interfaces.IAuthSettingsStore, HnHMapperServer.Services.Services.AuthSettingsStore>();
 
 // Add authorization services
 builder.Services.AddAuthorization();
@@ -359,6 +431,16 @@ builder.Services.AddHttpClient("APIUpload", client =>
 builder.Services.AddCascadingAuthenticationState();
 
 var app = builder.Build();
+
+// Sign-in settings: load the superadmin's saved state and bring the Steam/Discord schemes to life (or not)
+{
+    using var scope = app.Services.CreateScope();
+    var settingsStore = scope.ServiceProvider.GetRequiredService<HnHMapperServer.Services.Interfaces.IAuthSettingsStore>();
+    await settingsStore.WarmAsync();
+    var settingsCache = app.Services.GetRequiredService<HnHMapperServer.Services.Interfaces.AuthSettingsCache>();
+    app.Services.GetRequiredService<HnHMapperServer.Web.Security.DynamicAuthSchemeManager>().Start(settingsCache.Current!);
+}
+
 // Diagnostics: echo environment-driven paths and API base
 {
     var raw = app.Configuration["GridStorage"];
@@ -1120,6 +1202,7 @@ app.MapPost("/api/login", async (
 {
     string username = string.Empty;
     string password = string.Empty;
+    string? returnUrl = null;
     try
     {
         if (context.Request.HasFormContentType)
@@ -1129,12 +1212,14 @@ app.MapPost("/api/login", async (
             if (string.IsNullOrEmpty(username)) username = form["username"].ToString();
             password = form["pass"].ToString();
             if (string.IsNullOrEmpty(password)) password = form["password"].ToString();
+            returnUrl = form["returnUrl"].ToString();
         }
         else
         {
             var body = await context.Request.ReadFromJsonAsync<LoginPayload>();
             username = body?.Username ?? string.Empty;
             password = body?.Password ?? string.Empty;
+            returnUrl = body?.ReturnUrl;
         }
 
         if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
@@ -1145,20 +1230,33 @@ app.MapPost("/api/login", async (
         var valid = await userManager.CheckPasswordAsync(user, password);
         if (!valid) return Results.Redirect("/login?error=1");
 
-        // Check if user has tenant assignment
-        var hasTenant = await db.TenantUsers
+        // Approved memberships in active tenants decide where the user lands. Zero memberships is a normal
+        // state now: the user still gets a session and is routed to the create-or-join screen.
+        var memberTenantIds = await db.TenantUsers
             .IgnoreQueryFilters()
-            .AnyAsync(tu => tu.UserId == user.Id && tu.JoinedAt != default);
+            .Where(tu => tu.UserId == user.Id && tu.JoinedAt != default)
+            .Join(db.Tenants.IgnoreQueryFilters().Where(t => t.IsActive),
+                tu => tu.TenantId, t => t.Id, (tu, t) => tu.TenantId)
+            .ToListAsync();
 
-        if (!hasTenant)
-            return Results.Redirect("/login?error=no_tenant");
+        if (memberTenantIds.Count == 1)
+            user.ActiveTenantId = memberTenantIds[0];   // a single membership is always the active one
+        else if (memberTenantIds.Count == 0)
+            user.ActiveTenantId = null;
+        user.LastLoginAt = DateTime.UtcNow;
+        await userManager.UpdateAsync(user);
 
-        // SignInManager will use TenantClaimsPrincipalFactory to add tenant claims automatically
+        // SignInManager uses the shared TenantClaimsPrincipalFactory to add the active tenant's claims
         await signInManager.SignInAsync(user, isPersistent: true);
 
         var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
-        logger.LogInformation("User {Username} logged in successfully", username);
+        logger.LogInformation("User {Username} logged in successfully ({TenantCount} tenant(s))", username, memberTenantIds.Count);
 
+        var activeIsValid = user.ActiveTenantId != null && memberTenantIds.Contains(user.ActiveTenantId);
+        if (LocalUrl.IsLocal(returnUrl))
+            return Results.LocalRedirect(returnUrl!);   // explicit destination (e.g. an invite landing page) wins
+        if (memberTenantIds.Count == 0 || !activeIsValid)
+            return Results.LocalRedirect("/tenant/select");
         return Results.LocalRedirect("/");
     }
     catch (Exception ex)
@@ -1168,6 +1266,33 @@ app.MapPost("/api/login", async (
         return Results.Redirect("/login?error=1");
     }
 }).DisableAntiforgery();
+
+// Tenant switching - the ONLY switching path used by the UI. Persists the choice on the user row and re-issues the
+// Web cookie with the new tenant's claims (only this process can set the browser cookie). Other tabs/devices
+// converge through normal cookie revalidation; no security-stamp bump (that would sign the user out everywhere).
+// Blazor callers must navigate here with forceLoad - a circuit cannot set cookies.
+app.MapGet("/api/tenant/select", async (
+    HttpContext context,
+    string? tenantId,
+    string? returnUrl,
+    UserManager<ApplicationUser> userManager,
+    SignInManager<ApplicationUser> signInManager,
+    HnHMapperServer.Infrastructure.Data.ApplicationDbContext db) =>
+    await TenantSwitch.HandleAsync(context, tenantId, returnUrl, userManager, signInManager, db))
+    .DisableAntiforgery();
+
+app.MapPost("/api/tenant/select", async (
+    HttpContext context,
+    UserManager<ApplicationUser> userManager,
+    SignInManager<ApplicationUser> signInManager,
+    HnHMapperServer.Infrastructure.Data.ApplicationDbContext db) =>
+{
+    var form = context.Request.HasFormContentType ? await context.Request.ReadFormAsync() : null;
+    return await TenantSwitch.HandleAsync(context, form?["tenantId"], form?["returnUrl"], userManager, signInManager, db);
+}).DisableAntiforgery();
+
+// External sign-in routes (each answers 404 while its provider is switched off)
+HnHMapperServer.Web.Security.ExternalAuthEndpoints.MapExternalAuthEndpoints(app);
 
 // Support both GET and POST for logout (GET for navigation, POST for form submission)
 app.MapGet("/api/logout", async (HttpContext context) =>
@@ -1199,6 +1324,63 @@ file sealed class LoginPayload
 {
     public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
+    public string? ReturnUrl { get; set; }
+}
+
+/// <summary>Open-redirect guard: only same-site absolute paths ("/foo") are accepted as redirect targets.</summary>
+file static class LocalUrl
+{
+    public static bool IsLocal(string? url) =>
+        !string.IsNullOrWhiteSpace(url)
+        && url.StartsWith('/')
+        && !url.StartsWith("//", StringComparison.Ordinal)
+        && !url.StartsWith("/\\", StringComparison.Ordinal);
+}
+
+file static class TenantSwitch
+{
+    public static async Task<IResult> HandleAsync(
+        HttpContext context,
+        string? tenantId,
+        string? returnUrl,
+        UserManager<ApplicationUser> userManager,
+        SignInManager<ApplicationUser> signInManager,
+        HnHMapperServer.Infrastructure.Data.ApplicationDbContext db)
+    {
+        if (context.User.Identity?.IsAuthenticated != true)
+            return Results.Redirect("/login");
+
+        var user = await userManager.GetUserAsync(context.User);
+        if (user == null)
+            return Results.Redirect("/login");
+
+        if (string.IsNullOrWhiteSpace(tenantId))
+            return Results.Redirect("/tenant/select?error=missing");
+
+        var isApprovedMember = await db.TenantUsers
+            .IgnoreQueryFilters()
+            .AnyAsync(tu => tu.UserId == user.Id && tu.TenantId == tenantId && tu.JoinedAt != default);
+        var tenantActive = isApprovedMember && await db.Tenants
+            .IgnoreQueryFilters()
+            .AnyAsync(t => t.Id == tenantId && t.IsActive);
+
+        if (!tenantActive)
+            return Results.Redirect("/tenant/select?error=not_member");
+
+        if (!string.Equals(user.ActiveTenantId, tenantId, StringComparison.Ordinal))
+        {
+            user.ActiveTenantId = tenantId;
+            await userManager.UpdateAsync(user);
+        }
+
+        // Re-issue the cookie: the claims factory now emits the selected tenant's claims
+        await signInManager.SignInAsync(user, isPersistent: true);
+
+        var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+        logger.LogInformation("User {UserId} switched active tenant to {TenantId}", user.Id, tenantId);
+
+        return Results.LocalRedirect(LocalUrl.IsLocal(returnUrl) ? returnUrl! : "/");
+    }
 }
 
 // DTO for cross-process tile cache invalidation

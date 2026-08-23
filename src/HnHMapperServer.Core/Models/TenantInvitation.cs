@@ -38,6 +38,10 @@ public sealed class TenantInvitationEntity
     /// <summary>
     /// Username who used this invite
     /// </summary>
+    /// <summary>
+    /// Identity user ID of the LAST redeemer (multi-use links are redeemed by many users; every redemption is
+    /// also an "InvitationRedeemed" audit row). Despite the historical name this has always held the user id.
+    /// </summary>
     public string? UsedBy { get; set; }
 
     /// <summary>
@@ -54,4 +58,16 @@ public sealed class TenantInvitationEntity
     /// Whether registration is pending approval (1) or not (0)
     /// </summary>
     public bool PendingApproval { get; set; } = false;
+
+    /// <summary>Maximum number of redemptions; null = unlimited. Pre-existing links were back-filled to 1.</summary>
+    public int? MaxUses { get; set; }
+
+    /// <summary>Number of successful redemptions so far (incremented atomically).</summary>
+    public int UseCount { get; set; }
+
+    /// <summary>
+    /// Permissions granted to redeemers, stored as claim values (JSON list). Empty = all five (legacy links).
+    /// The role is always TenantUser.
+    /// </summary>
+    public List<string> Permissions { get; set; } = new();
 }

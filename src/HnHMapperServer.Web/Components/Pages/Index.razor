@@ -13,6 +13,8 @@
 @inject HnHMapperServer.Web.Services.UserService UserService
 @inject TenantContextService TenantContext
 @inject ITenantService TenantService
+@inject IInvitationService InvitationService
+@inject ClipboardService Clipboard
 @inject IJSRuntime JS
 @using HnHMapperServer.Web.Models
 @using Microsoft.AspNetCore.Authentication.Cookies
@@ -23,12 +25,113 @@
 <MudContainer Class="mt-6">
     <AuthorizeView>
         <Authorized>
+        @if (_redirectingToSelect)
+        {
+            <div class="d-flex justify-center align-center" style="min-height: 240px;">
+                <MudProgressCircular Indeterminate="true" Size="Size.Large" />
+            </div>
+        }
+        else
+        {
         <MudContainer MaxWidth="MaxWidth.Large" Class="mt-4">
             <MudPaper Class="pa-4 mb-4 glass-morphism" Elevation="0">
                 <MudText Typo="Typo.h3">
                     Welcome, @context.User.Identity?.Name!
                 </MudText>
             </MudPaper>
+
+            <MudGrid Class="mb-2">
+                <MudItem xs="12" md="@(_isTenantAdmin ? 6 : 12)">
+                    <MudPaper Elevation="0" Class="pa-6 glass-morphism h-100">
+                        <MudText Typo="Typo.h5" Class="mb-2">
+                            <MudIcon Icon="@Icons.Material.Filled.Map" Class="me-2" />
+                            Your map
+                        </MudText>
+                        @if (_currentTenant != null)
+                        {
+                            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Class="mb-2" Style="flex-wrap: wrap;">
+                                <MudText Typo="Typo.h6">@_currentTenant.Name</MudText>
+                                <MudChip T="string" Size="Size.Small" Color="@GetRoleColor(_currentTenant.Role)">@RoleLabel(_currentTenant.Role)</MudChip>
+                                @if (_userHasMultipleTenants)
+                                {
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined">@_tenantCount maps</MudChip>
+                                }
+                            </MudStack>
+                            @if (_currentTenant.StorageQuotaMB > 0)
+                            {
+                                <StorageUsageGauge CurrentUsageMB="@_currentTenant.StorageUsageMB" QuotaMB="@_currentTenant.StorageQuotaMB" />
+                            }
+                            <MudStack Row="true" Spacing="2" Class="mt-3" Style="flex-wrap: wrap;">
+                                <MudButton Variant="Variant.Outlined" Color="Color.Primary" Href="/tenant/select" StartIcon="@Icons.Material.Filled.SwapHoriz">
+                                    @(_userHasMultipleTenants ? "Switch map" : "Your maps")
+                                </MudButton>
+                                <MudButton Variant="Variant.Text" Color="Color.Primary" Href="/tenant/select?action=create" StartIcon="@Icons.Material.Filled.AddLocationAlt">
+                                    Create a new map
+                                </MudButton>
+                                <MudButton Variant="Variant.Text" Color="Color.Primary" Href="/tenant/select?action=join" StartIcon="@Icons.Material.Filled.Groups">
+                                    Join with an invite
+                                </MudButton>
+                            </MudStack>
+                        }
+                        else
+                        {
+                            <MudAlert Severity="Severity.Info" Dense="true" Class="glass-morphism">
+                                You're not on a map yet. <MudLink Href="/tenant/select">Create one or join with an invite.</MudLink>
+                            </MudAlert>
+                        }
+                    </MudPaper>
+                </MudItem>
+
+                @if (_isTenantAdmin && _currentTenant != null)
+                {
+                    <MudItem xs="12" md="6">
+                        <MudPaper Elevation="0" Class="pa-6 glass-morphism h-100">
+                            <MudText Typo="Typo.h5" Class="mb-2">
+                                <MudIcon Icon="@Icons.Material.Filled.PersonAddAlt1" Class="me-2" />
+                                Invite players
+                            </MudText>
+                            <MudText Typo="Typo.body2" Class="ck-text-secondary mb-3">
+                                Anyone with this link joins <strong>@_currentTenant.Name</strong> immediately@(_inviteLink?.Preset == "Contribute" ? " (view + upload)" : " with full access").
+                            </MudText>
+
+                            @if (_inviteLoading)
+                            {
+                                <MudProgressLinear Indeterminate="true" />
+                            }
+                            else if (_inviteLink != null)
+                            {
+                                <MudPaper Class="pa-2 d-flex justify-space-between align-center" Elevation="0" Style="background: rgba(255,255,255,0.55);">
+                                    <MudText Typo="Typo.body2" Style="font-family: monospace; word-break: break-all;">@InviteLinkUrl</MudText>
+                                    <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Color="Color.Primary"
+                                                   OnClick="@(() => Clipboard.CopyAsync(InviteLinkUrl, "Invite link copied"))" Title="Copy invite link" />
+                                </MudPaper>
+                                <MudText Typo="Typo.caption" Class="ck-text-secondary mt-2">
+                                    Expires in @DaysUntil(_inviteLink.ExpiresAt) &middot; @_inviteLink.UseCount joined
+                                    @if (_inviteLink.MaxUses.HasValue)
+                                    {
+                                        <span> of @_inviteLink.MaxUses</span>
+                                    }
+                                </MudText>
+                                <MudStack Row="true" Spacing="2" Class="mt-3" Style="flex-wrap: wrap;">
+                                    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.ContentCopy"
+                                               OnClick="@(() => Clipboard.CopyAsync(InviteLinkUrl, "Invite link copied"))">
+                                        Copy link
+                                    </MudButton>
+                                    <MudButton Variant="Variant.Text" Color="Color.Primary" Href="/admin" StartIcon="@Icons.Material.Filled.ManageAccounts">
+                                        Manage invites
+                                    </MudButton>
+                                </MudStack>
+                            }
+                            else
+                            {
+                                <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Link" OnClick="CreateInviteLinkAsync">
+                                    Create invite link
+                                </MudButton>
+                            }
+                        </MudPaper>
+                    </MudItem>
+                }
+            </MudGrid>
 
             <MudGrid>
                 <MudItem xs="12" md="6">
@@ -154,7 +257,7 @@
                                     FullWidth="true"
                                     Href="/admin">
                                     <MudIcon Icon="@Icons.Material.Filled.AdminPanelSettings" Class="me-2" />
-                                    Organization Admin
+                                    Map admin
                                 </MudButton>
                             }
 
@@ -171,6 +274,7 @@
                 </MudItem>
             </MudGrid>
         </MudContainer>
+        }
         </Authorized>
     </AuthorizeView>
 </MudContainer>
@@ -181,9 +285,35 @@
     private bool hasUploadPermission = false;
     private TenantDto? _currentTenant;
     private bool _userHasMultipleTenants;
+    private int _tenantCount;
+    private bool _isTenantAdmin;
+    private string? _activeTenantId;
+    private HnHMapperServer.Core.DTOs.InvitationDto? _inviteLink;
+    private bool _inviteLoading;
+
+    private string InviteLinkUrl => _inviteLink == null ? string.Empty : InviteLinks.Build(NavigationManager.BaseUri, _inviteLink.InviteCode);
+
+    /// <summary>Non-null only during the static prerender pass, where NavigateTo would throw NavigationException.</summary>
+    [CascadingParameter]
+    public HttpContext? HttpContext { get; set; }
+
+    private bool _redirectingToSelect;
 
     protected override async Task OnInitializedAsync()
     {
+        // No active tenant yet (fresh account, or removed from every map): the only thing to do is create or join one.
+        var initialAuth = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+        var hasActiveTenant = !string.IsNullOrEmpty(initialAuth.User.FindFirst(AuthorizationConstants.ClaimTypes.TenantId)?.Value);
+        if (!hasActiveTenant && !initialAuth.User.IsInRole("SuperAdmin"))
+        {
+            _redirectingToSelect = true;
+            // Prerender pass: render nothing and let the interactive pass (HttpContext == null) navigate -
+            // NavigateTo during prerendering throws NavigationException by design.
+            if (HttpContext == null)
+                NavigationManager.NavigateTo("/tenant/select");
+            return;
+        }
+
         try
         {
             var client = HttpClientFactory.CreateClient("API");
@@ -198,17 +328,26 @@
             Snackbar.Add($"Auth check error: {ex.Message}", Severity.Warning);
         }
 
-        // Load tenant information
+        // Load tenant information: the active map is whatever the cookie says (the claims factory decides)
         try
         {
+            _activeTenantId = initialAuth.User.FindFirst(AuthorizationConstants.ClaimTypes.TenantId)?.Value;
+            var tenantRole = initialAuth.User.FindFirst(AuthorizationConstants.ClaimTypes.TenantRole)?.Value;
+            _isTenantAdmin = string.Equals(tenantRole, "TenantAdmin", StringComparison.OrdinalIgnoreCase);
+
             var tenants = await TenantContext.GetTenantsAsync();
+            _tenantCount = tenants.Count;
             _userHasMultipleTenants = tenants.Count > 1;
 
-            // Get current tenant from context or use first tenant if only one
-            _currentTenant = TenantContext.CurrentTenant ?? tenants.FirstOrDefault();
-            if (_currentTenant != null && TenantContext.CurrentTenant == null)
+            _currentTenant = tenants.FirstOrDefault(t => t.Id == _activeTenantId) ?? tenants.FirstOrDefault();
+            if (_currentTenant != null)
             {
                 TenantContext.SetCurrentTenant(_currentTenant);
+            }
+
+            if (_isTenantAdmin && _activeTenantId != null)
+            {
+                await LoadInviteLinkAsync(createIfMissing: false);
             }
         }
         catch (Exception ex)
@@ -243,6 +382,55 @@
             _ => Color.Default
         };
     }
+
+    private static string RoleLabel(string role) => role.ToLowerInvariant() switch
+    {
+        "tenantadmin" => "Admin",
+        "tenantuser" => "Member",
+        "superadmin" => "SuperAdmin",
+        _ => role
+    };
+
+    private static string DaysUntil(DateTime expiresAt)
+    {
+        var remaining = expiresAt - DateTime.UtcNow;
+        if (remaining.TotalHours < 1) return "less than an hour";
+        if (remaining.TotalDays < 1) return $"{(int)Math.Ceiling(remaining.TotalHours)} hours";
+        var days = (int)Math.Ceiling(remaining.TotalDays);
+        return days == 1 ? "1 day" : $"{days} days";
+    }
+
+    /// <summary>The newest live shareable link for the current map; optionally creates a 7-day unlimited one.</summary>
+    private async Task LoadInviteLinkAsync(bool createIfMissing)
+    {
+        if (_activeTenantId == null) return;
+        _inviteLoading = true;
+        try
+        {
+            var now = DateTime.UtcNow;
+            _inviteLink = (await InvitationService.GetInvitationsAsync(_activeTenantId))
+                .Where(i => i.Status == "Active" && i.ExpiresAt > now.AddHours(1) && (i.MaxUses == null || i.UseCount < i.MaxUses))
+                .OrderByDescending(i => i.CreatedAt)
+                .FirstOrDefault();
+
+            if (_inviteLink == null && createIfMissing)
+            {
+                _inviteLink = await InvitationService.CreateInvitationAsync(_activeTenantId);
+                if (_inviteLink == null)
+                    Snackbar.Add("Couldn't create an invite link right now.", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Couldn't load invite links: {ex.Message}", Severity.Warning);
+        }
+        finally
+        {
+            _inviteLoading = false;
+        }
+    }
+
+    private Task CreateInviteLinkAsync() => LoadInviteLinkAsync(createIfMissing: true);
 
     private async Task LoadTokens()
     {
@@ -290,18 +478,7 @@
     /// <summary>Food-upload endpoint of a mapper token URL (same token, "/food" suffix).</summary>
     private static string CookbookUrl(string mapperUrl) => mapperUrl.TrimEnd('/') + "/food";
 
-    private async Task CopyToClipboard(string text)
-    {
-        try
-        {
-            await JS.InvokeVoidAsync("navigator.clipboard.writeText", text);
-            Snackbar.Add("Copied to clipboard!", Severity.Success);
-        }
-        catch
-        {
-            Snackbar.Add("Failed to copy to clipboard", Severity.Warning);
-        }
-    }
+    private Task CopyToClipboard(string text) => Clipboard.CopyAsync(text);
 
     private void HandleLogout()
     {

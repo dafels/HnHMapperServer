@@ -28,6 +28,16 @@
             <TenantList />
         </MudTabPanel>
 
+        @* Accounts Tab: who joined how (sign-in methods, registration source, memberships) *@
+        <MudTabPanel Text="Accounts" Icon="@Icons.Material.Filled.People">
+            <AccountsOverview />
+        </MudTabPanel>
+
+        @* Sign-in & onboarding: open registration, self-service maps, Steam / Discord sign-in (+ setup guides) *@
+        <MudTabPanel Text="Sign-in" Icon="@Icons.Material.Filled.Login">
+            <OnboardingSettings />
+        </MudTabPanel>
+
         @* SuperAdmins Tab *@
         <MudTabPanel Text="SuperAdmins" Icon="@Icons.Material.Filled.AdminPanelSettings">
             <SuperAdminsList />
