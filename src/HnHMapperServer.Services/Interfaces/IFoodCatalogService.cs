@@ -41,6 +41,13 @@ public interface IFoodCatalogService
     Task<List<FoodVariantDto>> GetVariationsAsync(int foodId, CancellationToken ct = default);
 
     /// <summary>
+    /// Returns every recorded recipe variation of the current tenant's catalog in one
+    /// list (FoodId set on each row) — the data source of the flat "all recipes"
+    /// cookbook view. Empty when no tenant context is available.
+    /// </summary>
+    Task<List<FoodVariantDto>> GetAllVariationsAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// Foods whose base values OR any recorded recipe variation satisfy every threshold
     /// condition in <paramref name="expression"/> (FepFilterParser syntax) at the given
     /// quality, with per-food matching-variation counts. Empty when the expression

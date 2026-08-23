@@ -130,6 +130,12 @@
     line-height: 1.5;
 }
 
+/* View chips: grouped-by-food vs flat all-recipes; soft lavender */
+.stat-chip.view {
+    background: #ddd4ec;
+    font-weight: 600;
+}
+
 /* Satiation chips: same behavior as FEP chips, uniform green tone */
 .stat-chip.satiation {
     background: #bfe3c0;
@@ -154,6 +160,69 @@
 
 .stat-chip.world.untagged {
     background: #dfe3e6;
+}
+
+/* Ingredient facet (flat view): picked ingredients become Filters-row tags (warm wheat
+   via --chip-color inline); the "Only these" strict-mode toggle stays neutral like the
+   other utility toggles; the wall toggle shares the wheat family color */
+.stat-chip.only-toggle {
+    background: #dfe3e6;
+    font-weight: 600;
+}
+
+.stat-chip.wall-toggle {
+    background: #e8ddc9;
+    font-weight: 600;
+}
+
+.ingredient-row {
+    align-items: center;
+}
+
+/* A–Z ingredient wall: every recorded ingredient as a compact chip, grouped by first
+   letter, inside a bounded scroll box so the table never drops off-screen */
+.ingredient-wall {
+    margin-top: 6px;
+    padding: 8px 10px 10px 10px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.45);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    max-height: 360px;
+    overflow-y: auto;
+}
+
+.cookbook-page ::deep .wall-filter {
+    max-width: 320px;
+}
+
+.wall-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 6px;
+}
+
+.wall-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+}
+
+.wall-letter {
+    min-width: 22px;
+    font-size: 0.7rem;
+    font-weight: 800;
+    color: var(--ck-text-muted);
+    text-align: center;
+}
+
+.stat-chip.wall-chip {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 1px 7px;
+    gap: 4px;
+    background: #e8ddc9;
 }
 
 /* Small amber preparation badge next to the food name */
@@ -905,7 +974,8 @@
 }
 
 /* Row highlighted when a panel chip focused this specific variant */
-.cookbook-page ::deep .variant-table .variant-focused .mud-table-cell {
+.cookbook-page ::deep .variant-table .variant-focused .mud-table-cell,
+.cookbook-page ::deep .flat-table .variant-focused .mud-table-cell {
     background: rgba(100, 181, 246, 0.16) !important;
     box-shadow: inset 3px 0 0 #64B5F6;
 }

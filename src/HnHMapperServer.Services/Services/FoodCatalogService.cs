@@ -448,39 +448,74 @@ public class FoodCatalogService : IFoodCatalogService
             .Where(v => v.FoodId == foodId)
             .ToListAsync(ct);
 
+        var contributorNames = await ResolveContributorNamesAsync(variants, ct);
+
+        return variants
+            .Select(v => MapVariantDto(v, contributorNames))
+            .OrderByDescending(v => v.Feps.Sum(f => f.Value))
+            .ToList();
+    }
+
+    public async Task<List<FoodVariantDto>> GetAllVariationsAsync(CancellationToken ct = default)
+    {
+        // Same tenant-context guard as GetCatalogAsync: no tenant → empty, never leak.
+        var tenantId = _tenantContext.GetCurrentTenantId();
+        if (string.IsNullOrEmpty(tenantId))
+        {
+            return new List<FoodVariantDto>();
+        }
+
+        // Query filter scopes to the current tenant. Deliberately uncached: the flat
+        // view's Web-side cache refetches per tenant only every few minutes, and holding
+        // a second ~50k-DTO list per tenant in this process buys nothing for that rate.
+        var variants = await _dbContext.FoodVariants
+            .AsNoTracking()
+            .ToListAsync(ct);
+
+        var contributorNames = await ResolveContributorNamesAsync(variants, ct);
+
+        return variants
+            .Select(v => MapVariantDto(v, contributorNames))
+            .OrderBy(v => v.FoodId)
+            .ThenByDescending(v => v.Feps.Sum(f => f.Value))
+            .ToList();
+    }
+
+    private async Task<Dictionary<string, string>> ResolveContributorNamesAsync(
+        List<FoodVariantEntity> variants, CancellationToken ct)
+    {
         var contributorIds = variants
             .SelectMany(v => v.Contributors)
             .Distinct()
             .ToList();
-        var contributorNames = contributorIds.Count == 0
+        return contributorIds.Count == 0
             ? new Dictionary<string, string>()
             : await _dbContext.Users
                 .AsNoTracking()
                 .Where(u => contributorIds.Contains(u.Id))
                 .ToDictionaryAsync(u => u.Id, u => u.UserName ?? "unknown", ct);
-
-        return variants
-            .Select(v => new FoodVariantDto
-            {
-                IngredientSignature = v.IngredientSignature,
-                Energy = v.Energy,
-                Hunger = v.Hunger,
-                TimesSeen = v.TimesSeen,
-                ContributorNames = v.Contributors
-                    .Select(id => contributorNames.GetValueOrDefault(id, "unknown"))
-                    .ToList(),
-                Worlds = v.Worlds.ToList(),
-                WorldValues = v.WorldValues.Select(MapWorldValueDto).ToList(),
-                Feps = v.Feps
-                    .Select(f => new FoodFepDto { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value })
-                    .ToList(),
-                Ingredients = v.Ingredients
-                    .Select(i => new FoodIngredientDto { Name = i.Name, Percentage = i.Percentage })
-                    .ToList()
-            })
-            .OrderByDescending(v => v.Feps.Sum(f => f.Value))
-            .ToList();
     }
+
+    private static FoodVariantDto MapVariantDto(FoodVariantEntity v, Dictionary<string, string> contributorNames) =>
+        new()
+        {
+            FoodId = v.FoodId,
+            IngredientSignature = v.IngredientSignature,
+            Energy = v.Energy,
+            Hunger = v.Hunger,
+            TimesSeen = v.TimesSeen,
+            ContributorNames = v.Contributors
+                .Select(id => contributorNames.GetValueOrDefault(id, "unknown"))
+                .ToList(),
+            Worlds = v.Worlds.ToList(),
+            WorldValues = v.WorldValues.Select(MapWorldValueDto).ToList(),
+            Feps = v.Feps
+                .Select(f => new FoodFepDto { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value })
+                .ToList(),
+            Ingredients = v.Ingredients
+                .Select(i => new FoodIngredientDto { Name = i.Name, Percentage = i.Percentage })
+                .ToList()
+        };
 
     public async Task<CookbookExportDto> ExportAsync(string tenantId, CancellationToken ct = default)
     {

@@ -93,6 +93,9 @@ builder.Services.AddScoped<HnHMapperServer.Web.Services.ReconnectionState>(); //
 builder.Services.AddSingleton<HnHMapperServer.Services.Interfaces.IBuildInfoProvider, HnHMapperServer.Services.Services.BuildInfoProvider>();
 builder.Services.AddScoped<HnHMapperServer.Web.Services.VersionClient>();
 
+// Cross-circuit cache of the cookbook's flat "All recipes" rows (~50k rows per tenant)
+builder.Services.AddSingleton<HnHMapperServer.Web.Services.CookbookFlatCache>();
+
 // Register public tile cache services for in-memory tile serving
 builder.Services.AddSingleton<HnHMapperServer.Web.Services.PublicTileCacheService>();
 builder.Services.AddHostedService<HnHMapperServer.Web.Services.PublicTileCacheHostedService>();

@@ -27,6 +27,7 @@ public static class CookbookEndpoints
 
         catalog.MapGet("/foods", GetFoods);
         catalog.MapGet("/foods/{id:int}/variations", GetVariations);
+        catalog.MapGet("/variations", GetAllVariations);
         catalog.MapGet("/recipe-index", GetRecipeIndex);
         catalog.MapGet("/filter-matches", GetFilterMatches);
 
@@ -90,6 +91,28 @@ public static class CookbookEndpoints
         catch (Exception ex)
         {
             logger.LogError(ex, "Error loading cookbook variations for food {FoodId}", id);
+            return Results.Problem("Failed to load recipe variations");
+        }
+    }
+
+    /// <summary>
+    /// GET /api/v1/cookbook/variations
+    /// Every recorded recipe variation of the tenant's catalog in one flat list
+    /// (FoodId on each row) — the data source of the cookbook's "All recipes" view.
+    /// Large (tens of MB for a full catalog); the Web side caches it per tenant.
+    /// </summary>
+    private static async Task<IResult> GetAllVariations(
+        IFoodCatalogService foodCatalogService,
+        ILogger<Program> logger)
+    {
+        try
+        {
+            var variations = await foodCatalogService.GetAllVariationsAsync();
+            return Results.Ok(variations);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error loading the bulk cookbook variation list");
             return Results.Problem("Failed to load recipe variations");
         }
     }

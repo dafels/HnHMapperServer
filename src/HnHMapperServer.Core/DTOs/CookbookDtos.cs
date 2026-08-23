@@ -183,10 +183,14 @@ public class FoodConditionMatchDto
 
 /// <summary>
 /// One recorded recipe variation of a food: a distinct ingredient combination and the
-/// values observed for it. Fetched lazily per food.
+/// values observed for it. Fetched lazily per food, or in bulk for the flat
+/// "all recipes" cookbook view.
 /// </summary>
 public class FoodVariantDto
 {
+    /// <summary>Id of the food this variation belongs to.</summary>
+    public int FoodId { get; set; }
+
     /// <summary>Canonical ingredient-combination key (used for variant favorites/panels).</summary>
     public string IngredientSignature { get; set; } = string.Empty;
 

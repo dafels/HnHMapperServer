@@ -5,11 +5,16 @@
 @using HnHMapperServer.Core.Cookbook
 @using HnHMapperServer.Core.DTOs
 @using HnHMapperServer.Web.Components.Shared
+@using HnHMapperServer.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
+@using VariantRow = HnHMapperServer.Web.Services.CookbookVariantRow
 @inject IHttpClientFactory HttpClientFactory
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
+@inject CookbookFlatCache FlatCache
+@inject AuthenticationStateProvider AuthStateProvider
 
 <PageTitle>Cookbook - HnH Mapper</PageTitle>
 
@@ -23,7 +28,14 @@
             @if (_rows.Count > 0)
             {
                 <MudText Typo="Typo.body2" Style="color: #2c3e50;">
-                    @FilteredCount of @_rows.Count foods
+                    @if (FlatActive)
+                    {
+                        @($"{FlatFiltered.Count:N0} of {TotalRecipeCount:N0} recipes")
+                    }
+                    else
+                    {
+                        @($"{FilteredCount} of {_rows.Count} foods")
+                    }
                 </MudText>
             }
         </MudStack>
@@ -36,7 +48,7 @@
                                   Immediate="true"
                                   DebounceInterval="200"
                                   Clearable="true"
-                                  Placeholder="Search by food or ingredient..."
+                                  Placeholder="Search by food or ingredient — pork, mushroom finds rows with both..."
                                   Adornment="Adornment.Start"
                                   AdornmentIcon="@Icons.Material.Filled.Search"
                                   Variant="Variant.Outlined"
@@ -56,6 +68,21 @@
                 </MudItem>
             </MudGrid>
             <div class="stat-chips">
+                <span class="chips-label">View</span>
+                <button type="button"
+                        class="stat-chip view @(_view == CookbookView.Foods ? "selected" : "")"
+                        title="One row per food — recipe variations grouped inside each food"
+                        @onclick="() => SetViewAsync(CookbookView.Foods)">
+                    Foods<span class="stat-chip-count">@_rows.Count</span>
+                </button>
+                <button type="button"
+                        class="stat-chip view @(_view == CookbookView.Recipes ? "selected" : "")"
+                        title="Ungrouped: every recorded recipe as its own row — search, filters and sorting apply per recipe"
+                        @onclick="() => SetViewAsync(CookbookView.Recipes)">
+                    Ungrouped<span class="stat-chip-count">@TotalRecipeCount.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)</span>
+                </button>
+            </div>
+            <div class="stat-chips">
                 <span class="chips-label">FEP</span>
                 @foreach (var stat in StatOrderList)
                 {
@@ -63,7 +90,7 @@
                     <button type="button"
                             class="stat-chip @(_selectedStat == stat ? "selected" : "") @(count == 0 ? "empty" : "")"
                             style="--chip-color: @StatColor(stat);"
-                            title="@(StatFullNames[stat]): @count foods"
+                            title="@(StatFullNames[stat]): @count @CountNoun"
                             @onclick="() => ToggleStat(stat)">
                         @stat<span class="stat-chip-count">@count</span>
                     </button>
@@ -85,7 +112,7 @@
                         var count = SatiationCount(satiation);
                         <button type="button"
                                 class="stat-chip satiation @(_selectedSatiation == satiation ? "selected" : "") @(count == 0 ? "empty" : "")"
-                                title="@satiation satiation: @count foods"
+                                title="@satiation satiation: @count @CountNoun"
                                 @onclick="() => ToggleSatiation(satiation)">
                             @satiation<span class="stat-chip-count">@count</span>
                         </button>
@@ -101,7 +128,7 @@
                         var count = PrepCount(prep);
                         <button type="button"
                                 class="stat-chip prep @(_selectedPrep == prep ? "selected" : "") @(count == 0 ? "empty" : "")"
-                                title="@prep foods: @count"
+                                title="@prep @CountNoun: @count"
                                 @onclick="() => TogglePrep(prep)">
                             @prep<span class="stat-chip-count">@count</span>
                         </button>
@@ -109,7 +136,7 @@
                     @{ var plainCount = PrepCount(PlainPrepKey); }
                     <button type="button"
                             class="stat-chip prep plain @(_selectedPrep == PlainPrepKey ? "selected" : "") @(plainCount == 0 ? "empty" : "")"
-                            title="Foods without a preparation prefix: @plainCount"
+                            title="@(FlatActive ? "Recipes of foods" : "Foods") without a preparation prefix: @plainCount"
                             @onclick="() => TogglePrep(PlainPrepKey)">
                         @PlainPrepKey<span class="stat-chip-count">@plainCount</span>
                     </button>
@@ -125,7 +152,7 @@
                         <button type="button"
                                 class="stat-chip world @(_selectedWorld == world ? "selected" : "") @(count == 0 ? "empty" : "")"
                                 disabled="@(count == 0 && _selectedWorld != world)"
-                                title="@($"{WorldLabel(world)} ({world}): {count} foods")"
+                                title="@($"{WorldLabel(world)} ({world}): {count} {CountNoun}")"
                                 @onclick="() => ToggleWorld(world)">
                             @WorldLabel(world)<span class="stat-chip-count">@count</span>
                         </button>
@@ -134,11 +161,94 @@
                     <button type="button"
                             class="stat-chip world untagged @(_selectedWorld == UntaggedWorldKey ? "selected" : "") @(untaggedCount == 0 ? "empty" : "")"
                             disabled="@(untaggedCount == 0 && _selectedWorld != UntaggedWorldKey)"
-                            title="Foods without world data (imports and pre-tagging uploads): @untaggedCount"
+                            title="@(FlatActive ? "Recipes" : "Foods") without world data (imports and pre-tagging uploads): @untaggedCount"
                             @onclick="() => ToggleWorld(UntaggedWorldKey)">
                         @UntaggedWorldKey<span class="stat-chip-count">@untaggedCount</span>
                     </button>
                 </div>
+            }
+            @if (_rows.Count > 0)
+            {
+                @* Larder facet (both views). The A–Z wall is the analysis made browsable: every
+                   recorded ingredient with its live count; picking one adds a removable tag to
+                   the Filters row, like every other facet. In the Foods view a food passes when
+                   ANY of its recipes does. The wall is built from the shared recipe rows —
+                   opening it loads them on demand. *@
+                <div class="stat-chips ingredient-row">
+                    <span class="chips-label">Ingredients</span>
+                    <button type="button"
+                            class="stat-chip wall-toggle @(_ingredientWallOpen ? "selected" : "")"
+                            title="Browse every recorded ingredient A–Z and click to pick — recipes must contain every pick"
+                            @onclick="ToggleIngredientWallAsync">
+                        @(_ingredientWallOpen ? "Hide ingredients" : "Browse ingredients")<span class="stat-chip-count">@(FlatRowsCurrent ? IngredientVocabulary.Count.ToString() : "…")</span>
+                    </button>
+                    @if (_selectedIngredients.Count > 0)
+                    {
+                        <button type="button"
+                                class="stat-chip only-toggle @(_ingredientsOnlyMode ? "selected" : "")"
+                                title="Larder mode: only recipes whose ENTIRE ingredient list is covered by your picks (recipes without recorded ingredients are hidden). Off: recipes must contain every pick, extras allowed."
+                                @onclick="ToggleIngredientsOnlyMode">
+                            Only these
+                        </button>
+                    }
+                </div>
+                @if (_ingredientWallOpen && !FlatRowsCurrent)
+                {
+                    <div class="ingredient-wall">
+                        @if (_flatLoadFailed)
+                        {
+                            <MudAlert Severity="Severity.Error">
+                                Failed to load the recipe data behind the ingredient list.
+                                <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="RetryFlatAsync">Retry</MudButton>
+                            </MudAlert>
+                        }
+                        else
+                        {
+                            <MudText Typo="Typo.body2" Class="detail-muted">Loading the recipe data behind the ingredient list&hellip;</MudText>
+                        }
+                    </div>
+                }
+                else if (_ingredientWallOpen)
+                {
+                    <div class="ingredient-wall">
+                        <MudTextField T="string"
+                                      @bind-Value="_ingredientWallFilter"
+                                      Immediate="true"
+                                      DebounceInterval="120"
+                                      Clearable="true"
+                                      Placeholder="Find ingredient..."
+                                      Adornment="Adornment.Start"
+                                      AdornmentIcon="@Icons.Material.Filled.Search"
+                                      Variant="Variant.Outlined"
+                                      Margin="Margin.Dense"
+                                      Class="wall-filter" />
+                        <div class="wall-groups">
+                            @foreach (var (letter, names) in IngredientWallGroups)
+                            {
+                                var visible = names.Where(WallNameVisible).ToList();
+                                if (visible.Count == 0)
+                                {
+                                    continue;
+                                }
+                                <div class="wall-group">
+                                    <span class="wall-letter">@letter</span>
+                                    @foreach (var name in visible)
+                                    {
+                                        var picked = _selectedIngredients.Contains(name);
+                                        var dead = IsDeadPick(name);
+                                        <button type="button"
+                                                class="stat-chip wall-chip @(picked ? "selected" : "") @(dead ? "empty" : "")"
+                                                disabled="@dead"
+                                                title="@WallChipTitle(name)"
+                                                @onclick="() => ToggleIngredient(name)">
+                                            @name<span class="stat-chip-count">@WallChipCountText(name)</span>
+                                        </button>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
             }
             @if (_rows.Any(IsNewFood))
             {
@@ -146,7 +256,7 @@
                     <span class="chips-label">Added</span>
                     <button type="button"
                             class="stat-chip newfoods @(_showNewOnly ? "selected" : "")"
-                            title="Foods discovered by players in the last 7 days — click to filter, newest first"
+                            title="@(FlatActive ? "Recipes of foods" : "Foods") discovered by players in the last 7 days — click to filter, newest first"
                             @onclick="() => _showNewOnly = !_showNewOnly">
                         New (7d)<span class="stat-chip-count">@NewChipCount</span>
                     </button>
@@ -250,6 +360,15 @@
                               title="Recently discovered foods (last 7 days) — click to clear"
                               @onclick="() => _showNewOnly = false">
                             New (7d)<span class="stat-chip-count">&times;</span>
+                        </span>
+                    }
+                    @foreach (var selectedIngredient in _selectedIngredients.OrderBy(n => n, StringComparer.OrdinalIgnoreCase))
+                    {
+                        <span class="stat-chip filter-chip"
+                              style="--chip-color: #e8ddc9;"
+                              title="@IngredientChipTitle(selectedIngredient)"
+                              @onclick="() => ToggleIngredient(selectedIngredient)">
+                            @selectedIngredient<span class="stat-chip-count">&times;</span>
                         </span>
                     }
                     @foreach (var condition in _allConditions)
@@ -458,6 +577,223 @@
                     (Admin Panel &rarr; Cookbook).
                 </MudAlert>
             }
+            else if (_view == CookbookView.Recipes)
+            {
+                if (!FlatRowsCurrent)
+                {
+                    if (_flatLoadFailed)
+                    {
+                        <MudAlert Severity="Severity.Error" Class="ma-2">
+                            Failed to load the recipe list.
+                            <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="RetryFlatAsync">Retry</MudButton>
+                        </MudAlert>
+                    }
+                    else
+                    {
+                        <div class="pa-4">
+                            <MudText Typo="Typo.body2" Class="mb-2 detail-muted">
+                                Loading all @TotalRecipeCount.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) recipes&hellip;
+                            </MudText>
+                            @for (var i = 0; i < 8; i++)
+                            {
+                                <MudSkeleton SkeletonType="SkeletonType.Rectangle" Height="42px" Class="mb-2" />
+                            }
+                        </div>
+                    }
+                }
+                else
+                {
+                    <MudTable T="FlatRow"
+                              @ref="_flatTable"
+                              Items="@FlatFiltered"
+                              Dense="true"
+                              Hover="true"
+                              Elevation="0"
+                              RowsPerPage="50"
+                              RowClassFunc="@FlatRowClass"
+                              Breakpoint="Breakpoint.Sm"
+                              Class="flat-table">
+                        <HeaderContent>
+                            <MudTh Style="width: 110px;"></MudTh>
+                            <MudTh Style="width: 44px;"></MudTh>
+                            <MudTh>
+                                <MudTableSortLabel T="FlatRow" SortBy="@(r => r.Food.BaseName + " " + (r.Food.Prep ?? " "))">Food</MudTableSortLabel>
+                            </MudTh>
+                            <MudTh>
+                                <MudTableSortLabel T="FlatRow" SortBy="@(r => r.V.RecipeText)">Recipe</MudTableSortLabel>
+                            </MudTh>
+                            <MudTh Style="text-align: right;">
+                                <MudTableSortLabel T="FlatRow" SortBy="@(r => (double)r.V.EffectiveEnergy)">Energy</MudTableSortLabel>
+                            </MudTh>
+                            <MudTh Style="text-align: right;">
+                                <MudTableSortLabel T="FlatRow" SortBy="@(r => (double)r.V.EffectiveHunger)">Hunger</MudTableSortLabel>
+                            </MudTh>
+                            @if (_showStatColumns)
+                            {
+                                foreach (var stat in StatOrderList)
+                                {
+                                    <MudTh Style="text-align: right;">
+                                        <MudTableSortLabel T="FlatRow" SortBy="@(r => (double)r.V.StatTotals.GetValueOrDefault(stat))">@stat</MudTableSortLabel>
+                                    </MudTh>
+                                }
+                            }
+                            else
+                            {
+                                <MudTh>FEPs</MudTh>
+                                if (_selectedStat != null)
+                                {
+                                    <MudTh Style="text-align: right;">
+                                        <MudTableSortLabel T="FlatRow" SortBy="@(r => (double)r.V.StatTotals.GetValueOrDefault(_selectedStat!))">@_selectedStat FEP</MudTableSortLabel>
+                                    </MudTh>
+                                }
+                            }
+                            <MudTh Style="text-align: right;">
+                                <MudTableSortLabel T="FlatRow" SortBy="@(r => (double)r.V.Total)">Total</MudTableSortLabel>
+                            </MudTh>
+                            <MudTh Style="text-align: right;">
+                                <MudTableSortLabel T="FlatRow" SortBy="@(r => (double)r.V.PerHunger)">FEP/Hunger</MudTableSortLabel>
+                            </MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd Class="py-0 variant-actions">
+                                <MudIconButton Icon="@(IsFavorite(context.Food.Food.Name, context.V.Variant.IngredientSignature) ? Icons.Material.Filled.Star : Icons.Material.Filled.StarBorder)"
+                                               Size="Size.Small"
+                                               Class="@(IsFavorite(context.Food.Food.Name, context.V.Variant.IngredientSignature) ? "star-on" : "star-off")"
+                                               OnClick="() => ToggleFavoriteAsync(context.Food.Food.Name, context.V.Variant.IngredientSignature)" />
+                                <span class="drag-grip" draggable="true"
+                                      title="Drag this recipe onto a panel"
+                                      @ondragstart="() => StartVariantDrag(context.Food.Food.Name, context.V.Variant.IngredientSignature)"
+                                      @ondragend="ClearDrag">
+                                    <MudIcon Icon="@Icons.Material.Filled.DragIndicator" Size="Size.Small" />
+                                </span>
+                                @AddToPanelMenu((context.Food.Food.Name, context.V.Variant.IngredientSignature))
+                                <MudIconButton Icon="@Icons.Material.Filled.ReadMore"
+                                               Size="Size.Small"
+                                               title="Food details (recipe, preparations, all variations)"
+                                               OnClick="() => ShowFoodDetailsAsync(context)" />
+                            </MudTd>
+                            <MudTd Class="py-1">
+                                <img class="food-icon"
+                                     src="@LocalIconSrc(context.Food.Food)"
+                                     onerror="@RemoteIconFallback(context.Food.Food)"
+                                     loading="lazy" alt="" />
+                            </MudTd>
+                            <MudTd>
+                                <span class="food-name">@context.Food.BaseName</span>
+                                @if (context.Food.Prep != null)
+                                {
+                                    <span class="prep-badge">@context.Food.Prep</span>
+                                }
+                                @if (IsNewFood(context.Food))
+                                {
+                                    <span class="new-badge"
+                                          title="Discovered by @context.Food.Food.ContributedByName on @context.Food.Food.ImportedAt.ToString("yyyy-MM-dd")">New</span>
+                                }
+                            </MudTd>
+                            <MudTd>
+                                @if (context.V.RecipeText.Length > 0)
+                                {
+                                    @context.V.RecipeText
+                                }
+                                else
+                                {
+                                    <span class="detail-muted" title="No recorded ingredient combination — headline values">—</span>
+                                }
+                                @if (context.V.Variant.TimesSeen > 1)
+                                {
+                                    <span class="variant-seen">&times;@context.V.Variant.TimesSeen</span>
+                                }
+                                @if (context.V.Variant.ContributorNames.Count > 0)
+                                {
+                                    <span class="contrib-name"
+                                          title="Uploaded by @string.Join(", ", context.V.Variant.ContributorNames)">
+                                        <MudIcon Icon="@Icons.Material.Filled.PersonAddAlt1" Size="Size.Small" />@context.V.Variant.ContributorNames[0]@(context.V.Variant.ContributorNames.Count > 1 ? $" +{context.V.Variant.ContributorNames.Count - 1}" : "")
+                                    </span>
+                                }
+                                @if (context.V.Variant.Worlds.Count > 0)
+                                {
+                                    <span class="world-tag"
+                                          title="Seen in: @string.Join(", ", context.V.Variant.Worlds.Select(w => $"{WorldLabel(w)} ({w})"))">
+                                        <MudIcon Icon="@Icons.Material.Filled.Public" Size="Size.Small" />@WorldLabel(context.V.Variant.Worlds[0])@(context.V.Variant.Worlds.Count > 1 ? $" +{context.V.Variant.Worlds.Count - 1}" : "")
+                                    </span>
+                                }
+                            </MudTd>
+                            <MudTd Style="text-align: right;">@context.V.EffectiveEnergy</MudTd>
+                            <MudTd Style="text-align: right;">@context.V.EffectiveHunger.ToString("0.##")</MudTd>
+                            @if (_showStatColumns)
+                            {
+                                foreach (var stat in StatOrderList)
+                                {
+                                    var statTotal = context.V.StatTotals.GetValueOrDefault(stat);
+                                    <MudTd Style="text-align: right;">
+                                        @if (statTotal > 0)
+                                        {
+                                            <span class="stat-value" style="--chip-color: @StatColor(stat);">
+                                                @ScaledFep(statTotal).ToString("0.##")
+                                            </span>
+                                        }
+                                    </MudTd>
+                                }
+                            }
+                            else
+                            {
+                                <MudTd>
+                                    <div class="fep-pills">
+                                        @foreach (var fep in context.V.EffectiveFeps)
+                                        {
+                                            <span class="fep-pill clickable"
+                                                  style="background: @StatColor(fep.Attribute, fep.Tier);"
+                                                  @attributes="FtAttrs(fep, context.V.Total, clickable: true)"
+                                                  @onclick="() => FilterByPill(fep)"
+                                                  @onclick:stopPropagation="true">
+                                                @fep.Attribute@(fep.Tier == 2 ? "+2" : "") @ScaledFep(fep.Value).ToString("0.##")
+                                            </span>
+                                        }
+                                    </div>
+                                </MudTd>
+                                if (_selectedStat != null)
+                                {
+                                    <MudTd Style="text-align: right;">
+                                        <span class="stat-value" style="--chip-color: @StatColor(_selectedStat!);">
+                                            @ScaledFep(context.V.StatTotals.GetValueOrDefault(_selectedStat!)).ToString("0.##")
+                                        </span>
+                                    </MudTd>
+                                }
+                            }
+                            <MudTd Style="text-align: right;">
+                                <button type="button" class="cell-filter-btn" title="Filter: total ≥ this"
+                                        @onclick="() => FilterByTotalValue(context.V.Total)"
+                                        @onclick:stopPropagation="true">
+                                    <strong>@ScaledFep(context.V.Total).ToString("0.#")</strong>
+                                </button>
+                            </MudTd>
+                            <MudTd Style="text-align: right;">
+                                @if (context.V.EffectiveHunger > 0)
+                                {
+                                    <button type="button" class="cell-filter-btn" title="Filter: FEP/hunger ≥ this"
+                                            @onclick="() => FilterByEffValue(context.V.PerHunger)"
+                                            @onclick:stopPropagation="true">
+                                        @ScaledFep(context.V.PerHunger).ToString("0.0#")
+                                    </button>
+                                }
+                                else
+                                {
+                                    <text>—</text>
+                                }
+                            </MudTd>
+                        </RowTemplate>
+                        <NoRecordsContent>
+                            <div class="no-results">
+                                <MudText Typo="Typo.body1">No recipes match your search.</MudText>
+                                <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="ClearFilters">Clear filters</MudButton>
+                            </div>
+                        </NoRecordsContent>
+                        <PagerContent>
+                            <MudTablePager PageSizeOptions="new[] { 25, 50, 100 }" />
+                        </PagerContent>
+                    </MudTable>
+                }
+            }
             else
             {
                 <MudTable T="FoodRow"
@@ -560,6 +896,13 @@
                                         <span class="variant-hint"
                                               title="Recipe variations matching the active filters">
                                             @conditionMatch.MatchingVariants of @shownVariantCount recipes
+                                        </span>
+                                    }
+                                    else if (_selectedIngredients.Count > 0 && FlatRowsCurrent)
+                                    {
+                                        <span class="variant-hint"
+                                              title="Recipe variations fitting the picked ingredients">
+                                            @IngredientFoodMatches.GetValueOrDefault(context.Food.Id) of @shownVariantCount recipes
                                         </span>
                                     }
                                     else
@@ -1036,18 +1379,14 @@
     /// <summary>World-chip key for foods with no world tags (label-as-key, like PlainPrepKey).</summary>
     private const string UntaggedWorldKey = "Untagged";
 
-    /// <summary>One variations-table row; Effective* mirrors <see cref="FoodRow"/>'s world logic.</summary>
-    private sealed record VariantRow(
-        FoodVariantDto Variant,
-        string RecipeText,
-        string SearchBlob,
-        decimal Total,
-        decimal PerHunger,
-        Dictionary<string, decimal> StatTotals,
-        Dictionary<string, decimal> StatTierTotals,
-        List<FoodFepDto> EffectiveFeps,
-        decimal EffectiveHunger,
-        int EffectiveEnergy);
+    // The variations-table row type is the shared CookbookVariantRow (aliased to
+    // VariantRow at the top of the file) so the flat "All recipes" view can share
+    // prebuilt rows across circuits via CookbookFlatCache.
+
+    /// <summary>One flat-view row: a recipe variation paired with its owning food's row.</summary>
+    private sealed record FlatRow(FoodRow Food, VariantRow V);
+
+    private enum CookbookView { Foods, Recipes }
 
     /// <summary>One entry of a wiki canonical recipe: "Edible Mushroom x2" → ("Edible Mushroom", "x2").</summary>
     private sealed record RecipePart(string Name, string? Qty, bool Optional);
@@ -1201,6 +1540,38 @@
     private List<string> _allPreps = new();
     private List<string> _allWorlds = new();
     private Dictionary<string, List<FoodRow>> _prepSiblings = new(StringComparer.Ordinal);
+    private Dictionary<int, FoodRow> _rowsById = new();
+
+    // ----- Flat "All recipes" view (every recorded variation as its own row) -----
+
+    private CookbookView _view = CookbookView.Foods;
+    private string? _tenantId;                              // TenantId claim — key of the shared flat-row cache
+    private IReadOnlyList<CookbookFlatEntry>? _flatEntries; // shared per-(tenant, world) row list from CookbookFlatCache
+    private string _flatWorldKey = string.Empty;            // world the entries were built for
+    private int _flatGen;                                   // bumped when entries or FoodRows change (memo buster)
+    private bool _flatLoading;
+    private bool _flatLoadFailed;
+    private MudTable<FlatRow>? _flatTable;
+    private int _panelFilterVersion;                        // bumped when the active panel's name set changes
+
+    // ----- Ingredient facet (flat view only): data-derived larder filter -----
+    // Selection semantics live in Core (IngredientFilter). Sets use OrdinalIgnoreCase
+    // per the kernel's contract. _ingredientFilterVersion is the FlatStateKey input —
+    // bump it in EVERY mutation path (the _panelFilterVersion discipline).
+
+    private readonly HashSet<string> _selectedIngredients = new(StringComparer.OrdinalIgnoreCase);
+    private bool _ingredientsOnlyMode;
+    private int _ingredientFilterVersion;
+    private List<KeyValuePair<string, int>> _ingredientVocab = new();
+    private Dictionary<string, int> _ingredientGlobalCounts = new(StringComparer.OrdinalIgnoreCase);
+    private int _ingredientVocabTotal;
+    private int _ingredientVocabGen = -1;                   // _flatGen the vocabulary was built for
+    private bool _ingredientWallOpen;
+    private string _ingredientWallFilter = string.Empty;
+    private List<(string Letter, List<string> Names)> _ingredientWallGroups = new();
+    private int _ingredientWallGen = -1;                    // vocabulary gen the groups were built for
+    private Dictionary<int, int> _ingredientFoodMatches = new();
+    private string? _ingredientFoodMatchesKey;
     private readonly HashSet<int> _expanded = new();
     private readonly Dictionary<int, List<VariantRow>> _variations = new();
     private readonly Dictionary<int, string> _variantFilters = new();
@@ -1375,11 +1746,17 @@
     private bool IsNewFood(FoodRow r) =>
         r.Food.ContributedByName != null && r.Food.ImportedAt >= _newCutoffUtc;
 
-    private int NewChipCount =>
-        CountBase(includeSatiation: true, includePrep: true, includeStat: true).Count(IsNewFood);
+    private int NewChipCount => FlatActive
+        ? FlatCounts.NewCount
+        : CountBase(includeSatiation: true, includePrep: true, includeStat: true).Count(IsNewFood);
 
     protected override async Task OnInitializedAsync()
     {
+        // TenantId claim = key of the cross-circuit flat-row cache. Same claim the API
+        // resolves the tenant from, so cached data can never cross tenants.
+        var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        _tenantId = authState.User.FindFirst("TenantId")?.Value;
+
         await Task.WhenAll(LoadCatalogAsync(), LoadPanelsAsync());
     }
 
@@ -1419,6 +1796,17 @@
             // One-shot: strip the query so F5 doesn't re-pulse. The chip keeps the filter.
             Navigation.NavigateTo("/cookbook", replace: true);
         }
+
+        // Shared recipe-row (re)load funnel: covers every path that outdates the entries —
+        // a world change while they are in use, the initial toggle racing a slow catalog
+        // load — for the flat view AND for the ingredient facet in the Foods view (open
+        // wall or active selection). Failed loads stop the loop until Retry resets.
+        var rowsNeeded = _view == CookbookView.Recipes || _ingredientWallOpen || _selectedIngredients.Count > 0;
+        if (rowsNeeded && !FlatRowsCurrent && !_flatLoading && !_flatLoadFailed)
+        {
+            await EnsureFlatRowsAsync();
+            StateHasChanged();
+        }
     }
 
     private async Task ApplyHighlightAsync(string csv, string? world)
@@ -1452,8 +1840,10 @@
             return;
         }
 
-        // A highlighted food must never be invisible: clear every facet that could hide
-        // it, then keep/pick a world bucket all the matches actually live in.
+        // A highlighted food must never be invisible: back to the grouped view (the
+        // digest targets foods), clear every facet that could hide it, then keep/pick
+        // a world bucket all the matches actually live in.
+        _view = CookbookView.Foods;
         Search = string.Empty;
         FilterText = string.Empty;
         _selectedStat = null;
@@ -1461,6 +1851,7 @@
         _selectedPrep = null;
         _conditionSortKey = null;
         _showNewOnly = false;
+        ClearIngredients();
         ClearFocus();
         ClearPanelFilter();
 
@@ -1580,6 +1971,8 @@
     {
         _rows = _foods.Select(BuildRow).ToList();
         _rowsByName = _rows.ToDictionary(r => r.Food.Name, StringComparer.Ordinal);
+        _rowsById = _rows.ToDictionary(r => r.Food.Id);
+        _flatGen++; // flat rows pair with FoodRows — force the memoized flat view to rebuild
 
         _prepSiblings = _rows
             .GroupBy(r => r.BaseName, StringComparer.Ordinal)
@@ -1623,36 +2016,24 @@
             feps, hunger, energy);
     }
 
-    private VariantRow BuildVariantRow(FoodVariantDto variant)
-    {
-        var worldValue = _selectedWorld != null && _selectedWorld != UntaggedWorldKey
-            ? variant.WorldValues.FirstOrDefault(w => w.Genus == _selectedWorld)
-            : null;
-        var feps = worldValue?.Feps ?? variant.Feps;
-        var hunger = worldValue?.Hunger ?? variant.Hunger;
-        var energy = worldValue?.Energy ?? variant.Energy;
+    /// <summary>Selected world as a genus hash for value lookups (null = no world / Untagged).</summary>
+    private string? EffectiveWorldGenus =>
+        _selectedWorld != null && _selectedWorld != UntaggedWorldKey ? _selectedWorld : null;
 
-        var text = string.Join(", ", variant.Ingredients.Select(i =>
-            i.Percentage != 100 ? $"{i.Name} {i.Percentage:0.#}%" : i.Name));
-        var total = feps.Sum(f => f.Value);
-        var statTotals = feps
-            .GroupBy(f => f.Attribute, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
-        var statTierTotals = feps
-            .GroupBy(f => f.Attribute.ToUpperInvariant() + f.Tier)
-            .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
-        return new VariantRow(
-            variant,
-            text,
-            text.ToLowerInvariant(),
-            total,
-            hunger > 0 ? total / hunger : 0m,
-            statTotals,
-            statTierTotals,
-            feps,
-            hunger,
-            energy);
-    }
+    private VariantRow BuildVariantRow(FoodVariantDto variant) =>
+        CookbookRows.Build(variant, EffectiveWorldGenus);
+
+    /// <summary>
+    /// Splits a search text into AND-ed terms on commas ("pork, mushroom" = rows matching
+    /// both) — the "what's in my larder" filter. Comma-free text stays one phrase, so
+    /// multi-word searches like "fairy mushroom" keep their exact-substring behavior.
+    /// </summary>
+    private static List<string> SearchTerms(string text) =>
+        string.IsNullOrWhiteSpace(text)
+            ? new List<string>()
+            : text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(t => t.ToLowerInvariant())
+                .ToList();
 
     /// <summary>Text search + FEP threshold conditions — the common base for Filtered and CountBase.</summary>
     private IEnumerable<FoodRow> BaseFiltered
@@ -1675,10 +2056,10 @@
 
             IEnumerable<FoodRow> rows = _rows;
 
-            if (!string.IsNullOrWhiteSpace(_residualSearch))
+            var terms = SearchTerms(_residualSearch);
+            if (terms.Count > 0)
             {
-                var term = _residualSearch.Trim().ToLowerInvariant();
-                rows = rows.Where(r => r.SearchBlob.Contains(term, StringComparison.Ordinal));
+                rows = rows.Where(r => terms.All(t => r.SearchBlob.Contains(t, StringComparison.Ordinal)));
             }
 
             if (_allConditions.Count > 0)
@@ -1689,6 +2070,15 @@
                 rows = serverMatches != null
                     ? rows.Where(r => serverMatches.ContainsKey(r.Food.Id))
                     : rows.Where(r => MatchesConditions(TargetOf(r)));
+            }
+
+            // Ingredient facet at food level: any recipe of the food passes the selection.
+            // Needs the shared recipe rows; until they arrive (OnAfterRenderAsync loads
+            // them whenever a selection exists) the facet is simply not applied yet.
+            if (_selectedIngredients.Count > 0 && FlatRowsCurrent)
+            {
+                var ingredientMatches = IngredientFoodMatches;
+                rows = rows.Where(r => ingredientMatches.ContainsKey(r.Food.Id));
             }
 
             return rows;
@@ -1754,6 +2144,611 @@
 
     private int FilteredCount => Filtered.Count();
 
+    // ----- Flat "All recipes" view: data plumbing + memoized pipeline -----
+    // ~50k rows make the grouped view's recompute-every-render LINQ style too expensive,
+    // so the filtered list and all chip counts are memoized per filter-state key and only
+    // rebuilt when an input actually changes. Row lists are shared across circuits via
+    // CookbookFlatCache; this page keeps references only.
+
+    private bool FlatActive => _view == CookbookView.Recipes && FlatRowsCurrent;
+
+    /// <summary>What the chip counts count in the active view (tooltips).</summary>
+    private string CountNoun => FlatActive ? "recipes" : "foods";
+
+    /// <summary>Entries exist and were built for the currently selected world.</summary>
+    private bool FlatRowsCurrent =>
+        _flatEntries != null && _flatWorldKey == (EffectiveWorldGenus ?? string.Empty);
+
+    /// <summary>Recipe-row universe (foods without recorded variations count as one row).</summary>
+    private int TotalRecipeCount => _rows.Sum(r => Math.Max(1, r.Food.VariantCount));
+
+    private async Task SetViewAsync(CookbookView view)
+    {
+        if (_view == view)
+        {
+            return;
+        }
+
+        _view = view;
+        if (view == CookbookView.Recipes && !FlatRowsCurrent)
+        {
+            await EnsureFlatRowsAsync();
+        }
+    }
+
+    private async Task EnsureFlatRowsAsync()
+    {
+        if (_flatLoading)
+        {
+            return;
+        }
+
+        _flatLoading = true;
+        _flatLoadFailed = false;
+        var world = EffectiveWorldGenus;
+        try
+        {
+            var rows = await FlatCache.GetRowsAsync(_tenantId ?? string.Empty, world, FetchAllVariationsAsync);
+            _flatEntries = rows;
+            _flatWorldKey = world ?? string.Empty;
+            _flatGen++;
+        }
+        catch (Exception)
+        {
+            _flatLoadFailed = true;
+            Snackbar.Add("Failed to load the recipe list", Severity.Error);
+        }
+        finally
+        {
+            _flatLoading = false;
+        }
+    }
+
+    private async Task RetryFlatAsync()
+    {
+        FlatCache.Invalidate(_tenantId ?? string.Empty);
+        await EnsureFlatRowsAsync();
+    }
+
+    private async Task<List<FoodVariantDto>> FetchAllVariationsAsync()
+    {
+        // APIUpload client: the response is tens of MB — the default API client's 10s
+        // resilience timeout would cancel (and retry!) the transfer.
+        var client = HttpClientFactory.CreateClient("APIUpload");
+        return await client.GetFromJsonAsync<List<FoodVariantDto>>("/api/v1/cookbook/variations")
+               ?? new List<FoodVariantDto>();
+    }
+
+    private string FlatRowClass(FlatRow row, int _) =>
+        _focusVariantKey != null && _focusVariantKey == FavKey(row.Food.Food.Name, row.V.Variant.IngredientSignature)
+            ? "variant-focused"
+            : string.Empty;
+
+    /// <summary>The flat row's escape hatch to full food details: grouped view, focused.</summary>
+    private async Task ShowFoodDetailsAsync(FlatRow row)
+    {
+        _view = CookbookView.Foods;
+        await FocusFoodAsync(row.Food.Food.Name, row.V.Variant.IngredientSignature);
+    }
+
+    private List<FlatRow>? _flatViewCache;
+    private string? _flatViewKey;
+    private FlatChipCounts? _flatCountsCache;
+    private string? _flatCountsKey;
+
+    /// <summary>Every input the flat pipeline reads — cache invalidation by comparison.</summary>
+    private string FlatStateKey() => string.Join("",
+        _flatGen, _search, _filterText, _quality,
+        _selectedStat, _selectedSatiation, _selectedPrep, _selectedWorld,
+        _activePanelId, _panelFilterVersion, _ingredientFilterVersion,
+        _showNewOnly ? "1" : "0",
+        _focusFoodName, _focusVariantKey,
+        _highlightIds.Count,
+        _conditionSortKey, _conditionSortDesc ? "1" : "0");
+
+    private List<FlatRow> FlatFiltered
+    {
+        get
+        {
+            var key = FlatStateKey();
+            if (_flatViewCache == null || _flatViewKey != key)
+            {
+                _flatViewCache = ComputeFlatFiltered();
+                _flatViewKey = key;
+            }
+
+            return _flatViewCache;
+        }
+    }
+
+    /// <summary>
+    /// The full flat universe: one row per recorded variation, paired with its FoodRow.
+    /// Foods missing from the (possibly slightly older) bulk list get a synthetic row
+    /// from their canonical values, so nothing the grouped view shows can vanish here.
+    /// </summary>
+    private IEnumerable<FlatRow> AllFlatRows()
+    {
+        if (_flatEntries == null)
+        {
+            yield break;
+        }
+
+        var seenFoods = new HashSet<int>();
+        foreach (var entry in _flatEntries)
+        {
+            if (_rowsById.TryGetValue(entry.FoodId, out var food))
+            {
+                seenFoods.Add(entry.FoodId);
+                yield return new FlatRow(food, entry.Row);
+            }
+        }
+
+        foreach (var row in _rows)
+        {
+            if (!seenFoods.Contains(row.Food.Id))
+            {
+                yield return new FlatRow(row, CookbookRows.BuildFromFood(row.Food, EffectiveWorldGenus));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Base + panel filter — shared by the view pipeline and the chip counts (which then
+    /// apply every facet except their own row, mirroring the grouped CountBase semantics).
+    /// A focused food skips search/conditions like the grouped BaseFiltered does.
+    /// </summary>
+    private IEnumerable<FlatRow> FlatCountCore()
+    {
+        IEnumerable<FlatRow> rows = AllFlatRows();
+
+        if (_highlightIds.Count > 0)
+        {
+            rows = rows.Where(r => _highlightIds.Contains(r.Food.Food.Id));
+        }
+        else if (_focusFoodName != null)
+        {
+            rows = rows.Where(r => r.Food.Food.Name == _focusFoodName);
+        }
+        else
+        {
+            var terms = SearchTerms(_residualSearch);
+            if (terms.Count > 0)
+            {
+                // Every term must match somewhere on the row — the food's name/recipe
+                // blob or this recipe's own ingredient list ("pork, mushroom" = both).
+                rows = rows.Where(r => terms.All(t =>
+                    r.Food.SearchBlob.Contains(t, StringComparison.Ordinal)
+                    || r.V.SearchBlob.Contains(t, StringComparison.Ordinal)));
+            }
+
+            if (_allConditions.Count > 0)
+            {
+                // Exact per-recipe evaluation — no server round trip needed: unlike the
+                // grouped view, every variation is local here.
+                rows = rows.Where(r => MatchesConditions(TargetOf(r.V)));
+            }
+        }
+
+        if (_activePanelNames != null)
+        {
+            rows = rows.Where(r => _activePanelNames.Contains(r.Food.Food.Name));
+        }
+
+        return rows;
+    }
+
+    private List<FlatRow> ComputeFlatFiltered()
+    {
+        var rows = FlatCountCore();
+
+        if (_selectedSatiation != null)
+        {
+            rows = rows.Where(r => r.Food.Food.SatiationGroups.Contains(_selectedSatiation));
+        }
+
+        if (_selectedPrep != null)
+        {
+            rows = _selectedPrep == PlainPrepKey
+                ? rows.Where(r => r.Food.Prep == null)
+                : rows.Where(r => r.Food.Prep == _selectedPrep);
+        }
+
+        if (_selectedWorld != null)
+        {
+            rows = rows.Where(r => WorldMatches(r.V.Variant.Worlds, _selectedWorld));
+        }
+
+        if (_selectedIngredients.Count > 0)
+        {
+            rows = rows.Where(r =>
+                IngredientFilter.Matches(r.V.Variant.Ingredients, _selectedIngredients, _ingredientsOnlyMode));
+        }
+
+        var ordered = false;
+        if (_showNewOnly)
+        {
+            rows = rows.Where(r => IsNewFood(r.Food)).OrderByDescending(r => r.Food.Food.ImportedAt);
+            ordered = true;
+        }
+
+        if (_selectedStat != null)
+        {
+            rows = rows
+                .Where(r => r.V.StatTotals.ContainsKey(_selectedStat))
+                .OrderByDescending(r => r.V.StatTotals[_selectedStat]);
+            ordered = true;
+        }
+
+        if (_conditionSortKey != null)
+        {
+            var sortCondition = _allConditions.FirstOrDefault(c => SortKeyOf(c) == _conditionSortKey);
+            if (sortCondition != null)
+            {
+                rows = _conditionSortDesc
+                    ? rows.OrderByDescending(r => ConditionValue(TargetOf(r.V), sortCondition))
+                    : rows.OrderBy(r => ConditionValue(TargetOf(r.V), sortCondition));
+                ordered = true;
+            }
+        }
+
+        if (!ordered)
+        {
+            // Default order: best recipe first — the reason to open this view.
+            rows = rows.OrderByDescending(r => r.V.Total);
+        }
+
+        // A focused variant pins to the front; the stable sort keeps the rest ordered.
+        if (_focusFoodName != null && _focusVariantKey != null)
+        {
+            rows = rows.OrderByDescending(r =>
+                FavKey(r.Food.Food.Name, r.V.Variant.IngredientSignature) == _focusVariantKey);
+        }
+
+        return rows.ToList();
+    }
+
+    private sealed record FlatChipCounts(
+        Dictionary<string, int> Stats,
+        Dictionary<string, int> Satiations,
+        Dictionary<string, int> Preps,
+        int PlainPrep,
+        Dictionary<string, int> Worlds,
+        int Untagged,
+        int NewCount,
+        Dictionary<string, int> Ingredients,
+        int IngredientFullMatch);
+
+    private FlatChipCounts FlatCounts
+    {
+        get
+        {
+            var key = FlatStateKey();
+            if (_flatCountsCache == null || _flatCountsKey != key)
+            {
+                _flatCountsCache = ComputeFlatCounts();
+                _flatCountsKey = key;
+            }
+
+            return _flatCountsCache;
+        }
+    }
+
+    /// <summary>
+    /// All chip counts in one pass. Each family sees every filter except its own row
+    /// (grouped CountBase semantics), so sibling chips show what selecting them yields.
+    /// </summary>
+    private FlatChipCounts ComputeFlatCounts()
+    {
+        var stats = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var satiations = new Dictionary<string, int>(StringComparer.Ordinal);
+        var preps = new Dictionary<string, int>(StringComparer.Ordinal);
+        var worlds = new Dictionary<string, int>(StringComparer.Ordinal);
+        var ingredients = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var plainPrep = 0;
+        var untagged = 0;
+        var newCount = 0;
+        var ingredientFullMatch = 0;
+        var ingredientsActive = _selectedIngredients.Count > 0;
+
+        foreach (var r in FlatCountCore())
+        {
+            var satOk = _selectedSatiation == null || r.Food.Food.SatiationGroups.Contains(_selectedSatiation);
+            var prepOk = _selectedPrep == null
+                         || (_selectedPrep == PlainPrepKey ? r.Food.Prep == null : r.Food.Prep == _selectedPrep);
+            var statOk = _selectedStat == null || r.V.StatTotals.ContainsKey(_selectedStat);
+            var worldOk = _selectedWorld == null || WorldMatches(r.V.Variant.Worlds, _selectedWorld);
+            var ingScan = ingredientsActive
+                ? IngredientFilter.Scan(r.V.Variant.Ingredients, _selectedIngredients)
+                : default;
+            var ingOk = !ingredientsActive
+                        || (_ingredientsOnlyMode
+                            ? r.V.Variant.Ingredients.Count > 0 && ingScan.Missing == 0
+                            : ingScan.Hits == _selectedIngredients.Count);
+
+            if (satOk && prepOk && worldOk && ingOk)
+            {
+                foreach (var stat in r.V.StatTotals.Keys)
+                {
+                    stats[stat] = stats.GetValueOrDefault(stat) + 1;
+                }
+            }
+
+            if (prepOk && statOk && worldOk && ingOk)
+            {
+                foreach (var satiation in r.Food.Food.SatiationGroups)
+                {
+                    satiations[satiation] = satiations.GetValueOrDefault(satiation) + 1;
+                }
+            }
+
+            if (satOk && statOk && worldOk && ingOk)
+            {
+                if (r.Food.Prep == null)
+                {
+                    plainPrep++;
+                }
+                else
+                {
+                    preps[r.Food.Prep] = preps.GetValueOrDefault(r.Food.Prep) + 1;
+                }
+            }
+
+            if (satOk && prepOk && statOk && ingOk)
+            {
+                if (r.V.Variant.Worlds.Count == 0)
+                {
+                    untagged++;
+                }
+                else
+                {
+                    foreach (var world in r.V.Variant.Worlds)
+                    {
+                        worlds[world] = worlds.GetValueOrDefault(world) + 1;
+                    }
+                }
+            }
+
+            if (satOk && prepOk && statOk && worldOk && ingOk && IsNewFood(r.Food))
+            {
+                newCount++;
+            }
+
+            // Ingredient family: all OTHER families applied, its own selection handled
+            // per mode with "add-one" semantics — a name's count is what the result
+            // becomes if you pick it next. "Contains all" (AND): count names of recipes
+            // already passing the selection, i.e. co-occurrence with the picks (a picked
+            // name therefore shows the current result count). "Only these": near-miss
+            // counting — a fully-covered recipe keeps matching whatever gets added
+            // (shared IngredientFullMatch); a recipe missing exactly ONE name is
+            // unlocked by adding that name (its per-name count).
+            if (satOk && prepOk && statOk && worldOk)
+            {
+                if (!_ingredientsOnlyMode || !ingredientsActive)
+                {
+                    if (ingOk)
+                    {
+                        IngredientFilter.CountDistinctNames(r.V.Variant.Ingredients, ingredients);
+                    }
+                }
+                else if (r.V.Variant.Ingredients.Count > 0)
+                {
+                    if (ingScan.Missing == 0)
+                    {
+                        ingredientFullMatch++;
+                    }
+                    else if (ingScan.SoleMissing != null)
+                    {
+                        ingredients[ingScan.SoleMissing] = ingredients.GetValueOrDefault(ingScan.SoleMissing) + 1;
+                    }
+                }
+            }
+        }
+
+        return new FlatChipCounts(stats, satiations, preps, plainPrep, worlds, untagged, newCount,
+            ingredients, ingredientFullMatch);
+    }
+
+    // ----- Ingredient facet: vocabulary, mutations, picker handlers -----
+
+    /// <summary>
+    /// Frequency-ranked ingredient vocabulary of the current flat universe (the data
+    /// analysis the picker presents), rebuilt when the flat rows change. Derived from
+    /// AllFlatRows() so synthetic rows are included — same universe the filter sees.
+    /// </summary>
+    private List<KeyValuePair<string, int>> IngredientVocabulary
+    {
+        get
+        {
+            if (_ingredientVocabGen != _flatGen)
+            {
+                var recipeLists = AllFlatRows().Select(r => r.V.Variant.Ingredients).ToList();
+                _ingredientVocab = IngredientFilter.BuildVocabulary(recipeLists);
+                _ingredientGlobalCounts = _ingredientVocab
+                    .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+                _ingredientVocabTotal = recipeLists.Count;
+                _ingredientVocabGen = _flatGen;
+            }
+
+            return _ingredientVocab;
+        }
+    }
+
+    private void ToggleIngredient(string name)
+    {
+        if (!_selectedIngredients.Remove(name))
+        {
+            _selectedIngredients.Add(name);
+        }
+
+        if (_selectedIngredients.Count == 0)
+        {
+            _ingredientsOnlyMode = false; // strict mode over nothing is meaningless
+        }
+
+        _ingredientFilterVersion++;
+    }
+
+    private void ClearIngredients()
+    {
+        if (_selectedIngredients.Count == 0 && !_ingredientsOnlyMode)
+        {
+            return;
+        }
+
+        _selectedIngredients.Clear();
+        _ingredientsOnlyMode = false;
+        _ingredientFilterVersion++;
+    }
+
+    private void ToggleIngredientsOnlyMode()
+    {
+        _ingredientsOnlyMode = !_ingredientsOnlyMode;
+        _ingredientFilterVersion++;
+    }
+
+    // ----- A–Z ingredient wall -----
+
+    /// <summary>The vocabulary as alphabetical letter groups (memoized with the vocabulary).</summary>
+    private List<(string Letter, List<string> Names)> IngredientWallGroups
+    {
+        get
+        {
+            var vocab = IngredientVocabulary; // also refreshes _ingredientVocabGen
+            if (_ingredientWallGen != _ingredientVocabGen)
+            {
+                _ingredientWallGroups = vocab
+                    .Select(kv => kv.Key)
+                    .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                    .GroupBy(n => char.IsLetter(n[0]) ? char.ToUpperInvariant(n[0]).ToString() : "#")
+                    .Select(g => (g.Key, g.ToList()))
+                    .ToList();
+                _ingredientWallGen = _ingredientVocabGen;
+            }
+
+            return _ingredientWallGroups;
+        }
+    }
+
+    private async Task ToggleIngredientWallAsync()
+    {
+        _ingredientWallOpen = !_ingredientWallOpen;
+        if (_ingredientWallOpen && !FlatRowsCurrent)
+        {
+            await EnsureFlatRowsAsync();
+        }
+    }
+
+    /// <summary>
+    /// Foods view: food id → number of its recorded recipes (within the selected world
+    /// bucket, like WorldVariantCount) passing the ingredient selection — same kernel
+    /// and modes as the Ungrouped view. Membership = "at least one recipe fits"; the
+    /// count feeds the "N of M recipes" hint. Computed over the shared recipe rows,
+    /// memoized per (rows generation, selection); the world is folded into the rows
+    /// generation (RebuildRows bumps it).
+    /// </summary>
+    private Dictionary<int, int> IngredientFoodMatches
+    {
+        get
+        {
+            var key = _flatGen + ":" + _ingredientFilterVersion;
+            if (_ingredientFoodMatchesKey != key)
+            {
+                var counts = new Dictionary<int, int>();
+                if (_selectedIngredients.Count > 0)
+                {
+                    foreach (var r in AllFlatRows())
+                    {
+                        if ((_selectedWorld == null || WorldMatches(r.V.Variant.Worlds, _selectedWorld))
+                            && IngredientFilter.Matches(r.V.Variant.Ingredients, _selectedIngredients, _ingredientsOnlyMode))
+                        {
+                            counts[r.Food.Food.Id] = counts.GetValueOrDefault(r.Food.Food.Id) + 1;
+                        }
+                    }
+                }
+
+                _ingredientFoodMatches = counts;
+                _ingredientFoodMatchesKey = key;
+            }
+
+            return _ingredientFoodMatches;
+        }
+    }
+
+    private bool WallNameVisible(string name) =>
+        string.IsNullOrWhiteSpace(_ingredientWallFilter)
+        || name.Contains(_ingredientWallFilter.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// "Contains all" with picks active: a name that combines with nothing would empty
+    /// the result, so its chip is rendered dead. Strict mode never disables — a
+    /// zero-unlock name can still enable combinations once more is picked.
+    /// </summary>
+    private bool IsDeadPick(string name) =>
+        !_ingredientsOnlyMode
+        && _selectedIngredients.Count > 0
+        && !_selectedIngredients.Contains(name)
+        && IngredientChipCount(name) == 0;
+
+    /// <summary>Wall chip pill: overall count with no picks; live add-one count with picks ("+N unlock" in strict mode).</summary>
+    private string WallChipCountText(string name)
+    {
+        if (_selectedIngredients.Count == 0)
+        {
+            return _ingredientGlobalCounts.GetValueOrDefault(name).ToString("N0");
+        }
+
+        var live = IngredientChipCount(name);
+        return _ingredientsOnlyMode && !_selectedIngredients.Contains(name)
+            ? "+" + (live - FlatCounts.IngredientFullMatch).ToString("N0")
+            : live.ToString("N0");
+    }
+
+    private string WallChipTitle(string name)
+    {
+        var global = _ingredientGlobalCounts.GetValueOrDefault(name);
+        var overall = $"in {global:N0} of {_ingredientVocabTotal:N0} recipes overall ({IngredientShareText(global)})";
+        if (_selectedIngredients.Contains(name))
+        {
+            return $"{name} — picked · {overall}. Click to remove.";
+        }
+
+        if (_selectedIngredients.Count == 0)
+        {
+            return $"{name} — {overall}. Click to add.";
+        }
+
+        var live = IngredientChipCount(name);
+        return _ingredientsOnlyMode
+            ? $"{name} — unlocks {live - FlatCounts.IngredientFullMatch:N0} more recipes · {overall}. Click to add."
+            : $"{name} — {live:N0} recipes contain all your picks plus this · {overall}. Click to add.";
+    }
+
+    /// <summary>
+    /// Live add-one count for a name. "Contains all": recipes passing the current
+    /// selection that also contain it (a picked name = the current result count).
+    /// "Only these": near-miss semantics — a picked name's own per-name count is
+    /// provably 0 (it can't be missing), so it shows IngredientFullMatch = the current
+    /// result count; an unpicked name shows the recipes unlocked by adding it.
+    /// </summary>
+    private int IngredientChipCount(string name) =>
+        FlatCounts.Ingredients.GetValueOrDefault(name)
+        + (_ingredientsOnlyMode && _selectedIngredients.Count > 0 ? FlatCounts.IngredientFullMatch : 0);
+
+    private string IngredientChipTitle(string name)
+    {
+        var count = _ingredientGlobalCounts.GetValueOrDefault(name);
+        var live = IngredientChipCount(name);
+        var liveText = _ingredientsOnlyMode
+            ? $"{live:N0} recipes craftable from your picks"
+            : $"{live:N0} recipes contain all your picks";
+        return $"Ingredient: {name} — {liveText} · in {count:N0} of {_ingredientVocabTotal:N0} recipes overall ({IngredientShareText(count)}). Click to remove.";
+    }
+
+    private string IngredientShareText(int count) =>
+        _ingredientVocabTotal > 0
+            ? (100.0 * count / _ingredientVocabTotal).ToString("0.#") + "%"
+            : "0%";
+
     /// <summary>
     /// The set a chip row's counts are computed over: everything active (search, conditions,
     /// panel, other facet rows) EXCEPT the chip's own row — so sibling chips show what selecting
@@ -1793,12 +2788,14 @@
         return rows;
     }
 
-    private int StatCount(string stat) =>
-        CountBase(includeSatiation: true, includePrep: true, includeStat: false)
+    private int StatCount(string stat) => FlatActive
+        ? FlatCounts.Stats.GetValueOrDefault(stat)
+        : CountBase(includeSatiation: true, includePrep: true, includeStat: false)
             .Count(r => r.StatTotals.ContainsKey(stat));
 
-    private int SatiationCount(string satiation) =>
-        CountBase(includeSatiation: false, includePrep: true, includeStat: true)
+    private int SatiationCount(string satiation) => FlatActive
+        ? FlatCounts.Satiations.GetValueOrDefault(satiation)
+        : CountBase(includeSatiation: false, includePrep: true, includeStat: true)
             .Count(r => r.Food.SatiationGroups.Contains(satiation));
 
     private void ToggleStat(string stat)
@@ -1811,8 +2808,9 @@
         _selectedSatiation = _selectedSatiation == satiation ? null : satiation;
     }
 
-    private int PrepCount(string prep) =>
-        prep == PlainPrepKey
+    private int PrepCount(string prep) => FlatActive
+        ? (prep == PlainPrepKey ? FlatCounts.PlainPrep : FlatCounts.Preps.GetValueOrDefault(prep))
+        : prep == PlainPrepKey
             ? CountBase(includeSatiation: true, includePrep: false, includeStat: true).Count(r => r.Prep == null)
             : CountBase(includeSatiation: true, includePrep: false, includeStat: true).Count(r => r.Prep == prep);
 
@@ -1821,8 +2819,9 @@
         _selectedPrep = _selectedPrep == prep ? null : prep;
     }
 
-    private int WorldCount(string world) =>
-        CountBase(includeSatiation: true, includePrep: true, includeStat: true, includeWorld: false)
+    private int WorldCount(string world) => FlatActive
+        ? (world == UntaggedWorldKey ? FlatCounts.Untagged : FlatCounts.Worlds.GetValueOrDefault(world))
+        : CountBase(includeSatiation: true, includePrep: true, includeStat: true, includeWorld: false)
             .Count(r => WorldMatches(r, world));
 
     private void ToggleWorld(string world) => SetWorld(_selectedWorld == world ? null : world);
@@ -1950,11 +2949,10 @@
 
         IEnumerable<VariantRow> result = rows;
 
-        var filter = GetVariantFilter(foodId);
-        if (!focusedHere && !string.IsNullOrWhiteSpace(filter))
+        var filterTerms = SearchTerms(GetVariantFilter(foodId));
+        if (!focusedHere && filterTerms.Count > 0)
         {
-            var term = filter.Trim().ToLowerInvariant();
-            result = result.Where(r => r.SearchBlob.Contains(term, StringComparison.Ordinal));
+            result = result.Where(r => filterTerms.All(t => r.SearchBlob.Contains(t, StringComparison.Ordinal)));
         }
 
         // Threshold conditions apply per variation too (skipped while a focused
@@ -1962,6 +2960,13 @@
         if (!focusedHere && _allConditions.Count > 0)
         {
             result = result.Where(r => MatchesConditions(TargetOf(r)));
+        }
+
+        // So does the ingredient selection — the expanded table shows the recipes that fit.
+        if (!focusedHere && _selectedIngredients.Count > 0)
+        {
+            result = result.Where(r =>
+                IngredientFilter.Matches(r.Variant.Ingredients, _selectedIngredients, _ingredientsOnlyMode));
         }
 
         // The world facet applies per variation with the same bucket semantics
@@ -2002,6 +3007,7 @@
         _selectedPrep = null;
         _showNewOnly = false;
         _highlightIds.Clear();
+        ClearIngredients();
         SetWorld(null);
         _conditionSortKey = null;
         ClearFocus();
@@ -2086,14 +3092,15 @@
         FilterText = string.Empty;
     }
 
-    /// <summary>Chips shown in the Filters row: facet selections + threshold conditions.</summary>
+    /// <summary>Chips shown in the Filters row: facet selections, ingredient tags + threshold conditions.</summary>
     private int ActiveFilterChipCount =>
         _allConditions.Count
         + (_selectedStat != null ? 1 : 0)
         + (_selectedSatiation != null ? 1 : 0)
         + (_selectedPrep != null ? 1 : 0)
         + (_selectedWorld != null ? 1 : 0)
-        + (_showNewOnly ? 1 : 0);
+        + (_showNewOnly ? 1 : 0)
+        + _selectedIngredients.Count;
 
     /// <summary>The Filters row's Clear chip: drops facet selections and conditions, keeps text search.</summary>
     private void ClearActiveFilters()
@@ -2102,6 +3109,7 @@
         _selectedSatiation = null;
         _selectedPrep = null;
         _showNewOnly = false;
+        ClearIngredients();
         SetWorld(null);
         ClearConditions();
     }
@@ -2173,14 +3181,18 @@
             + Math.Round(ScaledFep(fep.Value), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
             toggle: false);
 
-    private void FilterByTotal(FoodRow r) =>
+    private void FilterByTotal(FoodRow r) => FilterByTotalValue(r.TotalFep);
+
+    private void FilterByTotalValue(decimal total) =>
         ApplyToolExpression("total>="
-            + Math.Round(ScaledFep(r.TotalFep), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+            + Math.Round(ScaledFep(total), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
             toggle: false);
 
-    private void FilterByEff(FoodRow r) =>
+    private void FilterByEff(FoodRow r) => FilterByEffValue(r.FepPerHunger);
+
+    private void FilterByEffValue(decimal perHunger) =>
         ApplyToolExpression("eff>="
-            + Math.Round(ScaledFep(r.FepPerHunger), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+            + Math.Round(ScaledFep(perHunger), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
             toggle: false);
 
     private static bool SameShape(FepFilterCondition a, FepFilterCondition b) =>
@@ -2301,6 +3313,7 @@
         if (_activePanelId == updated.Id)
         {
             _activePanelNames = updated.Items.Select(i => i.FoodName).ToHashSet(StringComparer.Ordinal);
+            _panelFilterVersion++;
         }
     }
 
@@ -2357,26 +3370,42 @@
             : $"{item.FoodName}{suffix} · click to view";
     }
 
-    /// <summary>Chip click: focus the food in the master table with full details, like a search.</summary>
+    /// <summary>Chip click: focus the food in whichever view is active, like a search.</summary>
     private async Task FocusItemAsync(FoodPanelItemDto item)
     {
-        if (!_rowsByName.TryGetValue(item.FoodName, out var row))
+        if (!_rowsByName.ContainsKey(item.FoodName))
         {
             Snackbar.Add($"{item.FoodName} is not in the catalog right now", Severity.Info);
             return;
         }
 
-        _focusFoodName = item.FoodName;
+        await FocusFoodAsync(item.FoodName, item.IngredientSignature);
+    }
+
+    /// <summary>
+    /// Shared focus routine: in the grouped view the food expands with the pinned recipe
+    /// on top of its variations table; in the flat view the table filters to the food's
+    /// rows with the pinned recipe first.
+    /// </summary>
+    private async Task FocusFoodAsync(string foodName, string signature)
+    {
+        if (!_rowsByName.TryGetValue(foodName, out var row))
+        {
+            return;
+        }
+
+        _focusFoodName = foodName;
         _expanded.Add(row.Food.Id);
         _variantFilters.Remove(row.Food.Id);
-        _focusVariantKey = item.IngredientSignature.Length > 0
-            ? FavKey(item.FoodName, item.IngredientSignature)
+        _focusVariantKey = signature.Length > 0
+            ? FavKey(foodName, signature)
             : null;
 
         _masterTable?.NavigateTo(0);
+        _flatTable?.NavigateTo(0);
 
         // Load variations for the pinned recipe even when the food only has one.
-        if ((row.Food.VariantCount > 1 || item.IngredientSignature.Length > 0)
+        if ((row.Food.VariantCount > 1 || signature.Length > 0)
             && !_variations.ContainsKey(row.Food.Id))
         {
             await LoadVariationsAsync(row.Food.Id);
@@ -2783,12 +3812,14 @@
 
         _activePanelId = panel.Id;
         _activePanelNames = panel.Items.Select(i => i.FoodName).ToHashSet(StringComparer.Ordinal);
+        _panelFilterVersion++;
     }
 
     private void ClearPanelFilter()
     {
         _activePanelId = null;
         _activePanelNames = null;
+        _panelFilterVersion++;
     }
 
     private static async Task<string> ReadErrorAsync(HttpResponseMessage response)
