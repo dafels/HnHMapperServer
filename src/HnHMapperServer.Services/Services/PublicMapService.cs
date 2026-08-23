@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using HnHMapperServer.Core.DTOs;
+using HnHMapperServer.Core.PublicMaps;
 using HnHMapperServer.Infrastructure.Data;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
@@ -358,33 +359,8 @@ public partial class PublicMapService : IPublicMapService
         };
     }
 
-    public string GenerateSlug(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            return "public-map";
-
-        // Convert to lowercase
-        var slug = name.ToLowerInvariant();
-
-        // Replace spaces and special characters with hyphens
-        slug = SlugInvalidChars().Replace(slug, "-");
-
-        // Remove multiple consecutive hyphens
-        slug = SlugMultipleHyphens().Replace(slug, "-");
-
-        // Trim hyphens from start and end
-        slug = slug.Trim('-');
-
-        // Ensure minimum length
-        if (slug.Length < 3)
-            slug = $"map-{slug}";
-
-        // Limit length
-        if (slug.Length > 50)
-            slug = slug[..50].TrimEnd('-');
-
-        return slug;
-    }
+    /// <summary>Shared with the create dialog's live preview — see PublicMapSlug.</summary>
+    public string GenerateSlug(string name) => PublicMapSlug.Generate(name);
 
     public async Task<bool> IsSlugAvailableAsync(string slug)
     {
@@ -415,12 +391,6 @@ public partial class PublicMapService : IPublicMapService
             Sources = sources
         };
     }
-
-    [GeneratedRegex(@"[^a-z0-9\-]")]
-    private static partial Regex SlugInvalidChars();
-
-    [GeneratedRegex(@"-+")]
-    private static partial Regex SlugMultipleHyphens();
 
     // ========================================
     // HMap Source Management for Public Maps

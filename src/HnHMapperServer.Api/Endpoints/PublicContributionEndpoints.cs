@@ -9,11 +9,12 @@ namespace HnHMapperServer.Api.Endpoints;
 /// Public contribution endpoints - anonymous .hmap file uploads
 /// Files are stored for manual processing by administrators
 /// </summary>
-public static class PublicContributionEndpoints
+public static partial class PublicContributionEndpoints
 {
     private const int MaxFileSizeBytes = 300 * 1024 * 1024; // 300 MB
     private const string HmapSignature = "Haven Mapfile 1";
-    private static readonly Regex SafeFilenameRegex = new(@"[^a-zA-Z0-9\-_\.]", RegexOptions.Compiled);
+    [GeneratedRegex(@"[^a-zA-Z0-9\-_\.]")]
+    private static partial Regex SafeFilenameRegex();
 
     public static void MapPublicContributionEndpoints(this IEndpointRouteBuilder app)
     {
@@ -203,7 +204,7 @@ public static class PublicContributionEndpoints
         fileName = Path.GetFileName(fileName);
 
         // Replace unsafe characters
-        var sanitized = SafeFilenameRegex.Replace(fileName, "_");
+        var sanitized = SafeFilenameRegex().Replace(fileName, "_");
 
         // Limit length
         if (sanitized.Length > 50)

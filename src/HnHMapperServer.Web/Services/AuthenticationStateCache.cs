@@ -11,7 +11,7 @@ namespace HnHMapperServer.Web.Services;
 /// </summary>
 public class AuthenticationStateCache
 {
-    private readonly object _lock = new();
+    private readonly System.Threading.Lock _lock = new();
     private string? _cookieValue;
     private ClaimsPrincipal? _user;
     private DateTime _lastUpdated;

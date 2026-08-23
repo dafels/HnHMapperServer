@@ -21,7 +21,7 @@ namespace HnHMapperServer.Services.Services;
 /// The import/ingestion join the raw game-data records with the wiki dump
 /// (uploaded or bundled) server-side, so source files stay portable.
 /// </summary>
-public class FoodCatalogService : IFoodCatalogService
+public partial class FoodCatalogService : IFoodCatalogService
 {
     private const string WikiCacheKey = "cookbook:wiki";
     private const string RecipeIndexCacheKey = "cookbook:recipeindex";
@@ -40,31 +40,32 @@ public class FoodCatalogService : IFoodCatalogService
     private readonly ILogger<FoodCatalogService> _logger;
 
     /// <summary>Strips volume prefixes like "0.5 l of " so variants collapse onto one food.</summary>
-    private static readonly Regex VolumePrefixRegex = new(
-        @"^\s*\d+(?:\.\d+)?\s*(?:l|ml|g|kg|q)\s+of\s+",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    [GeneratedRegex(@"^\s*\d+(?:\.\d+)?\s*(?:l|ml|g|kg|q)\s+of\s+", RegexOptions.IgnoreCase)]
+    private static partial Regex VolumePrefixRegex();
 
     /// <summary>Parses game-dump FEP names like "Strength +2".</summary>
-    private static readonly Regex FepNameRegex = new(@"^(\w+)\s*\+(\d)$", RegexOptions.Compiled);
+    [GeneratedRegex(@"^(\w+)\s*\+(\d)$")]
+    private static partial Regex FepNameRegex();
 
     /// <summary>
     /// Mediawiki links like "[[requires::Raw Meat]]". For piped links the display text
     /// wins over the target ("[[requires::Category:Sharp Tools|Sharp Tool]]" → "Sharp Tool").
     /// </summary>
-    private static readonly Regex WikiLinkRegex = new(
-        @"\[\[(?:[a-zA-Z ]+::)?([^\]|]+?)(?:\|([^\]]*))?\]\]", RegexOptions.Compiled);
+    [GeneratedRegex(@"\[\[(?:[a-zA-Z ]+::)?([^\]|]+?)(?:\|([^\]]*))?\]\]")]
+    private static partial Regex WikiLinkRegex();
 
     /// <summary>
     /// Truncated trailing link ("..., [[requires::Wine" with no closing brackets).
     /// Only matched after a list separator (or at the start) so glued fragments stay rejected.
     /// </summary>
-    private static readonly Regex TruncatedTrailingLinkRegex = new(
-        @"(^|,\s*|:\s+|\bor\s+|\band\s+)\[\[(?:[a-zA-Z ]+::)?([^\]|{}]+)$", RegexOptions.Compiled);
+    [GeneratedRegex(@"(^|,\s*|:\s+|\bor\s+|\band\s+)\[\[(?:[a-zA-Z ]+::)?([^\]|{}]+)$")]
+    private static partial Regex TruncatedTrailingLinkRegex();
 
-    private static readonly Regex OptionalMarkerRegex = new(
-        @"optional\s*:\s*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    [GeneratedRegex(@"optional\s*:\s*", RegexOptions.IgnoreCase)]
+    private static partial Regex OptionalMarkerRegex();
 
-    private static readonly Regex WhitespaceRegex = new(@"\s+", RegexOptions.Compiled);
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex WhitespaceRegex();
 
     /// <summary>Leftover wiki markup that marks a requirements value as unusable.</summary>
     private static readonly string[] WikiJunkNeedles =
@@ -746,7 +747,7 @@ public class FoodCatalogService : IFoodCatalogService
         foreach (var (name, groupRecords) in groups.OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
         {
             var baseRecord = PickBaseRecord(groupRecords);
-            if (string.IsNullOrWhiteSpace(baseRecord.ResourceName))
+            if (FoodResourceName.Normalize(baseRecord.ResourceName).Length == 0)
             {
                 result.Skipped++;
                 AddError(result, $"'{name}': no resource path in any record");
@@ -887,7 +888,7 @@ public class FoodCatalogService : IFoodCatalogService
         foreach (var food in snapshot.Foods)
         {
             var name = string.IsNullOrWhiteSpace(food.Name) ? string.Empty : NormalizeName(food.Name);
-            var resource = food.ResourceName?.Trim() ?? string.Empty;
+            var resource = FoodResourceName.Normalize(food.ResourceName);
             if (name.Length is 0 or > MaxUploadNameLength
                 || resource.Length is 0 or > MaxUploadResourceLength)
             {
@@ -1142,7 +1143,8 @@ public class FoodCatalogService : IFoodCatalogService
 
         foreach (var upload in records)
         {
-            if (string.IsNullOrWhiteSpace(upload.ItemName) || string.IsNullOrWhiteSpace(upload.ResourceName))
+            if (string.IsNullOrWhiteSpace(upload.ItemName)
+                || FoodResourceName.Normalize(upload.ResourceName).Length == 0)
             {
                 result.Skipped++;
                 continue;
@@ -1368,7 +1370,7 @@ public class FoodCatalogService : IFoodCatalogService
 
     private static string NormalizeName(string rawName)
     {
-        var name = VolumePrefixRegex.Replace(rawName.Trim(), string.Empty);
+        var name = VolumePrefixRegex().Replace(rawName.Trim(), string.Empty);
         return name.Length > 0 ? name : rawName.Trim();
     }
 
@@ -1399,7 +1401,7 @@ public class FoodCatalogService : IFoodCatalogService
         {
             TenantId = tenantId,
             Name = name,
-            ResourceName = baseRecord.ResourceName!.Trim(),
+            ResourceName = FoodResourceName.Normalize(baseRecord.ResourceName),
             ImportedAt = importedAt,
             Ingredients = MapIngredients(baseRecord.Ingredients)
         };
@@ -1572,19 +1574,19 @@ public class FoodCatalogService : IFoodCatalogService
             return null;
         }
 
-        var text = OptionalMarkerRegex.Replace(raw, "optional: ");
-        text = WikiLinkRegex.Replace(text, m =>
+        var text = OptionalMarkerRegex().Replace(raw, "optional: ");
+        text = WikiLinkRegex().Replace(text, m =>
         {
             var display = m.Groups[2].Success ? m.Groups[2].Value.Trim() : string.Empty;
             return display.Length > 0 ? display : m.Groups[1].Value.Trim();
         });
         if (salvageTruncatedLink)
         {
-            text = TruncatedTrailingLinkRegex.Replace(text, m => m.Groups[1].Value + m.Groups[2].Value.Trim());
+            text = TruncatedTrailingLinkRegex().Replace(text, m => m.Groups[1].Value + m.Groups[2].Value.Trim());
         }
 
         text = text.Replace("'''", string.Empty).Replace("''", string.Empty);
-        text = WhitespaceRegex.Replace(text, " ").Trim().Trim(',').Trim();
+        text = WhitespaceRegex().Replace(text, " ").Trim().Trim(',').Trim();
 
         if (text.Length == 0
             || text.Length > 500
@@ -1632,7 +1634,7 @@ public class FoodCatalogService : IFoodCatalogService
 
         foreach (var fep in feps ?? new List<SourceFep>())
         {
-            var match = FepNameRegex.Match(fep.Name?.Trim() ?? string.Empty);
+            var match = FepNameRegex().Match(fep.Name?.Trim() ?? string.Empty);
             if (match.Success
                 && FullNameToAbbrev.TryGetValue(match.Groups[1].Value, out var abbrev)
                 && int.TryParse(match.Groups[2].Value, out var tier))

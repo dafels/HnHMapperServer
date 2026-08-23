@@ -81,23 +81,15 @@
         }
     }
 
-    private static string GenerateSlug(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            return string.Empty;
-
-        var slug = name.ToLowerInvariant();
-        slug = System.Text.RegularExpressions.Regex.Replace(slug, @"[^a-z0-9\-]", "-");
-        slug = System.Text.RegularExpressions.Regex.Replace(slug, @"-+", "-");
-        slug = slug.Trim('-');
-
-        if (slug.Length < 3)
-            slug = $"map-{slug}";
-        if (slug.Length > 50)
-            slug = slug[..50].TrimEnd('-');
-
-        return slug;
-    }
+    /// <summary>
+    /// Preview of the slug the server will assign. Uses the same rule as PublicMapService
+    /// so the preview cannot drift from what actually gets created; the empty case shows
+    /// nothing rather than the server's fallback, because the field is still being typed.
+    /// </summary>
+    private static string GenerateSlug(string name) =>
+        string.IsNullOrWhiteSpace(name)
+            ? string.Empty
+            : HnHMapperServer.Core.PublicMaps.PublicMapSlug.Generate(name);
 
     private void Cancel()
     {

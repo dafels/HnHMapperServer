@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 
+using System.Collections.Frozen;
+
 namespace HnHMapperServer.Core.Cookbook;
 
 /// <summary>Kind of value a cookbook threshold condition compares against.</summary>
@@ -51,21 +53,22 @@ public sealed record FepFilterCondition(
 /// a free-text search string. Anything that does not form a valid condition stays in the residual
 /// text untouched, so typos degrade to ordinary (0-result) text search instead of erroring.
 /// </summary>
-public static class FepFilterParser
+public static partial class FepFilterParser
 {
-    private static readonly HashSet<string> StatKeys = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "STR", "AGI", "INT", "CON", "PER", "CHA", "DEX", "WILL", "PSY"
-    };
+    private static readonly FrozenSet<string> StatKeys = FrozenSet.ToFrozenSet(
+        ["STR", "AGI", "INT", "CON", "PER", "CHA", "DEX", "WILL", "PSY"],
+        StringComparer.OrdinalIgnoreCase);
 
     // \b before the key, a mandatory operator, and the trailing separator lookahead give token
     // semantics: "straw", "beefstr>5", "int21>5" and "str>50x" never match and stay ordinary text.
-    private static readonly Regex ConditionRegex = new(
+    [GeneratedRegex(
         @"\b(?<key>str|agi|int|con|per|cha|dex|will|psy|total|hunger|energy|eff)" +
         @"(?<tier>[12])?\s*(?<op>>=|<=|==|=|>|<)\s*(?<val>\d+(?:\.\d+)?)\s*(?<pct>%)?(?=$|[\s,])",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ConditionRegex();
 
-    private static readonly Regex SeparatorRegex = new(@"[\s,]+", RegexOptions.Compiled);
+    [GeneratedRegex(@"[\s,]+")]
+    private static partial Regex SeparatorRegex();
 
     /// <summary>
     /// Splits a raw search string into accepted threshold conditions and the residual free text.
@@ -83,7 +86,7 @@ public static class FepFilterParser
         StringBuilder? residual = null;
         var consumedTo = 0;
 
-        foreach (Match match in ConditionRegex.Matches(search))
+        foreach (Match match in ConditionRegex().Matches(search))
         {
             var condition = TryCreateCondition(match);
             if (condition == null)
@@ -105,7 +108,7 @@ public static class FepFilterParser
         }
 
         residual!.Append(search, consumedTo, search.Length - consumedTo);
-        var text = SeparatorRegex.Replace(residual.ToString(), " ").Trim();
+        var text = SeparatorRegex().Replace(residual.ToString(), " ").Trim();
         return (conditions, text);
     }
 

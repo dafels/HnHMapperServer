@@ -13,7 +13,7 @@ public class LruImageCache : IDisposable
     private readonly int _maxSize;
     private readonly Dictionary<string, LinkedListNode<(string Key, Image<Rgba32> Image)>> _cache;
     private readonly LinkedList<(string Key, Image<Rgba32> Image)> _lruList;
-    private readonly object _lock = new();
+    private readonly System.Threading.Lock _lock = new();
     private bool _disposed;
 
     public LruImageCache(int maxSize = 50)

@@ -14,7 +14,7 @@ namespace HnHMapperServer.Services.Services;
 /// Creates a tenant for a player and makes them its admin, in one transaction. Mirrors the bootstrap
 /// "complete tenant + admin" shape (Api/Program.cs) but with server-decided quota and a per-user cap.
 /// </summary>
-public class TenantProvisioningService : ITenantProvisioningService
+public partial class TenantProvisioningService : ITenantProvisioningService
 {
     public const int DefaultQuotaMB = 1024;
     public const int DefaultMaxOwned = 3;
@@ -22,7 +22,11 @@ public class TenantProvisioningService : ITenantProvisioningService
     public const int MaxNameLength = 40;
 
     // Letters (any script), digits, spaces and a few punctuation marks villages actually use
-    private static readonly Regex NamePattern = new(@"^[\p{L}\p{N} '\-._]+$", RegexOptions.Compiled);
+    [GeneratedRegex(@"^[\p{L}\p{N} '\-._]+$")]
+    private static partial Regex NamePattern();
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex WhitespaceRegex();
 
     private readonly ApplicationDbContext _db;
     private readonly ITenantService _tenantService;
@@ -165,10 +169,10 @@ public class TenantProvisioningService : ITenantProvisioningService
         if (string.IsNullOrWhiteSpace(displayName))
             return null;
 
-        var collapsed = Regex.Replace(displayName.Trim(), @"\s+", " ");
+        var collapsed = WhitespaceRegex().Replace(displayName.Trim(), " ");
         if (collapsed.Length < MinNameLength || collapsed.Length > MaxNameLength)
             return null;
-        if (!NamePattern.IsMatch(collapsed))
+        if (!NamePattern().IsMatch(collapsed))
             return null;
 
         return collapsed;

@@ -1408,11 +1408,6 @@
     /// <summary>One entry of a wiki canonical recipe: "Edible Mushroom x2" → ("Edible Mushroom", "x2").</summary>
     private sealed record RecipePart(string Name, string? Qty, bool Optional);
 
-    /// <summary>Splits a trailing quantity ("x2", "(0.5 kg)", "0.1 L") off a recipe entry.</summary>
-    private static readonly Regex RecipeQtyRegex = new(
-        @"^(?<name>.+?)(?:\s*(?<qty>x\s?\d+|\([^)]*\)|\d+(?:[.,]\d+)?\s*(?:l|ml|kg|g)\.?))?$",
-        RegexOptions.IgnoreCase);
-
     private sealed record InheritedRecipe(string BaseName, string Recipe, string? Station);
 
     /// <summary>
@@ -1538,7 +1533,7 @@
                 continue;
             }
 
-            var match = RecipeQtyRegex.Match(text);
+            var match = CookbookPatterns.RecipeQty().Match(text);
             parts.Add(match.Success && match.Groups["qty"].Success
                 ? new RecipePart(match.Groups["name"].Value.Trim(), match.Groups["qty"].Value, optional)
                 : new RecipePart(text, null, optional));
@@ -2773,9 +2768,6 @@
         }
     }
 
-    /// <summary>Wiki quantity leftovers the part parser doesn't catch ("Any Flour {0.1 kg)", "Salt x").</summary>
-    private static readonly Regex ComponentJunkRegex = new(@"(\s*[\{\(][^\)\}]*[\)\}]?|\s+x)\s*$", RegexOptions.Compiled);
-
     /// <summary>
     /// Wiki "requires" entries that are not ingredients: cooking vessels/tools/stations,
     /// crafting materials pulled in by deeper expansion, locations, quest items, a stray
@@ -2790,7 +2782,7 @@
 
     private static void AddComponentName(string raw, HashSet<string> into)
     {
-        var name = ComponentJunkRegex.Replace(raw, string.Empty).Trim();
+        var name = CookbookPatterns.ComponentJunk().Replace(raw, string.Empty).Trim();
         if (name.Length == 0
             || ComponentDenylist.Contains(name)
             || name.Contains(" or ", StringComparison.OrdinalIgnoreCase)
@@ -3327,9 +3319,9 @@
     /// <summary>Collapses the separators condition extraction leaves behind ("salami , x" → "salami, x").</summary>
     private static string TidySearchText(string text)
     {
-        text = Regex.Replace(text, @"\s+,", ",");
-        text = Regex.Replace(text, @",{2,}", ",");
-        text = Regex.Replace(text, @"\s{2,}", " ");
+        text = CookbookPatterns.SpaceBeforeComma().Replace(text, ",");
+        text = CookbookPatterns.RepeatedCommas().Replace(text, ",");
+        text = CookbookPatterns.RepeatedSpaces().Replace(text, " ");
         return text.Trim(' ', ',');
     }
 
@@ -3395,15 +3387,10 @@
     // FEP-share quarters: complete a started stat expression, or apply to the selected FEP chip.
     private static readonly int[] QuarterPresets = { 25, 50, 75, 100 };
 
-    /// <summary>A stat key + operator with no value yet at the end of the filter text ("str>=", "int2>").</summary>
-    private static readonly Regex TrailingStatOpRegex = new(
-        @"(?:str|agi|int|con|per|cha|dex|will|psy)(?:[12])?\s*(?:>=|<=|==|=|>|<)\s*$",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    private bool QuarterUsable => _selectedStat != null || TrailingStatOpRegex.IsMatch(_filterText);
+    private bool QuarterUsable => _selectedStat != null || CookbookPatterns.TrailingStatOp().IsMatch(_filterText);
 
     private string QuarterTitle(int pct) =>
-        TrailingStatOpRegex.IsMatch(_filterText)
+        CookbookPatterns.TrailingStatOp().IsMatch(_filterText)
             ? $"Complete the started expression with {pct}%"
             : _selectedStat != null
                 ? $"{_selectedStat} at least {pct}% of the food's total FEP"
@@ -3411,7 +3398,7 @@
 
     private async Task ApplyQuarterAsync(int pct)
     {
-        if (TrailingStatOpRegex.IsMatch(_filterText))
+        if (CookbookPatterns.TrailingStatOp().IsMatch(_filterText))
         {
             FilterText = _filterText.TrimEnd() + pct + "%";
             await FocusFilterEndAsync();

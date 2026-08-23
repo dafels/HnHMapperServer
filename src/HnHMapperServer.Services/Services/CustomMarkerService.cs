@@ -320,11 +320,7 @@ public partial class CustomMarkerService : ICustomMarkerService
         }
 
         // First strip script tags and their content (must be done before general tag stripping)
-        var sanitized = System.Text.RegularExpressions.Regex.Replace(
-            input,
-            @"<script[^>]*>.*?</script>",
-            string.Empty,
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+        var sanitized = ScriptBlockRegex().Replace(input, string.Empty);
         
         // Then strip all remaining HTML tags
         sanitized = HtmlTagRegex().Replace(sanitized, string.Empty);
@@ -359,6 +355,9 @@ public partial class CustomMarkerService : ICustomMarkerService
     /// <summary>
     /// Regex for stripping HTML tags (compiled for performance)
     /// </summary>
+    [GeneratedRegex(@"<script[^>]*>.*?</script>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex ScriptBlockRegex();
+
     [GeneratedRegex("<[^>]*>", RegexOptions.Compiled)]
     private static partial Regex HtmlTagRegex();
 }
