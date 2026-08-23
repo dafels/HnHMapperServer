@@ -181,22 +181,26 @@ else
                             <MudIconButton Icon="@Icons.Material.Filled.Edit"
                                           Size="Size.Small"
                                           Color="Color.Primary"
-                                          Title="Edit Permissions"
+                                          aria-label="Edit Permissions"
+                                          title="Edit Permissions"
                                           OnClick="@(() => EditUserPermissions(context))" />
                             <MudIconButton Icon="@Icons.Material.Filled.SwapHoriz"
                                           Size="Size.Small"
                                           Color="Color.Info"
-                                          Title="Change Role"
+                                          aria-label="Change Role"
+                                          title="Change Role"
                                           OnClick="@(() => ChangeUserRole(context))" />
                             <MudIconButton Icon="@Icons.Material.Filled.Lock"
                                           Size="Size.Small"
                                           Color="Color.Warning"
-                                          Title="Reset Password"
+                                          aria-label="Reset Password"
+                                          title="Reset Password"
                                           OnClick="@(() => ResetUserPassword(context))" />
                             <MudIconButton Icon="@Icons.Material.Filled.PersonRemove"
                                           Size="Size.Small"
                                           Color="Color.Error"
-                                          Title="Remove User"
+                                          aria-label="Remove User"
+                                          title="Remove User"
                                           OnClick="@(() => RemoveUser(context))" />
                         </MudStack>
                     </MudTd>

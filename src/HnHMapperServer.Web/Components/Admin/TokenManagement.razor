@@ -43,13 +43,13 @@
                             <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Text">Mapper</MudChip>
                             <MudText Style="font-family: monospace; font-size: 0.8rem; word-break: break-all;">@context.Item.Url</MudText>
                             <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Color="Color.Primary"
-                                           OnClick="@(() => CopyToClipboard(context.Item.Url))" Title="Copy mapper URL" />
+                                           OnClick="@(() => CopyToClipboard(context.Item.Url))" aria-label="Copy mapper URL" title="Copy mapper URL" />
                         </MudStack>
                         <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
                             <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Text">Cookbook</MudChip>
                             <MudText Style="font-family: monospace; font-size: 0.8rem; word-break: break-all;">@CookbookUrl(context.Item.Url)</MudText>
                             <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" Color="Color.Warning"
-                                           OnClick="@(() => CopyToClipboard(CookbookUrl(context.Item.Url)))" Title="Copy cookbook URL" />
+                                           OnClick="@(() => CopyToClipboard(CookbookUrl(context.Item.Url)))" aria-label="Copy cookbook URL" title="Copy cookbook URL" />
                         </MudStack>
                     </MudStack>
                 </CellTemplate>
@@ -67,7 +67,7 @@
             </TemplateColumn>
             <TemplateColumn Title="Actions">
                 <CellTemplate>
-                    <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error" OnClick="@(() => ShowRevokeTokenDialog(context.Item))" Title="Revoke token" />
+                    <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error" OnClick="@(() => ShowRevokeTokenDialog(context.Item))" aria-label="Revoke token" title="Revoke token" />
                 </CellTemplate>
             </TemplateColumn>
         </Columns>

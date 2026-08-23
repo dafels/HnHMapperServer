@@ -11,8 +11,8 @@
                 @if (Timer == null && string.IsNullOrEmpty(PresetType) && !ForceStandalone)
                 {
                     <!-- Timer Type Selection (only shown when creating new timer, not from marker) -->
-                    <MudRadioGroup @bind-SelectedOption="_timerType" T="string">
-                        <MudRadio T="string" Option="@("Standalone")" Color="Color.Primary">
+                    <MudRadioGroup @bind-Value="_timerType" T="string">
+                        <MudRadio T="string" Value="@("Standalone")" Color="Color.Primary">
                             <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
                                 <MudIcon Icon="@Icons.Material.Filled.Event" Size="Size.Small" />
                                 <div>
@@ -21,7 +21,7 @@
                                 </div>
                             </MudStack>
                         </MudRadio>
-                        <MudRadio T="string" Option="@("Marker")" Color="Color.Primary" Disabled="@(_availableMarkers.Count == 0)">
+                        <MudRadio T="string" Value="@("Marker")" Color="Color.Primary" Disabled="@(_availableMarkers.Count == 0)">
                             <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
                                 <MudIcon Icon="@Icons.Material.Filled.Place" Size="Size.Small" />
                                 <div>
@@ -30,7 +30,7 @@
                                 </div>
                             </MudStack>
                         </MudRadio>
-                        <MudRadio T="string" Option="@("CustomMarker")" Color="Color.Primary" Disabled="@(_availableCustomMarkers.Count == 0)">
+                        <MudRadio T="string" Value="@("CustomMarker")" Color="Color.Primary" Disabled="@(_availableCustomMarkers.Count == 0)">
                             <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
                                 <MudIcon Icon="@Icons.Material.Filled.AddLocation" Size="Size.Small" />
                                 <div>
@@ -134,7 +134,7 @@
 
                 <!-- Duration Presets -->
                 <MudText Typo="Typo.subtitle2">Duration Presets</MudText>
-                <MudChipSet T="string" @bind-SelectedChip="_selectedPreset" Filter="false">
+                <MudChipSet T="string">
                     <MudChip T="string" Text="5 minutes" OnClick="@(() => SetDuration(5, "minutes"))" />
                     <MudChip T="string" Text="15 minutes" OnClick="@(() => SetDuration(15, "minutes"))" />
                     <MudChip T="string" Text="30 minutes" OnClick="@(() => SetDuration(30, "minutes"))" />
@@ -229,8 +229,6 @@
     private int _customDays = 0;
     private int _customHours = 0;
     private int _customMinutes = 5;
-
-    private MudChip<string>? _selectedPreset;
 
     private List<MarkerSummary> _availableMarkers = new();
     private List<CustomMarkerSummary> _availableCustomMarkers = new();

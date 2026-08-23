@@ -49,7 +49,8 @@ else
                     <MudIconButton Icon="@Icons.Material.Filled.ContentCopy"
                                   Color="Color.Primary"
                                   Size="Size.Small"
-                                  Title="Copy invite link"
+                                  aria-label="Copy invite link"
+                                  title="Copy invite link"
                                   OnClick="@(() => OnCopyLink.InvokeAsync(context))" />
                 }
                 @if (ShowRevoke)
@@ -57,7 +58,8 @@ else
                     <MudIconButton Icon="@Icons.Material.Filled.Block"
                                   Color="Color.Error"
                                   Size="Size.Small"
-                                  Title="Revoke invitation"
+                                  aria-label="Revoke invitation"
+                                  title="Revoke invitation"
                                   OnClick="@(() => OnRevoke.InvokeAsync(context))" />
                 }
             </MudTd>

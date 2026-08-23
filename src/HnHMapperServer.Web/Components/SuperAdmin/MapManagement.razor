@@ -275,12 +275,14 @@
                                Color="Color.Primary"
                                Size="Size.Small"
                                OnClick="@(() => ShowEditDialog(context.Item))"
-                               Title="Edit map" />
+                               aria-label="Edit map"
+                               title="Edit map" />
                 <MudIconButton Icon="@Icons.Material.Filled.Delete"
                                Color="Color.Error"
                                Size="Size.Small"
                                OnClick="@(() => ShowDeleteConfirmation(context.Item))"
-                               Title="Delete map" />
+                               aria-label="Delete map"
+                               title="Delete map" />
             </CellTemplate>
         </TemplateColumn>
     </Columns>

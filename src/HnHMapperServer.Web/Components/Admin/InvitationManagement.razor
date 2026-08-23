@@ -76,7 +76,8 @@
                     <MudIconButton Icon="@Icons.Material.Filled.ContentCopy"
                                   Color="Color.Default"
                                   OnClick="@(() => Clipboard.CopyAsync(_newInviteLink!, "Invite link copied"))"
-                                  Title="Copy to clipboard" />
+                                  aria-label="Copy to clipboard"
+                                  title="Copy to clipboard" />
                 </MudPaper>
                 <MudButton OnClick="@(() => _newInviteCode = null)" Class="mt-2" Size="Size.Small">
                     Dismiss

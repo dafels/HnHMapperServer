@@ -78,18 +78,21 @@
                                        Color="Color.Primary"
                                        OnClick="@(() => ShowEditUserPermissionsDialog(context.Item))"
                                        Disabled="@context.Item.PendingApproval"
-                                       Title="@(context.Item.PendingApproval ? "Approve user first" : "Edit permissions")" />
+                                       aria-label="@(context.Item.PendingApproval ? "Approve user first" : "Edit permissions")"
+                                       title="@(context.Item.PendingApproval ? "Approve user first" : "Edit permissions")" />
                         <MudIconButton Icon="@Icons.Material.Filled.VpnKey"
                                        Size="Size.Small"
                                        Color="Color.Warning"
                                        OnClick="@(() => ShowResetPasswordDialog(context.Item))"
                                        Disabled="@context.Item.PendingApproval"
-                                       Title="@(context.Item.PendingApproval ? "Approve user first" : "Reset password")" />
+                                       aria-label="@(context.Item.PendingApproval ? "Approve user first" : "Reset password")"
+                                       title="@(context.Item.PendingApproval ? "Approve user first" : "Reset password")" />
                         <MudIconButton Icon="@Icons.Material.Filled.Delete"
                                        Size="Size.Small"
                                        Color="Color.Error"
                                        OnClick="@(() => ShowRemoveUserDialog(context.Item))"
-                                       Title="Remove user from organization" />
+                                       aria-label="Remove user from organization"
+                                       title="Remove user from organization" />
                     </MudStack>
                 </CellTemplate>
             </TemplateColumn>

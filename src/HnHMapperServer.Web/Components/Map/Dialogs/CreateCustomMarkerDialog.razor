@@ -37,7 +37,7 @@
                             Label="Icon"
                             Placeholder="Type to search for an icon..."
                             MinCharacters="0"
-                            OpenMenuOnFocus="true"
+                            OpenOnFocus="true"
                             SearchFunc="@SearchIcons"
                             DebounceInterval="300"
                             Required="true"
@@ -51,7 +51,6 @@
                             ShowProgressIndicator="true"
                             HelperText="Required - search from 2000+ icons"
                             ToStringFunc="@(icon => string.IsNullOrEmpty(icon) ? "" : System.IO.Path.GetFileNameWithoutExtension(icon))"
-                            DisablePortal="true"
                             PopoverClass="icon-autocomplete-popover"
                             AnchorOrigin="Origin.BottomLeft"
                             TransformOrigin="Origin.TopLeft">

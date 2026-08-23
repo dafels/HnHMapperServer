@@ -40,7 +40,8 @@
                 @foreach (var group in GetTimerGroups())
                 {
                     <MudExpansionPanel Class="@GetGroupPanelClass(group.Color)"
-                                       IsInitiallyExpanded="@group.IsExpanded"
+                                       Expanded="@IsGroupPanelExpanded(group)"
+                                       ExpandedChanged="@(expanded => SetGroupPanelExpanded(group, expanded))"
                                        Dense="true">
                         <TitleContent>
                             <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
@@ -54,7 +55,7 @@
                             </MudStack>
                         </TitleContent>
                         <ChildContent>
-                            <MudList T="string" Dense="true" Clickable="false">
+                            <MudList T="string" Dense="true">
                                 @foreach (var timer in group.Timers)
                                 {
                                     <MudListItem T="string" OnClick="@(() => HandleTimerClick(timer))">
@@ -176,7 +177,7 @@
         }
         else
         {
-            <MudList T="string" Dense="true" Clickable="true">
+            <MudList T="string" Dense="true">
                 @foreach (var history in _timerHistory)
                 {
                     <MudListItem T="string" OnClick="@(() => HandleHistoryClick(history))">
@@ -881,6 +882,20 @@
             _updateTimer = null;
         }
     }
+
+    /// <summary>
+    /// Expanded/collapsed state per timer group, keyed by group name.
+    /// GetTimerGroups() rebuilds its TimerGroup objects on every render, so the group's own
+    /// IsExpanded only ever supplies the initial value - the user's toggle has to be remembered
+    /// here or the panel would snap back to the default on the next timer tick.
+    /// </summary>
+    private readonly Dictionary<string, bool> _groupPanelExpanded = new();
+
+    private bool IsGroupPanelExpanded(TimerGroup group)
+        => _groupPanelExpanded.TryGetValue(group.Name, out var expanded) ? expanded : group.IsExpanded;
+
+    private void SetGroupPanelExpanded(TimerGroup group, bool expanded)
+        => _groupPanelExpanded[group.Name] = expanded;
 
     /// <summary>
     /// Helper class for grouping timers by urgency level
