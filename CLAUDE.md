@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-08-23
 **Project Status:** Production-Ready (Core + Admin + Multi-Tenancy + Cookbook)
-**Tech Stack:** .NET 10 (LTS), ASP.NET Core, Blazor Server, MudBlazor 9, SQLite, .NET Aspire 13, Docker
+**Tech Stack:** .NET 10 (LTS), ASP.NET Core, Blazor Server (Workstation GC), MudBlazor 9, SQLite, .NET Aspire 13, Docker
 **Current Branch:** `master` (the .NET 10 / MudBlazor 9 upgrade lives on `upgrade/net10`)
 
 ---
@@ -636,6 +636,86 @@ See `deploy/SECURITY.md` for complete security checklist.
 ---
 
 ## Recent Changes
+
+### 2026-08-23: Memory work on top of .NET 10 (branch `upgrade/net10`)
+
+**Every number here was measured on the branch against a copy of the dev DB, driving the real
+workload headlessly (login → /cookbook → 49k-row Ungrouped view → three facet filters), with
+`DOTNET_PROCESSOR_COUNT=2` to look like the VPS.** Suite 308/308.
+- **API: the bulk variation list is streamed, not buffered.** `GET /api/v1/cookbook/variations`
+  built an entity list → a DTO list → an ordered copy → a JSON buffer: **123 MB → 541 MB private
+  for one call**. It now returns `IAsyncEnumerable<FoodVariantDto>` from
+  `FoodCatalogService.StreamAllVariationsAsync`, and the same call costs **+1.4 MB**. Output is
+  **byte-identical** (36,223,344 bytes, verified by diffing captures from both implementations).
+  Ordering survives because the query orders by `FoodId` in SQL and only one food's variations are
+  buffered at a time — the secondary key (heaviest FEP total) is computed from JSON and cannot be
+  sorted in SQLite. Contributor names come from a streamed pass over the `Contributors` column, so
+  only the id set is held. `GetAllVariationsAsync` remains as a `ToList` over the stream (callers
+  and tests unchanged). **Streaming trade-off:** headers go out before enumeration, so a mid-stream
+  failure truncates the body instead of returning a Problem — the only consumer (the Web flat-row
+  cache) treats that as a failed fetch and retries, same as it did for a 500.
+- **Web runs Workstation GC** (`<ServerGarbageCollection>false</ServerGarbageCollection>`). The Web
+  SDK silently defaults ASP.NET Core to Server GC (a heap per core). Measured: **467 MB WS / 358 MB
+  private → 390/266**. Cost: the one-off 49k-row build 2.3s → 2.9s; filters unchanged. This also
+  turns DATAS off (it is Server-GC-only). **The API keeps Server GC** — parallel image work.
+  Full matrix that was run: Server 16-cpu 443/357 · Server 2-cpu 467/358 · **Workstation 2-cpu
+  390/266** · Workstation+`GCConserveMemory=5` 392/268 (no further gain) · Server + 500 MB heap hard
+  limit 441/326.
+- **`PublicTileCacheService` is bounded.** It held *every* public-map tile PNG in a
+  `ConcurrentDictionary` forever — the ~1.2 GB baseline noted in docker-compose, growing with the
+  public-map library. Now a byte budget (**`PublicTileCache:BudgetMB`, default 256**) with LRU
+  eviction; preload stops at the budget and logs what it left on disk. Safe because the tile
+  endpoint already fell back to disk and re-cached on a miss, and tiles are served `immutable` with
+  year-long cache headers. Verified with a 1 MB budget against 5 MB of tiles: 24 resident / 96 on
+  disk, 28/28 fetched tiles byte-identical to disk, 120 requests of eviction churn, zero errors.
+- **`CookbookFlatCache` caps built rows at the 2 most recently used worlds** (`MaxWorldsPerTenant`).
+  It kept a full ~49k-row set *per world* per tenant for every world anyone clicked; rebuilding from
+  the cached DTOs takes ~2s.
+- **Circuit configuration:**
+  - **`MaximumParallelInvocationsPerClient = 10` REMOVED.** Blazor requires the default of 1;
+    raising it breaks `IBrowserFile` uploads (dotnet/aspnetcore#53951) — which is exactly what the
+    .hmap and cookbook imports use. This was a live bug, not a tuning choice.
+  - `DetailedErrors` back to development-only (the TODO left in the code).
+  - `DisconnectedCircuitMaxRetained` 100 → **20**.
+  - **.NET 10 silently enables circuit state persistence** with `AddInteractiveServerComponents()` —
+    default **1000 persisted circuits kept 2 hours**, which nothing here opted into. Bounded to
+    50 / 30 min.
+  - **`wwwroot/js/circuit-pause.js`** pauses a circuit after its tab is hidden **5 minutes**
+    (`Blazor.pauseCircuit()`, new in .NET 10) and resumes on return. **The reload fallback is
+    load-bearing**: if `resumeCircuit()` returns false the persisted state is gone and the page is
+    silently dead (dotnet/aspnetcore#64607, fixed only in 11.0-preview1) — we reload instead.
+    Verified live: both calls return `true`, page stays interactive. Five minutes rather than the
+    docs' instant pause because **no page annotates `[PersistentState]` yet**, so a resumed page
+    comes back at its defaults (cookbook filters reset). Annotating that state is the follow-up that
+    would let the delay drop.
+- **ImageSharp allocator capped** in both services (`MaximumPoolSizeMegabytes = 32`,
+  `AllocationLimitMegabytes = 256`). Its pools live outside the GC heap — invisible to the heap
+  limit, very visible to the container limit the kernel OOM-kills on. Tile serving re-verified at
+  z0/z1/z2/z4/z6 (200, 13–16 ms).
+- **Web→API requests gzip** (`AutomaticDecompression` on the `APIUpload` client): the bulk body is
+  **36 MB raw / 3.4 MB gzipped**; the API already had response compression with SSE excluded.
+- **Observability:** ServiceDefaults now subscribes to the .NET 10 Blazor meters
+  (`aspnetcore.components.circuit.active` / `.connected` / `.duration`, lifecycle, render diff),
+  `Microsoft.AspNetCore.MemoryPool`, and the Identity/Authorization meters, plus the circuit and
+  component ActivitySources. **Blazor's instruments are inert until something subscribes**, so this
+  is the opt-in. `active` minus `connected` is the retained-circuit backlog — the number that
+  predicts Blazor Server memory. Note the circuit instruments carry **no tags**, so they cannot be
+  split by tenant, and `render_diff.size` buckets top out at 100 elements (the 49k-row table will
+  saturate the top bucket; add an `AddView` if that signal is wanted).
+- **Deliberately NOT done, with reasons:** HybridCache for the flat cache (it serializes on write
+  even L1-only, so it would JSON-encode ~100 MB per refresh — strictly worse than the existing
+  `Lazy<Task<T>>`); `PublishReadyToRun` (documented to *increase* working set); Native AOT
+  (Blazor Server is unsupported); `InvariantGlobalization` (breaks lv-LV formatting);
+  `AddDbContextPool` (the tenant filter reads `IHttpContextAccessor`, and pooling would capture the
+  first request's accessor — a cross-tenant leak, not just a perf question); global `NoTracking`
+  (would break every read-modify-save path; the big reads already use `AsNoTracking`).
+- **Net effect for one user opening the 49k-row view:** Web **467/358 → 416/289 MB**; API peak for
+  the bulk endpoint **−400 MB**; public tile cache gains a ceiling it never had.
+- **Note:** `docker-compose.yml` already caps both services at `mem_limit: 3g`, so the GC does get a
+  container limit to size against (75% of it). No `cpus` limit is set, which means
+  `Environment.ProcessorCount` — and therefore the API's Server GC heap count — follows the host.
+  Capping CPU is the *supported* way to bound heaps; `GCHeapCount` must not be used for it, because
+  on .NET 10 setting it disables DATAS.
 
 ### 2026-08-23: .NET 10 (LTS) + MudBlazor 9 upgrade (branch `upgrade/net10`)
 
