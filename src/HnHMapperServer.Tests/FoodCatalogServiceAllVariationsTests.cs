@@ -108,6 +108,61 @@ public class FoodCatalogServiceAllVariationsTests : IDisposable
         Assert.All(variants, v => Assert.Equal(_breadId, v.FoodId));
     }
 
+    /// <summary>
+    /// The endpoint streams this list so the ~36 MB payload is never materialized on the
+    /// server; the buffering entry point is now a thin wrapper over the stream. Both must
+    /// yield exactly the same rows in exactly the same order — grouped by FoodId, and
+    /// within a food, heaviest FEP total first — because the flat view's row identity and
+    /// the "pinned variant" behaviour depend on that order.
+    /// </summary>
+    [Fact]
+    public async Task StreamAllVariations_MatchesBufferedList_RowForRow()
+    {
+        var buffered = await _service.GetAllVariationsAsync();
+
+        var streamed = new List<HnHMapperServer.Core.DTOs.FoodVariantDto>();
+        await foreach (var dto in _service.StreamAllVariationsAsync())
+        {
+            streamed.Add(dto);
+        }
+
+        Assert.Equal(buffered.Count, streamed.Count);
+        Assert.Equal(
+            buffered.Select(v => (v.FoodId, v.IngredientSignature)),
+            streamed.Select(v => (v.FoodId, v.IngredientSignature)));
+
+        // Ordering contract, asserted directly rather than only against the other method:
+        // FoodId ascending, then descending FEP total within each food.
+        Assert.Equal(streamed.Select(v => v.FoodId).OrderBy(id => id), streamed.Select(v => v.FoodId));
+        foreach (var group in streamed.GroupBy(v => v.FoodId))
+        {
+            var totals = group.Select(v => v.Feps.Sum(f => f.Value)).ToList();
+            Assert.Equal(totals.OrderByDescending(t => t), totals);
+        }
+    }
+
+    /// <summary>Streaming honours the same "no tenant, no rows" guard as the buffered path.</summary>
+    [Fact]
+    public async Task StreamAllVariations_EmptyWithoutTenantContext()
+    {
+        var noTenant = new Mock<ITenantContextAccessor>();
+        noTenant.Setup(x => x.GetCurrentTenantId()).Returns((string?)null);
+
+        var service = new FoodCatalogService(
+            _db,
+            new MemoryCache(new MemoryCacheOptions()),
+            noTenant.Object,
+            Mock.Of<ILogger<FoodCatalogService>>());
+
+        var streamed = 0;
+        await foreach (var _ in service.StreamAllVariationsAsync())
+        {
+            streamed++;
+        }
+
+        Assert.Equal(0, streamed);
+    }
+
     private (int BreadId, int StewId) Seed()
     {
         var now = DateTime.UtcNow;
