@@ -192,7 +192,7 @@
 
     private async Task ConfirmAndDeleteUser(UnassignedUserDto user)
     {
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Remove user?",
             $"Permanently delete user '{user.Username}'? This cannot be undone.",
             yesText: "Delete",

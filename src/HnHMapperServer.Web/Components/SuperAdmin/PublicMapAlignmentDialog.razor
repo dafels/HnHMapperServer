@@ -241,7 +241,7 @@
     {
         if (_report is { HasConflicts: true })
         {
-            var confirmed = await DialogService.ShowMessageBox(
+            var confirmed = await DialogService.ShowMessageBoxAsync(
                 "Regenerate with conflicts?",
                 $"This merge has {_report.WarningCount} contradiction(s). Sources that disagree on alignment will be kept as separate landmasses. Regenerate anyway?",
                 yesText: "Regenerate", cancelText: "Cancel");

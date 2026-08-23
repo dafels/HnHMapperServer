@@ -267,7 +267,7 @@
 
     private async Task ShowRemoveUserDialog(TenantUserDto user)
     {
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Remove User",
             $"Are you sure you want to remove '{user.Username}' from this organization? This will revoke their tokens and remove all their permissions.",
             yesText: "Remove",

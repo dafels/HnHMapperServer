@@ -31,12 +31,13 @@
                                @bind-Files:after="OnFileSelected"
                                MaximumFileCount="1"
                                Disabled="@isImporting">
-                    <ActivatorContent>
+                    <CustomContent Context="upload">
                         <MudButton Variant="Variant.Filled"
                                    Color="Color.Primary"
                                    StartIcon="@Icons.Material.Filled.AttachFile"
                                    Disabled="@isImporting"
-                                   FullWidth="true">
+                                   FullWidth="true"
+                                   OnClick="@upload.OpenFilePickerAsync">
                             @if (selectedFile != null)
                             {
                                 @($"Selected: {selectedFile.Name}")
@@ -46,7 +47,7 @@
                                 @("Select .hmap File")
                             }
                         </MudButton>
-                    </ActivatorContent>
+                    </CustomContent>
                 </MudFileUpload>
             </MudItem>
 
@@ -706,7 +707,7 @@
     /// <summary>
     /// Server-side data loader for MudDataGrid pagination.
     /// </summary>
-    private async Task<GridData<AdminMapDto>> LoadMapsAsync(GridState<AdminMapDto> state)
+    private async Task<GridData<AdminMapDto>> LoadMapsAsync(GridState<AdminMapDto> state, CancellationToken cancellationToken)
     {
         isLoading = true;
         try
@@ -802,7 +803,7 @@
     /// </summary>
     private async Task ShowDeleteConfirmation(AdminMapDto map)
     {
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Delete Map",
             $"Are you sure you want to delete map '{map.Name}' (ID: {map.Id})?\n\n" +
             "This will permanently delete:\n" +

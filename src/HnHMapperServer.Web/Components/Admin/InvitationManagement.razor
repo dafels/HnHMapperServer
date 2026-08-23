@@ -84,7 +84,7 @@
             </MudAlert>
         }
 
-        <MudTabs Elevation="2" Rounded="true" ApplyEffectsToContainer="true" PanelClass="pa-4">
+        <MudTabs Elevation="2" Rounded="true" ApplyEffectsToContainer="true" TabPanelsClass="pa-4">
             <MudTabPanel Text="Active" Icon="@Icons.Material.Filled.CheckCircle" BadgeData="@_activeCount.ToString()">
                 <InvitationTable Invitations="@_activeInvitations"
                                 Status="Active"
@@ -256,7 +256,7 @@
 
     private async Task RevokeInvitation(HnHMapperServer.Core.DTOs.InvitationDto invitation)
     {
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Revoke invite link",
             $"Nobody will be able to join with this link anymore ({invitation.UseCount} joined so far). People who already joined keep their access.",
             yesText: "Revoke",

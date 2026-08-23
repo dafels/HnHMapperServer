@@ -238,7 +238,7 @@
 
     private async Task RebuildWebpTiles(GlobalMapDto map)
     {
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Rebuild WebP tiles",
             $"Rebuild the viewer tile pyramid of map '{map.Name}' (ID: {map.Id}, tenant '{map.TenantName}')? " +
             "All its WebP zoom tiles are deleted and regenerated from the current map data. " +
@@ -290,7 +290,7 @@
 
     private async Task DeleteMap(GlobalMapDto map)
     {
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Confirm Deletion",
             $"Are you sure you want to delete map '{map.Name}' (ID: {map.Id}) from tenant '{map.TenantName}'? This will delete all tiles, markers, and custom markers associated with this map. This action cannot be undone.",
             yesText: "Delete",

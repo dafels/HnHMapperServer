@@ -2749,7 +2749,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
     private async Task DeleteCustomMarkerAsync(CustomMarkerViewModel marker)
     {
-        var confirm = await DialogService.ShowMessageBox(
+        var confirm = await DialogService.ShowMessageBoxAsync(
             "Delete Custom Marker",
             $"Are you sure you want to delete the marker '{marker.Title}'?",
             yesText: "Delete",
@@ -3101,7 +3101,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         if (road == null) return;
         HideAllContextMenus();
 
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Delete Road",
             $"Are you sure you want to delete the road '{road.Name}'?",
             yesText: "Delete", cancelText: "Cancel");

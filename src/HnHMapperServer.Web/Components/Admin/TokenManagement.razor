@@ -193,7 +193,7 @@
 
     private async Task ShowRevokeTokenDialog(TokenDto token)
     {
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Revoke Token",
             $"Are you sure you want to revoke this token for user '{token.Username}'? This action cannot be undone and will immediately invalidate the token.",
             yesText: "Revoke",

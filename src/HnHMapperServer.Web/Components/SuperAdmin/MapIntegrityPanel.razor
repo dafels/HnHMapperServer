@@ -351,7 +351,7 @@
 
     private async Task RebuildWebpTiles(string tenantId, string tenantName, int mapId, string mapName)
     {
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Rebuild WebP tiles",
             $"Rebuild the viewer tile pyramid of map '{mapName}' (ID: {mapId}, tenant '{tenantName}')? " +
             "All its WebP zoom tiles are deleted and regenerated from the current map data. " +
@@ -404,7 +404,7 @@
     private async Task RebuildAllDrifted()
     {
         var driftCount = _report?.WebpDrift.Count ?? 0;
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Rebuild all drifted WebP pyramids",
             $"Rebuild the WebP tile pyramids of all {driftCount} drifted map(s)? The server re-checks " +
             "which maps are drifted and rebuilds each from its current data. Ghost imagery of " +
@@ -455,7 +455,7 @@
 
     private async Task PurgeOrphans(TenantOrphanStorageDto orphans)
     {
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Purge orphaned storage",
             $"Delete orphaned map storage of tenant '{orphans.TenantName}'? This removes " +
             $"{orphans.OrphanedTileRows:N0} tile rows on {orphans.DeadMapIds.Count} dead map(s), " +

@@ -27,11 +27,12 @@
                                Accept=".json"
                                MaximumFileCount="3"
                                Disabled="@(_isImporting || string.IsNullOrEmpty(_tenantId))">
-                    <ActivatorContent>
+                    <CustomContent Context="upload">
                         <MudButton Variant="Variant.Filled"
                                    Color="Color.Success"
                                    StartIcon="@Icons.Material.Filled.CloudUpload"
-                                   Disabled="@(_isImporting || string.IsNullOrEmpty(_tenantId))">
+                                   Disabled="@(_isImporting || string.IsNullOrEmpty(_tenantId))"
+                                   OnClick="@upload.OpenFilePickerAsync">
                             @if (_isImporting)
                             {
                                 <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
@@ -42,7 +43,7 @@
                                 <span>Import food data</span>
                             }
                         </MudButton>
-                    </ActivatorContent>
+                    </CustomContent>
                 </MudFileUpload>
 
                 @if (string.IsNullOrEmpty(_tenantId))
@@ -301,7 +302,7 @@
               "extra recipe variations, world tags and contributor credits cannot be restored from a game " +
               "data dump. Use <em>Export cookbook</em> first if you want a backup.";
 
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Replace the entire cookbook?",
             (MarkupString)($"Importing <strong>{System.Net.WebUtility.HtmlEncode(foodsFile.Name)}</strong> " +
                            $"permanently deletes the current catalog — <strong>{_status.FoodCount} foods</strong> " +
@@ -365,7 +366,7 @@
             return;
         }
 
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Clear all food data?",
             (MarkupString)($"This permanently deletes <strong>{_status.FoodCount} foods</strong> and " +
                            $"<strong>{_status.VariantCount:N0} recipe variations</strong> from your organization's cookbook — " +
@@ -427,7 +428,7 @@
         }
 
         var label = GameWorlds.DisplayName(_assignWorld);
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             $"Assign all untagged data to {label}?",
             (MarkupString)($"This tags <strong>{status.UntaggedFoodCount} foods</strong> and " +
                            $"<strong>{status.UntaggedVariantCount:N0} recipe variations</strong> that have no world " +

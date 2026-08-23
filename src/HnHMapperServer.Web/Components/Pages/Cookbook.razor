@@ -3838,7 +3838,7 @@
 
     private async Task DeletePanelAsync(FoodPanelDto panel)
     {
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Delete panel",
             $"Delete '{panel.Name}'{(panel.Items.Count > 0 ? $" and its {panel.Items.Count} foods" : "")}?",
             yesText: "Delete", cancelText: "Cancel");

@@ -212,7 +212,7 @@
 
     private async Task RejectUser(PendingUserDto user)
     {
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Reject User",
             $"Are you sure you want to reject {user.Username}? This will delete their account and cannot be undone.",
             yesText: "Reject",

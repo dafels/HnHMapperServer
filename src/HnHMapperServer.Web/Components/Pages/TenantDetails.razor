@@ -314,7 +314,7 @@ else
     {
         if (_tenant == null) return;
 
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Suspend Tenant",
             $"Are you sure you want to suspend '{_tenant.Name}'? This will prevent all users in this tenant from accessing the system until it is reactivated.",
             yesText: "Suspend",
@@ -352,7 +352,7 @@ else
     {
         if (_tenant == null) return;
 
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Activate Tenant",
             $"Are you sure you want to activate '{_tenant.Name}'? This will restore access for all users in this tenant.",
             yesText: "Activate",
@@ -473,7 +473,7 @@ else
 
     private async Task RemoveUser(TenantUserDto user)
     {
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Remove User from Tenant",
             $"Are you sure you want to remove '{user.Username}' from tenant '{_tenant?.Name}'? " +
             $"This will revoke all access and permissions for this user.",

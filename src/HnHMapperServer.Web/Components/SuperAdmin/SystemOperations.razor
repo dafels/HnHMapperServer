@@ -131,7 +131,7 @@
 
     private async Task ShowWipeConfirmation()
     {
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Wipe Database",
             "Are you sure you want to wipe all data? This will delete all grids, markers, tiles, maps, characters, sessions, and configuration. User accounts will be preserved. This action cannot be undone!",
             yesText: "Wipe Everything",

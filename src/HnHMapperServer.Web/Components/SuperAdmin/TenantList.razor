@@ -262,7 +262,7 @@
 
     private async Task SuspendTenant(TenantListDto tenant)
     {
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Suspend Tenant",
             $"Are you sure you want to suspend '{tenant.Name}'? This will prevent all users in this tenant from accessing the system until it is reactivated.",
             yesText: "Suspend",
@@ -297,7 +297,7 @@
 
     private async Task ActivateTenant(TenantListDto tenant)
     {
-        var result = await DialogService.ShowMessageBox(
+        var result = await DialogService.ShowMessageBoxAsync(
             "Activate Tenant",
             $"Are you sure you want to activate '{tenant.Name}'? This will restore access for all users in this tenant.",
             yesText: "Activate",

@@ -36,11 +36,12 @@
                                   FilesChanged="OnFilesSelected"
                                   Accept=".hmap"
                                   Disabled="@_isUploading">
-                        <ActivatorContent>
+                        <CustomContent Context="upload">
                             <MudButton Variant="Variant.Filled"
                                       Color="Color.Success"
                                       StartIcon="@Icons.Material.Filled.CloudUpload"
-                                      Disabled="@_isUploading">
+                                      Disabled="@_isUploading"
+                                      OnClick="@upload.OpenFilePickerAsync">
                                 @if (_isUploading)
                                 {
                                     <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
@@ -51,7 +52,7 @@
                                     <span>Select .hmap Files</span>
                                 }
                             </MudButton>
-                        </ActivatorContent>
+                        </CustomContent>
                     </MudFileUpload>
                     <MudText Typo="Typo.caption" Color="Color.Secondary">
                         Hold Ctrl or Shift to select multiple files
@@ -483,7 +484,7 @@
             return;
         }
 
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Delete HMap Source",
             $"Are you sure you want to delete '{source.Name}' ({source.FileName})? This will also delete the file from storage.",
             "Delete", cancelText: "Cancel");

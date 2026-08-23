@@ -373,7 +373,7 @@
 
     private async Task DeletePublicMap(PublicMapDto publicMap)
     {
-        var confirmed = await DialogService.ShowMessageBox(
+        var confirmed = await DialogService.ShowMessageBoxAsync(
             "Delete Public Map",
             $"Are you sure you want to delete '{publicMap.Name}'? This will also delete all generated tiles.",
             "Delete", cancelText: "Cancel");
