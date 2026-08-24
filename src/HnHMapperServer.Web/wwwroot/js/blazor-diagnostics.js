@@ -64,14 +64,28 @@
         }
     }, true);
 
-    // Capture unhandled promise rejections
+    // Capture unhandled promise rejections - logged and kept for getBlazorDiagnostics(),
+    // but deliberately NOT shown in the banner. A rejected JS->.NET call does not break
+    // the circuit; the page keeps working. The recurring example is MudBlazor's throttled
+    // 'OnSizeChanged' resize callback firing against an object reference that died with a
+    // paused circuit or a disposed component - with DetailedErrors off, every such server
+    // refusal collapses into the same generic "There was an exception invoking '...'"
+    // text. Painting "Blazor Circuit Error" for those made real failures indistinguishable.
+    // Circuit-level failures still show the banner: the start/reconnect hooks below, plus
+    // Blazor's own fatal-error display of #blazor-error-ui.
     window.addEventListener('unhandledrejection', function (event) {
         const reason = event.reason;
-        showErrorDetails(
-            'Unhandled Promise Rejection',
-            reason?.message || String(reason),
-            reason?.stack || JSON.stringify(reason, null, 2)
-        );
+        lastError = {
+            errorType: 'Unhandled Promise Rejection',
+            message: reason?.message || String(reason),
+            details: reason?.stack || JSON.stringify(reason, null, 2),
+            timestamp: new Date().toISOString()
+        };
+        console.error('[Blazor Diagnostics] Unhandled promise rejection (banner suppressed):', {
+            reason,
+            circuitState,
+            reconnectionAttempts
+        });
     });
 
     // Hook into Blazor's reconnection events

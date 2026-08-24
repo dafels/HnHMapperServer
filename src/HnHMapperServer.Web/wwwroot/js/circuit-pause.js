@@ -7,12 +7,22 @@
 // serialized snapshot; resuming rebuilds it when the tab comes back.
 //
 // .NET 11 ships this as a built-in AutoPause package with a HiddenDelay. Until then this is
-// the documented manual pattern, plus two things the docs' sample omits:
+// the documented manual pattern, plus three things the docs' sample omits:
 //   1. A delay, so flicking between tabs doesn't churn circuits.
 //   2. Handling the boolean both calls return. resumeCircuit() returning false means the
 //      state was evicted or expired; without a fallback the page sits there silently dead
 //      (dotnet/aspnetcore#64607). We reload instead, which is the same recovery the user
 //      would do by hand.
+//   3. Purging JS-side listeners that hold DotNetObjectReferences into the paused circuit.
+//      Component disposal during a pause cannot reach the browser (the circuit is already
+//      disconnected, so MudBlazor swallows the JSDisconnectedException and its JS-side
+//      cancelListener call never happens). The orphaned listeners keep watching the same
+//      DOM nodes and fire invokeMethodAsync against object ids the resumed circuit does
+//      not track - which surfaces as "There was an exception invoking 'OnSizeChanged'"
+//      right after the resume's loading overlay clears (the reflow is what triggers the
+//      stale ResizeObserver). The resumed circuit re-renders from scratch (fresh
+//      firstRender), so it re-creates every listener it needs; the old ones are garbage
+//      by definition the moment the pause succeeds.
 (function () {
     'use strict';
 
@@ -40,6 +50,42 @@
             && typeof window.Blazor.resumeCircuit === 'function';
     }
 
+    // Drops MudBlazor's JS-side listeners whose DotNetObjectReferences died with the
+    // paused circuit (see point 3 above). Only registries whose entries the resumed
+    // circuit provably re-creates are purged: MudTabs re-runs Observe() on its fresh
+    // firstRender, and the viewport service re-registers its window-resize listener the
+    // same way. Everything is best-effort - these are MudBlazor globals (stable public
+    // interop names, but not our code), and a purge failure must never break the pause.
+    function purgeDeadDotNetListeners() {
+        try {
+            // window.mudResizeObserver: per-observer ResizeObservers (MudTabs' scroll
+            // buttons / slider). cancelListener(id) disconnects the observer and voids
+            // its dotNetRef, so a still-pending throttle timeout (cancelListener does
+            // not clearTimeout - upstream flaw as of MudBlazor 9.8.0 and dev) lands in
+            // resizeHandler's try/catch instead of a dead invokeMethodAsync.
+            var ro = window.mudResizeObserver;
+            if (ro && ro._maps) {
+                Object.keys(ro._maps).forEach(function (id) {
+                    try { ro.cancelListener(id); } catch (e) { /* best effort */ }
+                });
+                log('purged resize observers');
+            }
+        } catch (e) {
+            log('resize observer purge threw: ' + e);
+        }
+        try {
+            // window.mudResizeListenerFactory: window-resize listeners (breakpoint /
+            // viewport service, RaiseOnResized) - same dead-reference class.
+            var rlf = window.mudResizeListenerFactory;
+            if (rlf && typeof rlf.dispose === 'function') {
+                rlf.dispose();
+                log('purged resize listeners');
+            }
+        } catch (e) {
+            log('resize listener purge threw: ' + e);
+        }
+    }
+
     async function pauseNow() {
         pauseTimer = null;
         if (paused || resuming || !canPause() || document.visibilityState !== 'hidden') {
@@ -49,6 +95,9 @@
             var ok = await window.Blazor.pauseCircuit();
             paused = ok === true;
             log(ok ? 'paused' : 'pause declined (not connected yet, or already paused)');
+            if (paused) {
+                purgeDeadDotNetListeners();
+            }
         } catch (e) {
             log('pause threw: ' + e);
         }
