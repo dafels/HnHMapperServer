@@ -30,6 +30,10 @@
                                         <MudIcon Icon="@Icons.Material.Filled.Home" Size="Size.Small" Color="Color.Primary" />
                                     }
                                     <MudText>@map.MapInfo.Name</MudText>
+                                    <MudSpacer />
+                                    <MudText Typo="Typo.caption" Style="color: #67747f; white-space: nowrap;">
+                                        @(map.Size == 1 ? "1 tile" : $"{map.Size:N0} tiles")
+                                    </MudText>
                                 </MudStack>
                             </MudListItem>
                         }
@@ -64,6 +68,10 @@
                                         <MudIcon Icon="@Icons.Material.Filled.Home" Size="Size.Small" Color="Color.Primary" />
                                     }
                                     <MudText>@map.MapInfo.Name</MudText>
+                                    <MudSpacer />
+                                    <MudText Typo="Typo.caption" Style="color: #67747f; white-space: nowrap;">
+                                        @(map.Size == 1 ? "1 tile" : $"{map.Size:N0} tiles")
+                                    </MudText>
                                 </MudStack>
                             </MudListItem>
                         }

@@ -109,6 +109,25 @@ public class TileRepository : ITileRepository
         return entities.Select(MapToDomain).ToList();
     }
 
+    public async Task<Dictionary<int, int>> GetTileCountsByMapAsync(int zoom = 0)
+    {
+        // Explicit tenant filtering for defense-in-depth
+        var currentTenantId = _tenantContext.GetCurrentTenantId();
+
+        var query = _context.Tiles.AsNoTracking().Where(t => t.Zoom == zoom);
+
+        // If tenant context is available, add explicit filter
+        if (!string.IsNullOrEmpty(currentTenantId))
+        {
+            query = query.Where(t => t.TenantId == currentTenantId);
+        }
+
+        return await query
+            .GroupBy(t => t.MapId)
+            .Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Key, x => x.Count);
+    }
+
     public async Task DeleteTilesByMapAsync(int mapId)
     {
         // Explicit tenant filtering for defense-in-depth

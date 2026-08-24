@@ -1871,6 +1871,16 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             // A brand-new map is never the main map.
             updatedMap.MapInfo.IsMainMap = existingMap?.MapInfo.IsMainMap ?? false;
 
+            // Size (zoom-0 tile count) is likewise not computed on the SSE scope — the
+            // payload always carries 0. Keep the count from the last full list fetch so a
+            // rename/settings upsert doesn't zero it and re-sort the map to the bottom;
+            // brand-new maps genuinely start at 0. Counts refresh on the next list fetch
+            // (page load / Maps panel open).
+            if (existingMap != null && updatedMap.Size == 0)
+            {
+                updatedMap.Size = existingMap.Size;
+            }
+
             if (updatedMap.MapInfo.Hidden)
             {
                 // The viewer's list only holds visible maps (GET /map/api/maps parity).

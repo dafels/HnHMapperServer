@@ -302,6 +302,7 @@ public static class MapEndpoints
         HttpContext context,
         IMapRepository mapRepository,
         IConfigRepository configRepository,
+        ITileRepository tileRepository,
         HnHMapperServer.Api.Services.MapRevisionCache revisionCache)
     {
         if (!context.User.Identity?.IsAuthenticated ?? true)
@@ -311,9 +312,8 @@ public static class MapEndpoints
 
         var config = await configRepository.GetConfigAsync();
         var maps = await mapRepository.GetAllMapsAsync();
+        var tileCounts = await tileRepository.GetTileCountsByMapAsync(); // zoom-0 = mapped cells
         var visibleMaps = maps.Where(m => !m.Hidden)
-            .OrderByDescending(m => m.Priority)  // Higher priority first (e.g., 1, 0, -1)
-            .ThenBy(m => m.Name)
             .Select(m => new
             {
                 ID = m.Id,
@@ -327,8 +327,11 @@ public static class MapEndpoints
                     DefaultStartX = m.DefaultStartX,
                     DefaultStartY = m.DefaultStartY
                 },
-                Size = 0  // Size not used in frontend, set to 0
+                Size = tileCounts.GetValueOrDefault(m.Id)  // zoom-0 tile count, shown in the map selector
             })
+            .OrderByDescending(x => x.MapInfo.Priority)  // Higher priority first (e.g., 1, 0, -1)
+            .ThenByDescending(x => x.Size)               // Most-mapped first within a priority band
+            .ThenBy(x => x.MapInfo.Name)
             .ToList();
 
         return Results.Json(visibleMaps);

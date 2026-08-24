@@ -176,11 +176,13 @@ public class MapNavigationService
 
     /// <summary>
     /// Canonical map ordering used everywhere (init load, live upserts, panel refetch):
-    /// main map first, then priority (descending), then name.
+    /// main map first, then priority (descending), then tile count (descending — the most
+    /// mapped-out maps first within a priority band), then name.
     /// </summary>
     private static List<MapInfoModel> SortMaps(IEnumerable<MapInfoModel> maps) =>
         maps.OrderByDescending(m => m.MapInfo.IsMainMap)
             .ThenByDescending(m => m.MapInfo.Priority)
+            .ThenByDescending(m => m.Size)
             .ThenBy(m => m.MapInfo.Name)
             .ToList();
 

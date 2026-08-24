@@ -146,6 +146,45 @@ public class TileRepositorySaveBatchTests : IDisposable
         Assert.Equal(3, await _dbContext.Tiles.AsNoTracking().CountAsync(t => t.MapId == 7));
     }
 
+    [Fact]
+    public async Task GetTileCountsByMapAsync_CountsZoom0PerMap_TenantScoped()
+    {
+        // Feeds the map selector: per-map zoom-0 counts only (the pyramid rows are derived),
+        // scoped to the current tenant.
+        _dbContext.Tenants.Add(new TenantEntity
+        {
+            Id = "other-tenant",
+            Name = "other-tenant",
+            StorageQuotaMB = 1024,
+            CurrentStorageMB = 0,
+            CreatedAt = DateTime.UtcNow,
+            IsActive = true
+        });
+        await _dbContext.SaveChangesAsync();
+
+        await _repository.SaveTilesBatchAsync(new[]
+        {
+            Tile(7, 0, 0, "a.png"),
+            Tile(7, 1, 0, "b.png"),
+            Tile(7, 0, 0, "z1.png", zoom: 1),   // pyramid row — must not count
+            Tile(8, 0, 0, "c.png")
+        });
+        _dbContext.Tiles.Add(new TileDataEntity
+        {
+            MapId = 9, CoordX = 0, CoordY = 0, Zoom = 0,
+            File = "foreign.png", Cache = 1, TenantId = "other-tenant", FileSizeBytes = 10
+        });
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var counts = await _repository.GetTileCountsByMapAsync();
+
+        Assert.Equal(2, counts.Count);
+        Assert.Equal(2, counts[7]);
+        Assert.Equal(1, counts[8]);
+        Assert.False(counts.ContainsKey(9)); // other tenant's map never appears
+    }
+
     /// <summary>
     /// Simulates a concurrent writer (live gridUpdate, background zoom rebuild): the first
     /// armed SaveChanges that is about to insert Tiles rows gets a raw-SQL insert of the
