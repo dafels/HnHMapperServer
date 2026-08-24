@@ -20,7 +20,11 @@ namespace HnHMapperServer.Tests;
 /// ":memory:" connection (real SQL semantics) and synthetic binary .hmap files — Version-1
 /// grid records carry no tilesets, so the tile prefetch gets an empty list and the renderer
 /// paints gray: fully offline.
+/// The collection serializes all classes that call ImportAsync: its STATIC global import
+/// lock is try-acquire (TimeSpan.Zero), so parallel test classes would reject each other
+/// with "Another import is already in progress".
 /// </summary>
+[Collection("HmapImportGlobalLock")]
 public class HmapImportServiceMergeTests : IDisposable
 {
     private readonly SqliteConnection _connection;
@@ -93,6 +97,7 @@ public class HmapImportServiceMergeTests : IDisposable
             mockMapNameService.Object,
             Mock.Of<IMarkerService>(),
             mockNotificationService.Object,
+            _dbContext,
             Mock.Of<ILogger<HmapImportService>>());
     }
 

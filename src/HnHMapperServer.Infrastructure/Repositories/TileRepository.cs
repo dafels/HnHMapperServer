@@ -155,18 +155,61 @@ public class TileRepository : ITileRepository
         var tileList = tiles.ToList();
         if (tileList.Count == 0) return;
 
+        // Dedupe within the incoming batch by the DB unique index (MapId, Zoom, CoordX, CoordY):
+        // the existence check below only filters against rows already in the database, so two
+        // tiles sharing a key inside ONE batch would both pass it and fail SaveChanges. First
+        // occurrence wins — callers that care pick the winner before calling.
+        if (tileList.Count > 1)
+        {
+            tileList = tileList.DistinctBy(t => (t.MapId, t.Zoom, t.Coord.X, t.Coord.Y)).ToList();
+        }
+
         if (skipExistenceCheck)
         {
-            // Caller guarantees no duplicates (e.g., newly generated zoom tiles)
-            // Skip the expensive existence check query
+            // Caller guarantees the tiles don't already exist in the DB (e.g., newly generated
+            // zoom tiles for a fresh map) — skip the expensive existence check query
             var tileEntities = tileList.Select(MapFromDomain).ToList();
             _context.Tiles.AddRange(tileEntities);
             await _context.SaveChangesAsync();
             return;
         }
 
-        // Filter out tiles that already exist to avoid UNIQUE constraint violations
-        // Tile uniqueness: (MapId, CoordX, CoordY, Zoom, TenantId)
+        var newTiles = await FilterToTilesMissingFromDbAsync(tileList);
+        if (newTiles.Count == 0) return;
+
+        var entities = newTiles.Select(MapFromDomain).ToList();
+        _context.Tiles.AddRange(entities);
+        try
+        {
+            await _context.SaveChangesAsync();
+        }
+        catch (DbUpdateException)
+        {
+            // Lost a check-then-insert race: a concurrent writer (live gridUpdate, background
+            // zoom rebuild) inserted one of these keys between the existence check and the
+            // save. Detach this batch so the failed inserts stop poisoning the context,
+            // re-check, and retry once with the survivors — a second failure is a real error
+            // and propagates.
+            foreach (var entity in entities)
+            {
+                _context.Entry(entity).State = EntityState.Detached;
+            }
+
+            var retryTiles = await FilterToTilesMissingFromDbAsync(newTiles);
+            if (retryTiles.Count == 0) return;
+
+            _context.Tiles.AddRange(retryTiles.Select(MapFromDomain));
+            await _context.SaveChangesAsync();
+        }
+    }
+
+    /// <summary>
+    /// Filters out tiles that already exist in the database. Tile uniqueness is the
+    /// (MapId, Zoom, CoordX, CoordY) unique index; TenantId is part of the key here for
+    /// defense-in-depth (map ids never span tenants).
+    /// </summary>
+    private async Task<List<TileData>> FilterToTilesMissingFromDbAsync(List<TileData> tileList)
+    {
         var existingKeys = new HashSet<(int MapId, int X, int Y, int Zoom, string TenantId)>();
 
         // Check in chunks with optimized coordinate-specific queries
@@ -198,14 +241,8 @@ public class TileRepository : ITileRepository
             }
         }
 
-        var newTiles = tileList
+        return tileList
             .Where(t => !existingKeys.Contains((t.MapId, t.Coord.X, t.Coord.Y, t.Zoom, t.TenantId)))
             .ToList();
-
-        if (newTiles.Count == 0) return;
-
-        var entities = newTiles.Select(MapFromDomain).ToList();
-        _context.Tiles.AddRange(entities);
-        await _context.SaveChangesAsync();
     }
 }

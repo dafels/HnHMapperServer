@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Threading.Channels;
 using HnHMapperServer.Core.Interfaces;
 using HnHMapperServer.Core.Models;
+using HnHMapperServer.Infrastructure.Data;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.Extensions.Logging;
 using SixLabors.ImageSharp;
@@ -142,6 +143,7 @@ public class HmapImportService : IHmapImportService
     private readonly IMapNameService _mapNameService;
     private readonly IMarkerService _markerService;
     private readonly IUpdateNotificationService _updateNotificationService;
+    private readonly ApplicationDbContext _dbContext;
     private readonly ILogger<HmapImportService> _logger;
     private const int GRID_SIZE = 100; // 100x100 tiles per grid
 
@@ -164,6 +166,7 @@ public class HmapImportService : IHmapImportService
         IMapNameService mapNameService,
         IMarkerService markerService,
         IUpdateNotificationService updateNotificationService,
+        ApplicationDbContext dbContext,
         ILogger<HmapImportService> logger)
     {
         _gridRepository = gridRepository;
@@ -175,6 +178,7 @@ public class HmapImportService : IHmapImportService
         _mapNameService = mapNameService;
         _markerService = markerService;
         _updateNotificationService = updateNotificationService;
+        _dbContext = dbContext;
         _logger = logger;
     }
 
@@ -457,11 +461,17 @@ public class HmapImportService : IHmapImportService
                     var segmentMarkers = hmapData.GetMarkersForSegment(segmentId);
                     var segmentGrids = hmapData.GetGridsForSegment(segmentId);
 
-                    // Build lookup: (GridTileX, GridTileY) -> GridId
-                    var gridLookup = segmentGrids.ToDictionary(
-                        g => (g.TileX, g.TileY),
-                        g => g.GridIdString
-                    );
+                    // Build lookup: (GridTileX, GridTileY) -> GridId. A corrupted export can
+                    // carry two grids claiming the same cell — a plain ToDictionary would
+                    // throw on the duplicate key, and markers must resolve to the same winner
+                    // the grid import kept. Sentinel (GridId 0) grids are never imported, so
+                    // markers on their cells count as "no grid found" instead of attaching
+                    // to the placeholder id.
+                    var gridLookup = KeepNewestGridPerCell(segmentGrids.Where(g => g.GridId != 0))
+                        .ToDictionary(
+                            g => (g.TileX, g.TileY),
+                            g => g.GridIdString
+                        );
 
                     foreach (var marker in segmentMarkers)
                     {
@@ -585,6 +595,13 @@ public class HmapImportService : IHmapImportService
         _logger.LogInformation("Cleaning up failed import for tenant {TenantId}: {MapCount} maps, {GridCount} grids",
             tenantId, mapIds.Count(), gridIds.Count());
 
+        // Cleanup shares the failed import's DbContext (same DI scope). A failed SaveChanges
+        // leaves its entities tracked in Added state and EF retries them on EVERY subsequent
+        // SaveChanges — without this, each delete below rethrows the original error (e.g. a
+        // Tiles UNIQUE violation) and cleanup deletes nothing. Cleanup's whole job is to
+        // discard the import, so dropping pending tracked state is exactly right here.
+        _dbContext.ChangeTracker.Clear();
+
         // Delete grids first (they may reference maps)
         foreach (var gridId in gridIds)
         {
@@ -608,6 +625,21 @@ public class HmapImportService : IHmapImportService
         {
             try
             {
+                // DB rows first, disk after: if a DB delete throws, the files are still intact
+                // (a consistent, retryable map instead of a fileless one); if the disk delete
+                // fails, the map is already gone from the DB and the leftover files are plain
+                // orphans the integrity purge can reclaim. The original order deleted the
+                // directory first, so a mid-cleanup failure stranded a live map with no files.
+
+                // Delete all tile records for this map
+                await _tileRepository.DeleteTilesByMapAsync(mapId);
+
+                // Delete all overlay records for this map
+                await _overlayRepository.DeleteByMapAsync(mapId);
+
+                // Delete map record
+                await _mapRepository.DeleteMapAsync(mapId);
+
                 // Delete map directory (includes all tile files)
                 var mapDir = Path.Combine(gridStorage, "tenants", tenantId, mapId.ToString());
                 long totalDeletedBytes = 0;
@@ -645,14 +677,6 @@ public class HmapImportService : IHmapImportService
                     await _quotaService.IncrementStorageUsageAsync(tenantId, -sizeMB);
                 }
 
-                // Delete all tile records for this map
-                await _tileRepository.DeleteTilesByMapAsync(mapId);
-
-                // Delete all overlay records for this map
-                await _overlayRepository.DeleteByMapAsync(mapId);
-
-                // Delete map record
-                await _mapRepository.DeleteMapAsync(mapId);
                 _logger.LogDebug("Deleted map {MapId}", mapId);
             }
             catch (Exception ex)
@@ -663,6 +687,19 @@ public class HmapImportService : IHmapImportService
 
         _logger.LogInformation("Cleanup completed for tenant {TenantId}", tenantId);
     }
+
+    /// <summary>
+    /// Collapses grids that claim the same segment cell to the one with the newest
+    /// ModifiedTime (file order breaks ties). A client cache that went through cell
+    /// flip-flop corruption exports multiple grid ids for one cell; importing more than one
+    /// per cell double-claims the cell and violates the Tiles unique index. Shared by the
+    /// grid import and the marker grid-lookup so both agree on the winner.
+    /// </summary>
+    internal static List<HmapGridData> KeepNewestGridPerCell(IEnumerable<HmapGridData> grids)
+        => grids
+            .GroupBy(g => (g.TileX, g.TileY))
+            .Select(group => group.OrderByDescending(g => g.ModifiedTime).First())
+            .ToList();
 
     private async Task<(int mapId, bool isNewMap, int gridsImported, int gridsSkipped, List<string> createdGridIds, int gridsProcessed)> ImportSegmentAsync(
         long segmentId,
@@ -752,6 +789,23 @@ public class HmapImportService : IHmapImportService
                 _logger.LogInformation("Skipping {SkippedCount} existing/sentinel grids in segment {SegmentId:X}",
                     gridsSkipped, segmentId);
             }
+        }
+
+        // A client cache that went through cell flip-flop corruption exports two DIFFERENT
+        // grid ids claiming the same segment cell. The Grids table has no unique cell index,
+        // but each grid renders a zoom-0 tile at its cell — two grids on one cell violate the
+        // Tiles unique index (MapId, Zoom, CoordX, CoordY) when they land in the same batch.
+        // Keep the newest grid per cell; the survivor owns the cell.
+        var beforeCellDedup = gridsToImport.Count;
+        gridsToImport = KeepNewestGridPerCell(gridsToImport);
+        if (gridsToImport.Count < beforeCellDedup)
+        {
+            var dropped = beforeCellDedup - gridsToImport.Count;
+            gridsSkipped += dropped;
+            _logger.LogWarning(
+                "Segment {SegmentId:X}: dropped {Dropped} grids sharing a cell with another grid in the same segment " +
+                "(corrupted client cache) — keeping the newest grid per cell",
+                segmentId, dropped);
         }
 
         if (gridsToImport.Count == 0)
