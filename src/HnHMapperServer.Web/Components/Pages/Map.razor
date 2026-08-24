@@ -84,22 +84,23 @@
                         OnRoadDelete="@DeleteRoadAsync" />
 
             <MudMainContent>
-                <!-- Floating Menu Button - dynamically positioned based on sidebar state -->
-                <MudFab Color="Color.Primary"
-                        StartIcon="@Icons.Material.Filled.Menu"
-                        OnClick="@(() => isSidebarOpen = !isSidebarOpen)"
-                        Style="@GetMenuButtonStyle()"
-                        Size="Size.Large"
-                        Class="menu-fab"
-                        Title="Toggle menu">
-                    @if (allCharacters.Count > 0)
-                    {
-                        <MudBadge Content="@allCharacters.Count" 
-                                  Color="Color.Success" 
-                                  Overlap="true" 
-                                  Style="position: absolute; top: -8px; right: -8px;" />
-                    }
-                </MudFab>
+                <!-- Floating Menu Button - dynamically positioned based on sidebar state.
+                     MudFab has no ChildContent, so the character-count badge has to wrap the
+                     button rather than sit inside it; the badge root carries the fixed
+                     positioning so the badge anchors to the button. -->
+                <MudBadge Content="@allCharacters.Count"
+                          Color="Color.Success"
+                          Overlap="true"
+                          Visible="@(allCharacters.Count > 0)"
+                          Style="@GetMenuButtonStyle()">
+                    <MudFab Color="Color.Primary"
+                            StartIcon="@Icons.Material.Filled.Menu"
+                            OnClick="@(() => isSidebarOpen = !isSidebarOpen)"
+                            Size="Size.Large"
+                            Class="menu-fab"
+                            aria-label="Toggle menu"
+                            title="Toggle menu" />
+                </MudBadge>
 
                 <!-- Following Indicator (floating) - positioned at top of map area -->
                 @if (isFollowing && followingCharacterId.HasValue)
@@ -243,8 +244,8 @@
                     <MudPaper Elevation="2"
                               Style="@GetControlsHintStyle()"
                               Class="controls-hint">
-                        <MudExpansionPanels @bind-Expanded="@controlsHintExpanded" Elevation="0" DisableGutters="true">
-                            <MudExpansionPanel Text="Map Controls" Dense="true">
+                        <MudExpansionPanels Elevation="0" Gutters="false">
+                            <MudExpansionPanel Text="Map Controls" Dense="true" @bind-Expanded="controlsHintExpanded">
                                 <TitleContent>
                                     <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
                                         <MudIcon Icon="@Icons.Material.Filled.Info" Size="Size.Small" />
@@ -329,7 +330,7 @@
                 @if (isDrawingRoad)
                 {
                     <!-- Drawing Mode Menu -->
-                    <MudList Clickable="true" Dense="true" T="string">
+                    <MudList Dense="true" T="string">
                         <MudListItem OnClick="@HandleFinishRoadFromMenu" T="string" Disabled="@(drawingPointsCount < 2)">
                             <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
                                 <MudIcon Icon="@Icons.Material.Filled.Check" Size="Size.Small" Color="@(drawingPointsCount >= 2 ? Color.Success : Color.Default)" />
@@ -347,7 +348,7 @@
                 else
                 {
                     <!-- Normal Menu -->
-                    <MudList Clickable="true" Dense="true" T="string">
+                    <MudList Dense="true" T="string">
                         <MudListItem OnClick="@HandleCreateCustomMarkerFromMenu" T="string">
                             <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
                                 <MudIcon Icon="@Icons.Material.Filled.AddLocation" Size="Size.Small" Color="Color.Success" />
@@ -445,7 +446,8 @@
                                     <code style="font-size: 0.85em; word-break: break-all;">@tileInfoResult.GridId</code>
                                     <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small"
                                                    OnClick="@(() => CopyToClipboard(tileInfoResult.GridId))"
-                                                   Title="Copy to clipboard" />
+                                                   aria-label="Copy to clipboard"
+                                                   title="Copy to clipboard" />
                                 </MudStack>
                             </td>
                         </tr>

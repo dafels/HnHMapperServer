@@ -114,19 +114,22 @@
                                 <MudIconButton Icon="@Icons.Material.Filled.Visibility"
                                               Color="Color.Primary"
                                               Size="Size.Small"
-                                              Title="View Details"
+                                              aria-label="View Details"
+                                              title="View Details"
                                               OnClick="@(() => NavigateToTenantDetails(context))" />
                                 <MudIconButton Icon="@Icons.Material.Filled.Edit"
                                               Color="Color.Info"
                                               Size="Size.Small"
-                                              Title="Edit Tenant"
+                                              aria-label="Edit Tenant"
+                                              title="Edit Tenant"
                                               OnClick="@(() => EditTenant(context))" />
                                 @if (context.IsActive)
                                 {
                                     <MudIconButton Icon="@Icons.Material.Filled.Block"
                                                   Color="Color.Warning"
                                                   Size="Size.Small"
-                                                  Title="Suspend Tenant"
+                                                  aria-label="Suspend Tenant"
+                                                  title="Suspend Tenant"
                                                   OnClick="@(() => SuspendTenant(context))" />
                                 }
                                 else
@@ -134,13 +137,15 @@
                                     <MudIconButton Icon="@Icons.Material.Filled.CheckCircle"
                                                   Color="Color.Success"
                                                   Size="Size.Small"
-                                                  Title="Activate Tenant"
+                                                  aria-label="Activate Tenant"
+                                                  title="Activate Tenant"
                                                   OnClick="@(() => ActivateTenant(context))" />
                                 }
                                 <MudIconButton Icon="@Icons.Material.Filled.DeleteSweep"
                                               Color="Color.Error"
                                               Size="Size.Small"
-                                              Title="Delete all map data (keeps users)"
+                                              aria-label="Delete all map data (keeps users)"
+                                              title="Delete all map data (keeps users)"
                                               OnClick="@(() => PurgeTenantData(context))" />
                             </MudStack>
                         </div>

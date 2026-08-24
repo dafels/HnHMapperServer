@@ -215,6 +215,21 @@ builder.Services.AddMudServices(options =>
         SuppressInitEvent = true,
         NotifyOnBreakpointOnly = false
     };
+
+    // Snackbar defaults. These used to be set as attributes on <MudSnackbarProvider>,
+    // where they were never parameters - MudBlazor swallowed them into UserAttributes,
+    // so the whole configuration was silently inert and the library defaults applied.
+    // SnackbarConfiguration is where they actually live.
+    options.SnackbarConfiguration.PositionClass = Defaults.Classes.Position.BottomLeft;
+    options.SnackbarConfiguration.MaxDisplayedSnackbars = 5;   // same as the default
+    options.SnackbarConfiguration.PreventDuplicates = true;    // same as the default
+    options.SnackbarConfiguration.HideTransitionDuration = 400; // default 2000; snappier dismissal
+
+    // NOT ported: the old markup also carried VisibleStateDuration="400". That is how long a
+    // snackbar stays readable (default 5000ms), not a transition timing - it was almost certainly
+    // meant as a twin of HideTransitionDuration above. Since the attribute never took effect, every
+    // toast this app has ever shown used the 5000ms default; honouring 400ms now would make them
+    // flash past unread. Left at the default deliberately - set it here if a shorter dwell is wanted.
 });
 
 // Add output caching for tile images

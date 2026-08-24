@@ -83,31 +83,31 @@
                 <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
                     <MudText Typo="Typo.caption" Style="width: 20px; flex-shrink: 0;">X</MudText>
                     <MudIconButton Icon="@Icons.Material.Filled.KeyboardDoubleArrowLeft" Size="Size.Small"
-                                   OnClick="@(() => NudgeOffset(-10, 0))" Title="-10" />
+                                   OnClick="@(() => NudgeOffset(-10, 0))" aria-label="X offset -10" title="-10" />
                     <MudIconButton Icon="@Icons.Material.Filled.ChevronLeft" Size="Size.Small"
-                                   OnClick="@(() => NudgeOffset(-1, 0))" Title="-1" />
+                                   OnClick="@(() => NudgeOffset(-1, 0))" aria-label="X offset -1" title="-1" />
                     <MudTextField T="double" Value="@OverlayOffsetX" ValueChanged="@OnOffsetXChangedInternal"
                                   Variant="Variant.Outlined" Margin="Margin.Dense"
                                   Style="width: 80px; flex-shrink: 0;" />
                     <MudIconButton Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small"
-                                   OnClick="@(() => NudgeOffset(1, 0))" Title="+1" />
+                                   OnClick="@(() => NudgeOffset(1, 0))" aria-label="X offset +1" title="+1" />
                     <MudIconButton Icon="@Icons.Material.Filled.KeyboardDoubleArrowRight" Size="Size.Small"
-                                   OnClick="@(() => NudgeOffset(10, 0))" Title="+10" />
+                                   OnClick="@(() => NudgeOffset(10, 0))" aria-label="X offset +10" title="+10" />
                 </MudStack>
                 <!-- Y Offset -->
                 <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
                     <MudText Typo="Typo.caption" Style="width: 20px; flex-shrink: 0;">Y</MudText>
                     <MudIconButton Icon="@Icons.Material.Filled.KeyboardDoubleArrowLeft" Size="Size.Small"
-                                   OnClick="@(() => NudgeOffset(0, -10))" Title="-10" />
+                                   OnClick="@(() => NudgeOffset(0, -10))" aria-label="Y offset -10" title="-10" />
                     <MudIconButton Icon="@Icons.Material.Filled.ChevronLeft" Size="Size.Small"
-                                   OnClick="@(() => NudgeOffset(0, -1))" Title="-1" />
+                                   OnClick="@(() => NudgeOffset(0, -1))" aria-label="Y offset -1" title="-1" />
                     <MudTextField T="double" Value="@OverlayOffsetY" ValueChanged="@OnOffsetYChangedInternal"
                                   Variant="Variant.Outlined" Margin="Margin.Dense"
                                   Style="width: 80px; flex-shrink: 0;" />
                     <MudIconButton Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small"
-                                   OnClick="@(() => NudgeOffset(0, 1))" Title="+1" />
+                                   OnClick="@(() => NudgeOffset(0, 1))" aria-label="Y offset +1" title="+1" />
                     <MudIconButton Icon="@Icons.Material.Filled.KeyboardDoubleArrowRight" Size="Size.Small"
-                                   OnClick="@(() => NudgeOffset(0, 10))" Title="+10" />
+                                   OnClick="@(() => NudgeOffset(0, 10))" aria-label="Y offset +10" title="+10" />
                 </MudStack>
                 <MudStack Row="true" Spacing="2">
                     <MudButton Variant="Variant.Text" Size="Size.Small" OnClick="@ResetOffsetInternal"

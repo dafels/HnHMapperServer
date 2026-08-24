@@ -12,7 +12,8 @@
             <MudIconButton Icon="@Icons.Material.Filled.Close"
                           Size="Size.Small"
                           OnClick="@(() => OnClearRoute.InvokeAsync())"
-                          Title="Clear route" />
+                          aria-label="Clear route"
+                          title="Clear route" />
         </MudStack>
 
         @if (!string.IsNullOrEmpty(Route.Error))
