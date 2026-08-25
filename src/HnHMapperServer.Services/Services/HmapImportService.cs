@@ -446,6 +446,17 @@ public class HmapImportService : IHmapImportService
             tracker.CompletePhase();
 
             // Phase 5: Import markers (batched for performance)
+            if (hmapData.MarkersUnreadable > 0)
+            {
+                // A marker layout this build does not know. Count them as skipped so the
+                // import result says so instead of silently reporting zero markers.
+                result.MarkersSkipped += hmapData.MarkersUnreadable;
+                _logger.LogWarning(
+                    "Could not decode {Count} marker record(s): {Issues}",
+                    hmapData.MarkersUnreadable,
+                    string.Join("; ", hmapData.MarkerParseIssues));
+            }
+
             if (hmapData.Markers.Count > 0)
             {
                 tracker.StartPhase(5, "Importing markers");
@@ -478,20 +489,35 @@ public class HmapImportService : IHmapImportService
                         cancellationToken.ThrowIfCancellationRequested();
                         processedCount++;
 
-                        // Convert marker's absolute tile coords to grid coords
-                        var markerGridX = marker.TileX / GRID_SIZE;
-                        var markerGridY = marker.TileY / GRID_SIZE;
+                        // Convert the marker's absolute tile coords to the grid cell that
+                        // holds it. Truncating division is tried first because that is what
+                        // the game client's own marker uploads use: for negative tile coords
+                        // it names the cell one short of the containing grid and leaves a
+                        // negative in-grid offset, but cell * GRID_SIZE + offset still lands
+                        // on the exact world tile, which is how the frontend renders it
+                        // (FrontendMarker adds grid.Coord * 100). Keeping that convention
+                        // means a re-import dedupes against live client markers by Key.
+                        // Only when the export has no grid at that cell do we fall back to
+                        // the true containing cell (floor) - pre-fix those markers were
+                        // dropped even though their own grid was right there in the file.
+                        var cellX = marker.TileX / GRID_SIZE;
+                        var cellY = marker.TileY / GRID_SIZE;
 
-                        // Find the grid this marker belongs to
-                        if (!gridLookup.TryGetValue((markerGridX, markerGridY), out var gridId))
+                        if (!gridLookup.TryGetValue((cellX, cellY), out var gridId))
                         {
-                            result.MarkersSkipped++;
-                            continue;
+                            cellX = FloorDiv(marker.TileX, GRID_SIZE);
+                            cellY = FloorDiv(marker.TileY, GRID_SIZE);
+
+                            if (!gridLookup.TryGetValue((cellX, cellY), out gridId))
+                            {
+                                result.MarkersSkipped++;
+                                continue;
+                            }
                         }
 
-                        // Extract position within the grid (0-99)
-                        var posX = marker.TileX % GRID_SIZE;
-                        var posY = marker.TileY % GRID_SIZE;
+                        // Position within that grid, so cell * GRID_SIZE + pos == tile coord
+                        var posX = marker.TileX - cellX * GRID_SIZE;
+                        var posY = marker.TileY - cellY * GRID_SIZE;
 
                         // Determine image/icon based on marker type
                         var image = marker switch
@@ -687,6 +713,12 @@ public class HmapImportService : IHmapImportService
 
         _logger.LogInformation("Cleanup completed for tenant {TenantId}", tenantId);
     }
+
+    /// <summary>
+    /// Integer division rounding toward negative infinity, so a negative tile coordinate
+    /// maps to the grid cell that actually contains it (-821 / 100 is -9, not -8).
+    /// </summary>
+    private static int FloorDiv(int value, int divisor) => (int)Math.Floor(value / (double)divisor);
 
     /// <summary>
     /// Collapses grids that claim the same segment cell to the one with the newest
