@@ -155,14 +155,6 @@ public class CustomMarkerStateService
             _logger.LogDebug("Custom markers layer hidden; render deferred");
             return false;
         }
-
-        if (_allCustomMarkers.Count == 0)
-        {
-            _logger.LogDebug("No custom markers loaded for map {MapId}; marking as rendered", currentMapId);
-            _customMarkersRendered = true;
-            return false;
-        }
-
         return true;
     }
 

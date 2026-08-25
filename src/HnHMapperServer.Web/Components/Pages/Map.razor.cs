@@ -2601,13 +2601,6 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
                 return;
             }
 
-            if (CustomMarkerState.AllCustomMarkers.Count == 0)
-            {
-                Logger.LogInformation("No custom markers loaded for map {MapId}; marking as rendered.", MapNavigation.CurrentMapId);
-                CustomMarkerState.MarkAsRendered();
-                return;
-            }
-
             // Map is guaranteed to be initialized when called from HandleMapInitialized (event-driven)
             // This check is now just a safety guard for edge cases
             if (!mapView.IsInitialized)

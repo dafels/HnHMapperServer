@@ -366,6 +366,32 @@ export function updateMarker(markerId, markerData, mapInstance) {
 }
 
 /**
+ * Detach a Leaflet marker from every container that can hold it.
+ *
+ * IMPORTANT: markers are added with `marker.addTo(markerLayer|detailedMarkerLayer)`, and
+ * `markerLayer` is an L.markerClusterGroup. `mapInstance.removeLayer(marker)` alone is NOT
+ * enough: the group keeps its own reference, so the marker is re-added on the next cluster
+ * refresh (any zoom change) or when the group is re-added to the map. That is how markers
+ * from a previous map survived changeMap() and reappeared on the new one. While clustered
+ * (zoom < disableClusteringAtZoom) the marker isn't in map._layers at all, so the map-level
+ * removal is a no-op and the marker never leaves the cluster.
+ *
+ * @param {object} marker - Leaflet marker
+ * @param {object} mapInstance - Leaflet map instance
+ */
+function detachMarker(marker, mapInstance) {
+    if (markerLayer && markerLayer.hasLayer(marker)) {
+        markerLayer.removeLayer(marker);
+    }
+    if (detailedMarkerLayer && detailedMarkerLayer.hasLayer(marker)) {
+        detailedMarkerLayer.removeLayer(marker);
+    }
+    if (mapInstance) {
+        mapInstance.removeLayer(marker);
+    }
+}
+
+/**
  * Remove a marker from the map
  * @param {number} markerId - Marker ID to remove
  * @param {object} mapInstance - Leaflet map instance
@@ -374,7 +400,7 @@ export function updateMarker(markerId, markerData, mapInstance) {
 export function removeMarker(markerId, mapInstance) {
     const mark = markers[markerId];
     if (mark) {
-        mapInstance.removeLayer(mark.marker);
+        detachMarker(mark.marker, mapInstance);
         delete markers[markerId];
         return true;
     }
@@ -388,6 +414,17 @@ export function removeMarker(markerId, mapInstance) {
  */
 export function clearAllMarkers(mapInstance) {
     Object.keys(markers).forEach(id => removeMarker(parseInt(id), mapInstance));
+
+    // Belt-and-braces: drop anything still held by the groups themselves. These groups only
+    // ever contain game markers, and clearLayers() on a markerClusterGroup is far cheaper than
+    // per-marker removal (one rebuild instead of N).
+    if (markerLayer) {
+        markerLayer.clearLayers();
+    }
+    if (detailedMarkerLayer) {
+        detailedMarkerLayer.clearLayers();
+    }
+
     // Also clear stored marker data
     Object.keys(allMarkerData).forEach(id => delete allMarkerData[id]);
     // Clear thingwall tracking
@@ -405,14 +442,7 @@ export function clearAllMarkers(mapInstance) {
 function rebuildAllMarkers(mapInstance) {
     // Remove all visible markers from the map
     Object.keys(markers).forEach(id => {
-        const mark = markers[id];
-        if (markerLayer && markerLayer.hasLayer(mark.marker)) {
-            markerLayer.removeLayer(mark.marker);
-        }
-        if (detailedMarkerLayer && detailedMarkerLayer.hasLayer(mark.marker)) {
-            detailedMarkerLayer.removeLayer(mark.marker);
-        }
-        mapInstance.removeLayer(mark.marker);
+        detachMarker(markers[id].marker, mapInstance);
     });
 
     // Clear markers object

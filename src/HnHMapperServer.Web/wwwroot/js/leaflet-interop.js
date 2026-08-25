@@ -661,6 +661,7 @@ export function changeMap(mapId) {
     // Clear all markers to avoid showing markers from previous map
     CharacterManager.clearAllCharacters(mapInstance);
     MarkerManager.clearAllMarkers(mapInstance);
+    CustomMarkerManager.clearAllCustomMarkers();
     // Pings are short-lived and not map-filtered in JS — drop them so they
     // don't linger on the new map (OnPingCreated already filters new ones)
     PingManager.clearAllPings();
