@@ -542,11 +542,13 @@ app.UseStaticFiles(new StaticFileOptions
 {
     OnPrepareResponse = ctx =>
     {
-        // Cache JS and CSS files for 1 week
         var path = ctx.File.Name;
         if (path.EndsWith(".js") || path.EndsWith(".css"))
         {
-            ctx.Context.Response.Headers.CacheControl = "public, max-age=604800"; // 1 week
+            ctx.Context.Response.Headers.CacheControl =
+                ctx.Context.Request.Query.ContainsKey("v")
+                    ? "public, max-age=31536000, immutable"
+                    : "no-cache";
         }
         // Cache images for 1 day
         else if (path.EndsWith(".png") || path.EndsWith(".jpg") || path.EndsWith(".gif") || path.EndsWith(".ico"))

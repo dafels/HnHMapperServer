@@ -2,15 +2,34 @@
 // Main orchestrator that coordinates specialized managers
 
 // Import modules
+//
+// CACHE BUSTING - read this before changing an import below.
+// Blazor imports THIS module as `./js/leaflet-interop.js?v={AssetVersion}`, so a deploy always
+// lands a fresh copy of it. A bare `import ... from './map/x.js'` does NOT inherit that stamp:
+// the browser fetches the sub-module under its own unversioned URL and reuses whatever it has
+// cached. That is why a deploy could ship a fixed sub-module and every returning user still ran
+// the old one until they hard-refreshed. So the sub-modules are pulled in with this module's own
+// ?v= (taken from import.meta.url), which makes their URLs change on every deploy too.
+//
+// Only modules imported EXCLUSIVELY from here may be versioned this way. A versioned URL is a
+// distinct module instance, so versioning a module that someone else also imports unversioned
+// would instantiate it twice and split its state. `leaflet-config.js` is imported by ten files
+// (its HnHCRS object is compared by reference), so it stays a plain static import; the same goes
+// for `glow-icon.js` / `voronoi-adjacency.js`, which map/marker-manager.js and
+// public-map-interop.js import directly. Those rely on the `no-cache` revalidation that
+// Web/Program.cs sends for unversioned .js instead.
 import { TileSize, BaseTileSize, HnHMaxZoom, HnHMinZoom, HnHCRS } from './map/leaflet-config.js';
-import { SmartTileLayer } from './map/smart-tile-layer.js';
-import * as CharacterManager from './map/character-manager.js';
-import * as MarkerManager from './map/marker-manager.js';
-import * as CustomMarkerManager from './map/custom-marker-manager.js';
-import * as PingManager from './map/ping-manager.js';
-import * as OverlayLayer from './map/overlay-layer.js';
-import * as RoadManager from './map/road-manager.js';
-import * as NavigationManager from './map/navigation-manager.js';
+
+const MODULE_VERSION = new URL(import.meta.url).search; // "?v=..." or "" when loaded unversioned
+
+const { SmartTileLayer } = await import(`./map/smart-tile-layer.js${MODULE_VERSION}`);
+const CharacterManager = await import(`./map/character-manager.js${MODULE_VERSION}`);
+const MarkerManager = await import(`./map/marker-manager.js${MODULE_VERSION}`);
+const CustomMarkerManager = await import(`./map/custom-marker-manager.js${MODULE_VERSION}`);
+const PingManager = await import(`./map/ping-manager.js${MODULE_VERSION}`);
+const OverlayLayer = await import(`./map/overlay-layer.js${MODULE_VERSION}`);
+const RoadManager = await import(`./map/road-manager.js${MODULE_VERSION}`);
+const NavigationManager = await import(`./map/navigation-manager.js${MODULE_VERSION}`);
 
 // Grid Coordinate Layer
 L.GridLayer.GridCoord = L.GridLayer.extend({
