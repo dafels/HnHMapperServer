@@ -27,7 +27,7 @@ public class ActiveTenantResolverTests : IDisposable
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"hnh-resolver-test-{Guid.NewGuid():N}.db");
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite($"Data Source={_dbPath}")
+            .UseSqlite($"Data Source={_dbPath};Pooling=False")
             .Options;
 
         // No IHttpContextAccessor: the factory runs during cookie (re)validation where no tenant context exists.

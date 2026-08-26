@@ -93,7 +93,6 @@ public class PublicMapTenantImportOccupiedCellTests : IDisposable
     {
         _db.Dispose();
         _connection.Dispose();
-        SqliteConnection.ClearAllPools();
         try { if (Directory.Exists(_gridStorage)) Directory.Delete(_gridStorage, recursive: true); } catch { }
     }
 

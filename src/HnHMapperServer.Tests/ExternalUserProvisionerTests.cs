@@ -28,7 +28,7 @@ public class ExternalUserProvisionerTests : IDisposable
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"hnh-external-test-{Guid.NewGuid():N}.db");
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite($"Data Source={_dbPath}")
+            .UseSqlite($"Data Source={_dbPath};Pooling=False")
             .Options;
         _db = new ApplicationDbContext(options);
         _db.Database.EnsureCreated();

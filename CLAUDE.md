@@ -637,6 +637,316 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-26: Cookbook — panels as tables, multi-select AND filters, +2 made visible
+
+Three user-decided changes on top of the value work below.
+- **Panels and Favorites render as full-width tables, and the old chip strip is GONE**
+  (kept for one iteration, then removed on request — it was redundant once the tables
+  existed). Every panel is a collapsible `.panel-table-block` with the catalog's columns —
+  FEPs, Energy, Hunger, Total, +2 Total, FEP/Hunger, +2 FEP/H — plus the remove ✕ on own
+  panels. **No schema change:** `FoodPanels`/`FoodPanelItems` are untouched; the rows are
+  built from the values the items already resolve at read time (`PanelRowsFor`), so a row
+  needs the catalog only for its icon and the filter check. **Every affordance the strip
+  carried moved onto the block** rather than being dropped: the block itself is the drop
+  target (`droppable`/`drag-over`/`active` classes and their CSS were retargeted from
+  `.panel-card`), rows are draggable and are drop targets for reorder/move
+  (`StartChipDrag`/`HandleDropOnChipAsync`), and the header holds the collapse toggle,
+  favourites star, name button (panel filter), share toggle and the rename/delete menu.
+  ~130 lines of strip markup and 17 CSS rules (`.panel-card*`, `.panels-strip`,
+  `.panel-item*`, `.item-line*`, `.item-bar*`, `.item-eff`, `.panel-count`) are deleted.
+- **Filters apply to panel tables, and say what they hid** — each header reads
+  `showing 4 of 12 — 8 hidden by filters`, so a curated list never silently loses entries.
+  Visibility is decided at FOOD level (`PanelRowVisible`): a panel entry is a food you
+  pinned, and hiding a pinned recipe because a sibling recipe matched reads as data loss.
+  Unresolved entries always show — they are the "this food left the catalog" signal.
+  The visible-name set is memoized on `FlatStateKey()` plus the async server-match count.
+- **Every facet row is multi-select and AND-ed** (`_selectedStats/_selectedSatiations/
+  _selectedPreps/_selectedWorlds`, was one nullable string each). AND **everywhere, no
+  exceptions** per the user's decision: prep is one value per food, so two prep picks
+  deliberately match nothing (the chip tooltip says so) rather than special-casing OR.
+  - **Chip counts are now "add-one"**: each family's counts include its OWN selection, so a
+    chip shows what the result becomes if you pick it next and a picked chip shows the
+    current result count. The old exclude-own-family reading is meaningless once a family
+    AND-s several picks. Same rule the ingredient wall already used.
+  - **The FEP row gained +2 chips** (`STR` | `+2`): a token is `STR` (any tier) or `STR2`
+    (the +2 line only, keyed exactly like `StatTierTotals`). Each picked chip adds its own
+    sortable table column, so `VisibleColumnCount` is now `12 + _selectedStats.Count`.
+    The chip renders when the catalog has such a line OR its live count is > 0 — the
+    vocabulary is food-level, but in the Ungrouped view a +2 can exist only on recipes.
+  - **World multi-select needed a value rule**: the facet also decides which per-world
+    snapshot supplies the numbers. `EffectiveWorldGenus` = the NEWEST picked real world
+    (Untagged-only → canonical values); filtering still AND-s every pick, so a row can be
+    filtered by two worlds while showing one world's numbers. The active-filter chip for
+    that world says which one is supplying values.
+  - Quarter presets (≥25/50/75/100%) apply only with exactly one FEP chip picked
+    (`SoleSelectedStat`) — with several there is no single stat a percentage could mean.
+- **+2 FEPs are visible in the bars**: tier-2 segments in the detail `.fep-bar` and the panel
+  cards' `.item-bar` carry a diagonal hatch (legible without colour — the two-tone hue alone
+  was easy to miss) plus a "+2" label when the segment is ≥14% wide. The detail breakdown
+  gained Total and, when they differ, a "+2 weighted" row; panel card lines show the weighted
+  per-hunger only when the item actually has a +2.
+- **Fixed a pre-existing test flake this surfaced:** twelve test classes called
+  `SqliteConnection.ClearAllPools()` in Dispose. That is **global** — it disposes pooled
+  connections belonging to OTHER test classes running in parallel, which then die with
+  `ObjectDisposedException: SQLitePCL.sqlite3` mid-query. Adding two more SQLite classes
+  tipped it over (1–2 random failures per run, in classes I had not touched, e.g.
+  `AccountOverviewServiceTests`). Every call is gone and file-based test databases now use
+  `;Pooling=False`, which also lets the temp file actually delete. 5 consecutive full runs
+  green at 410. **Rule: never call `ClearAllPools()` in a test.**
+- **Not unit-tested:** the facet logic lives in `Cookbook.razor`'s `@code` and the project
+  has no bUnit harness; the Core halves (`wtotal`/`weff` parsing and evaluation) are covered.
+
+### 2026-08-26: Cookbook values come from the game client, not the wiki (+ quality exponents)
+
+**The reported symptom: /cookbook showed Seaberries hunger `0.1` while the game showed `0.016‰`.**
+Root cause is not the tenant's data — it is precedence. `wiki-food-data.json` is **bundled in the
+API image** and `GetBundledWikiAsync` is consulted on EVERY food creation, the admin dump import and
+every client upload alike; `BuildFoodEntity` then took the wiki's hunger/energy/FEPs whenever the
+page had them and used the game record only `if (!wikiMatched)`. So a food a player's own client
+discovered still carried wiki numbers (prod row 4167 has `ContributedBy` set and wiki values), the
+client's real numbers went only to `FoodVariants`, and nothing ever updated the food row afterwards —
+ingestion never touched it after creation. **No tenant opted into wiki data; upload-only tenants were
+affected exactly the same.** Measured on the dev prod-copy: of 931 foods, 568 held wiki values
+verbatim and 553 of those (97%) disagreed with the tenant's own recorded observation.
+- **Precedence is now client-wins** (`FoodValueSource`: Upload > Import > Wiki). The game record
+  supplies Energy/Hunger/FEPs; the wiki keeps recipe text, cooking station, satiation groups,
+  categories and page URL, and supplies values only for a food whose record carries none.
+  `Foods.ValueSource` + `Foods.ValueWorld` record where the headline values came from (migration
+  `AddFoodValueProvenance` — two ADD COLUMNs, applies in 10 ms on the 750 MB dev DB).
+- **Uploads now update the food row.** `TryPromoteCanonical` runs per ingested record: higher source
+  rank wins, then newer world, then (same source and world) the lowest FEP total — the
+  closest-to-base heuristic variants already use. Without it a world's real numbers never reached
+  the catalog.
+- **`FoodVariantWorldValue.Observed`** distinguishes a real client observation from a snapshot the
+  bulk world assignment seeded out of stored columns. **This was a live trap:** ingestion only
+  replaced a world snapshot when the new FEP total was lower, so a seeded snapshot could reject real
+  uploads forever. An observed record now replaces a seeded one unconditionally. The flag lives in
+  the existing JSON column (no schema change); old rows read `false`, which is the correct reading.
+- **The repair is one-time and automatic — there is no button and no endpoint** (user decision):
+  `CookbookValueBackfillService` (Api hosted service, 30 s after start) calls
+  `ICookbookValueBackfill.RunOnceAsync`, which walks every tenant through
+  `FoodCatalogService.RefreshCanonicalValuesAsync` and then writes the marker Config row
+  `cookbook.valueBackfillVersion = 1` under the `__global__` pseudo-tenant; later starts cost one
+  query. A tenant that throws is logged and skipped **and the marker is withheld**, so the pass
+  repeats next start rather than half-applying. Audited per changed tenant as
+  `CookbookValuesRefreshed` with a null actor. **No re-upload, nothing deleted**: contributors,
+  world tags, TimesSeen and ingredient signatures (so panels and favorites) are untouched. Bump
+  `CurrentVersion` to force a re-run. Rehearsed against a copy of the dev DB:
+  **632/931 foods updated in ~6 s**, Seaberries hunger
+  0.1 → 0.02, Beech Nuts 0.2 → 0.01, Bark Bread 2.5 → 1.8 and its missing STR+1 1.75 line restored,
+  Almonds unchanged, re-run updates 0.
+- **Two guards, both found by that rehearsal:**
+  - **Zero hunger is not data.** The client rounds hunger to 2 decimals (`round2Dig`), so a food
+    under 0.005 arrives as `0` — Cave Slime is stored that way. Hunger then comes from the next
+    observation that has one, else stays put (`HungerFallbacks` in the result).
+  - **Information-free observations are skipped entirely.** Liquid names are volume-normalized
+    (`"0.01 l of Cave Slime"` → `"Cave Slime"`), so a sip collapses onto the food with energy 4,
+    hunger 0 and every FEP 0. The first rehearsal adopted it and wrote E=200 → 4 with all-zero FEPs;
+    candidates with no FEP total AND no hunger are now dropped on both the refresh and the live path.
+    **Known, not fixed:** all volumes of a drink share one variant row and lowest-total-wins keeps
+    the smallest sip, so drink variants are systematically the smallest observed volume.
+- **Quality exponents were wrong in the UI.** Hurricane normalizes uploads to q10 with
+  `multiplier = sqrt(q/10)` for FEPs and `multiplier2 = sqrt(multiplier)` for hunger, so hunger
+  scales with the **fourth root** of q/10 and FEP-per-hunger with the fourth root too — not the FEP
+  factor. `/cookbook` printed hunger unscaled and scaled FEP/Hunger by `sqrt(q/10)`, overstating
+  efficiency **2x at Q160** on the column that exists to rank efficiency. New `FoodQuality` /
+  `FoodQualityScale` (Core) carry all three factors together so no caller can scale one without the
+  others; `FepConditionEvaluator` takes the scale (hunger conditions now scale, energy still never
+  does — it is quality-independent in the game), and the `eff>=` click-tool builds its threshold from
+  the same scale so a clicked row still passes its own filter.
+- **Client facts worth keeping** (Nightdawg/Hurricane@master, `automated/cookbook/FoodService.java`,
+  `resutil/FoodInfo.java`): uploads carry raw `evs[i].a` and `glut` — **no** tooltip modifiers, so
+  what we store is directly comparable to wiki base values; the tooltip's bigger numbers are
+  `fepEfficiency` = satiation x hunger-bar `gmod` x account bonus (the "Food Efficiency: 359.99%"
+  line = 1.2 x 3.0), which is why the screenshot's INT 0.36 = our stored 0.1 x 3.6 and needed no fix.
+  Energy is never quality-normalized. Dedup is `MD5(itemName + resourceName + ingredients)` in a
+  per-process cache, so values/quality do not affect it and every client restart re-sends. Truffled
+  and peppered items are skipped, and nothing uploads while the hemp buff is up.
+  **Not fixable server-side:** `round2Dig` (2 decimals) happens before the JSON is built, so the
+  live 0.016 can only ever arrive as 0.02 — a client PR would be needed.
+  **Open:** `FoodUploadRecordDto.Quality` (KamiClient-only) is never read; if that client does not
+  pre-normalize, its uploads land at raw quality.
+- **`+2 Total` column — +2 FEPs are worth double and the cookbook counted them once.** A +2 FEP
+  raises the stat by 2 when it wins the bar roll, which is why the game prints both
+  "(Actual) Total FEPs" and "(+2 Weighted) Total FEPs". Every total here was `Sum(f => f.Value)`,
+  so Delicious Deer Dog (AGI+2 6, INT 2, PER 2) and Big Bear Banger (STR 6, STR+2 4) both showed
+  **10** and sorted identically, where the game separates them **16** and **14**. New
+  `WeightedTotalFep` / `WeightedTotal` on the row records (`Sum(value * tier)`), a sortable
+  **+2 Total** column in the grouped table, flat view, variations sub-table and prep-compare, and a
+  `wtotal` threshold key (`FepFilterKey.WeightedTotal`, parser + evaluator + chip + click-to-filter,
+  same quality scaling as `total`). **Default ordering is now the weighted total** in the flat view
+  and in prep-compare, since a +2-heavy recipe genuinely levels faster at equal raw total.
+  **Caveat:** clients do not upload the game's own `sev`, and the resource script that computes it
+  is not in the client source, so the column is OUR arithmetic (`value * tier`) — the standard
+  community weighting, unverified against a live tooltip.
+- **`+2 FEP/H` column — the actual leveling-efficiency number.** A +2 FEP fills the bar exactly
+  like a +1 and wins the roll with the same odds (the winner is drawn by raw value share); only
+  the payout doubles. Work the per-hunger algebra and the raw total cancels: one bar costs
+  `R x hunger/total` and pays `wtotal/total` expected stat points, so
+  **expected stat points per hunger = wtotal / hunger**. `FEP/Hunger` (raw) therefore measures
+  bar fill per hunger, not leveling speed. Added alongside it rather than replacing it — a
+  +1-only food reads identically in both, so the difference is self-explanatory where it matters
+  — with a `weff` threshold key, click-to-filter, and the same fourth-root quality scaling as
+  `eff`. `FEP/Hunger` keeps its meaning, so existing `eff>=` filters are untouched.
+- **Tests (410):** `FoodCatalogCanonicalValueTests` (18 — repair pass precedence incl.
+  observed-over-seeded, newest world, plain item over recipe variation, zero-hunger and
+  information-free guards, wiki fallback, idempotence, tenant isolation, keyset paging past
+  FoodBatchSize; live precedence incl. seeded-snapshot replacement, no downgrade from a newer world;
+  import client-wins vs wiki-fallback; export/import provenance round-trip) and `FoodQualityTests`
+  (7). `FepConditionEvaluatorTests` updated for the scale.
+
+### 2026-08-25: Nested JS modules were never cache-busted (a deploy needed a hard refresh)
+
+**Found while shipping the marker fix above: the fix did not take effect without Ctrl+F5.** Blazor
+imports the ENTRY modules with a stamp (`./js/leaflet-interop.js?v={BuildInfo.Commit}` from
+`MapView.razor`/`Map.razor.cs`, `?v={AssetVersion}` = assembly mtime ticks for the `<script>`/`<link>`
+tags in `App.razor`), but a bare `import ... from './map/marker-manager.js'` inside a module does
+**not** inherit that stamp — the browser fetches the sub-module under its own unversioned URL. Those
+were served `Cache-Control: public, max-age=604800`, i.e. *fresh for a week with no revalidation*, so
+a returning user ran a new `leaflet-interop.js` against nine week-old sub-modules. Every one of the
+`wwwroot/js/map/*.js` managers was in that blind spot; the `?v=` on the entry module only ever
+protected the entry module. Two changes, both verified:
+- **`Web/Program.cs` static files:** `.js`/`.css` requested **with** a `?v=` are now
+  `public, max-age=31536000, immutable` (that URL genuinely is immutable); **without** one they are
+  `no-cache`, so the browser revalidates and ETag turns the common case into a ~200-byte 304.
+- **`leaflet-interop.js` imports its sub-modules with its own stamp**, read from
+  `new URL(import.meta.url).search` and appended via top-level-await `await import(...)` (the
+  namespace objects behave exactly like `import * as X`, so no call site changed). **Only modules
+  imported EXCLUSIVELY by leaflet-interop.js may be versioned this way** — a versioned URL is a
+  separate module instance, so doing this to a shared module would instantiate it twice and split its
+  state. `leaflet-config.js` (imported by ten files; its `HnHCRS` is compared by reference) stays a
+  static unversioned import, as do `glow-icon.js` and `voronoi-adjacency.js`, which
+  `map/marker-manager.js` and `public-map-interop.js` import directly. Those three rely on the
+  `no-cache` revalidation instead.
+- **`BUILD_COMMIT` is a Docker build ARG promoted to `ENV` in the runtime stage of
+  `docker/web.Dockerfile`**, set from `git rev-parse --short HEAD` by CI, so `?v=` really does change
+  on every deploy in production. It falls back to the literal `"dev"` when the env var is missing —
+  which is why local JS edits still need a hard refresh (or `BUILD_COMMIT=<something> dotnet run`).
+- **Verified** by running the app twice against the same warm-cache browser profile with
+  `BUILD_COMMIT=aaa111` then `bbb222`: all eight sub-modules were re-requested as
+  `…?v=bbb222` with status 200 and no hard refresh, the map rendered identically (316 icons), and the
+  console was error-free. Suite 364/364.
+- **Residual, self-healing:** a browser still holding a week-long cache entry for one of the three
+  unversioned modules keeps it until it expires; from the first revalidation onward the `no-cache`
+  header applies forever. Changing `leaflet-config.js`/`glow-icon.js`/`voronoi-adjacency.js` before
+  then is the one case that can still be stale for a user, so prefer putting urgent JS fixes in a
+  versioned module.
+
+### 2026-08-25: Markers from the previous map stayed on screen after a map switch (fixed)
+
+**Switching maps left the old map's markers rendered.** Measured against the dev DB: opening
+"Main world" (map 150, 5 707 game markers + a custom marker) and switching to map 867 — which owns
+exactly **3** cave markers and no custom markers — put **3 059** marker icons on screen; zooming out
+re-clustered ~2 500 of the strays instead of dropping them. After the fix the same switch shows
+exactly 3, and 0 once the detailed layer hides below zoom 6. Two independent causes:
+- **`marker-manager.js removeMarker()` only did `mapInstance.removeLayer(marker)`.** Markers are
+  added with `marker.addTo(markerLayer|detailedMarkerLayer)`, and **`markerLayer` is an
+  `L.markerClusterGroup`** — the group keeps its own reference, so the marker is re-added on the next
+  cluster refresh (any zoom) or when the group is re-added to the map. While clustered
+  (zoom < `disableClusteringAtZoom: 6`) the marker isn't in `map._layers` at all, so the map-level
+  removal is a plain no-op and the marker never leaves the cluster. `clearAllMarkers()` is built on
+  `removeMarker`, so `changeMap()`'s clear did nothing for clustered markers. The correct detach
+  already existed in `rebuildAllMarkers` (group + group + map); it is now the shared
+  **`detachMarker()`** helper used by both, and `clearAllMarkers` additionally sweeps
+  `markerLayer.clearLayers()` / `detailedMarkerLayer.clearLayers()` (also much cheaper on a cluster
+  group: one rebuild instead of N). **Rule: never remove a Leaflet marker with `map.removeLayer()`
+  alone when it was added to a LayerGroup/MarkerClusterGroup — remove it from the group.**
+- **Custom markers were only ever cleared as a side effect of re-rendering them.**
+  `CustomMarkerStateService.NeedsRendering` returned false when the freshly-loaded set was empty
+  (marking it "rendered"), and `TryRenderPendingCustomMarkersAsync` repeated the same short-circuit —
+  so `RenderCustomMarkersAsync`, the only caller of `ClearAllCustomMarkersAsync`, never ran when the
+  **new** map had no custom markers, and the old map's stayed. Both short-circuits are gone: an empty
+  set still gets a render pass, because that pass is what clears. JS `changeMap()` now also calls
+  `CustomMarkerManager.clearAllCustomMarkers()` (before `flushCustomMarkerQueue`, which re-adds any
+  queued markers for the new map) so the layer is correct regardless of the C# path taken.
+- **Not affected:** characters (added straight to `mapInstance`), roads and pings (their clears use
+  `clearLayers()`).
+- **Verified live** (headless Chrome + CDP against the dev DB, A/B against the pre-fix build): game
+  markers 3 059 → **3** on switch and 2 579 → **0** after zooming out; a custom marker placed at the
+  spot the target map opens at showed as marker id 84 on the wrong map before the fix and is absent
+  after; switching back restores all 3 056 markers of map 150, so nothing over-clears.
+- **Related, NOT fixed here:** `SelectMarker` / `SelectCustomMarker` (sidebar list click that crosses
+  maps) and `CenterOnCharacterAsync` hand-roll their own switch instead of calling `SwitchToMapAsync`,
+  so they skip `ReloadMapScopedStateAsync` — characters, roads and the new map's custom markers are
+  not re-loaded after those switches (things missing, not stale).
+
+### 2026-08-25: .hmap markers stopped importing — the "mark" record is a tagged map now (fixed)
+
+**Every marker in a current game-client export was silently dropped.** `HmapReader.ParseMarker`
+read the leading version byte and `return null` for anything but **1**; today's client writes
+**version 4** in a completely different layout, so `HmapData.Markers` came back empty. The import's
+marker phase is gated on `Markers.Count > 0`, so it never ran and the result read **0 imported /
+0 skipped with no error** — the failure was invisible from the UI. Reproduced on the user's
+`test.hmap` (325 grids, 14 markers): 0 markers before, all 14 after. The two `.hmap` files in
+`src/map/contributions/` are still version 1 (716 markers each), so the client changed the format
+somewhere after 2026-01-17.
+- **Version 4 layout** (reverse-engineered from the file, every one of the 14 records consumes its
+  length exactly): `uint8 version=4`, `uint8 kind` (0x20 on every observed record), then
+  `[T_STR key, tagged value]` pairs terminated by `T_END`, using Haven's `Message` tag ids —
+  `nm` (T_STR name), `c` (**T_COORD, 2× int32, segment-relative TILE units**), `seg` (T_UID int64),
+  `oid` (T_UID), `res` (**tag 0x22 = resource name string + uint16 version**), `color` (T_COLOR)
+  for player markers. Grid records were NOT affected (still the version-4 struct; all 325 parse
+  with zero trailing bytes), which is why terrain imported fine and only markers vanished.
+- **Reader now dispatches on version**: 1 → the legacy fixed struct (unchanged), 2+ → the tagged
+  map. **Marker class comes from the attributes, not the kind byte** (`res` → SMarker, otherwise
+  PMarker), so an unseen kind still imports. The kind byte is undocumented, so the parse tries
+  `with kind / without kind / tolerate-trailing` and keeps the framing that consumes the record
+  exactly. Unknown value tags **throw rather than skip** — their payload length is unknown and
+  skipping one would desync the record.
+- **Silence is the real bug, so it is now reported**: `HmapData.MarkersUnreadable` +
+  `MarkerParseIssues` count and explain undecodable records, and the import adds them to
+  `MarkersSkipped` with a warning. A future format change surfaces as "N markers skipped" instead
+  of a clean-looking zero.
+- **Negative tile coords — grid lookup gained a floor fallback.** The marker's cell was
+  `TileX / GRID_SIZE`, which truncates toward zero, so for negative coords it names the cell one
+  short of the containing grid. **This is deliberately kept as the primary lookup**: the game
+  client's own live marker uploads decompose exactly the same way (~45% of live `Markers` rows —
+  8,319 of 18,420 across 7 tenants — carry a negative in-grid offset), `FrontendMarker` renders
+  `grid.Coord * 100 + Position`, so the pair is self-consistent and lands on the right world tile,
+  and matching the convention keeps the `{gridId}_{x}_{y}` Key identical so a re-import dedupes
+  against live markers instead of doubling them. **Do not "normalize" these to 0–99.** The fix is
+  only a fallback to the true containing cell (`FloorDiv`) when the export has no grid at the
+  truncated one — those markers used to be dropped although their own grid was right there.
+  Position is now derived as `tile - cell * GRID_SIZE` so both branches stay exact.
+- **Also unblocks public maps**: `PublicMapGenerationService` filters hmap markers to thingwalls,
+  so thingwalls from any post-change source had been missing there too.
+- **Tests (364/364):** `HmapReaderMarkerTests` (6 — v4 SMarker with real bytes from `test.hmap`,
+  v4 PMarker colour, kind-less framing, v1 `p`/`s` regression, undecodable record counted without
+  losing its readable neighbour) and `HmapImportServiceMarkerTests` (3 — end-to-end v4 import
+  asserting `cell * 100 + pos` is the original tile, the negative-coord floor fallback, and
+  undecodable records reported as skipped).
+
+### 2026-08-24: "Blazor Circuit Error: exception invoking 'OnSizeChanged'" after tab-restore (fixed)
+
+**User-reported prod banner after returning to a long-hidden tab (loading overlay finishes → banner).
+Root cause: circuit pause (`circuit-pause.js`, added 2026-08-23) orphans MudBlazor's JS-side
+listeners.** Pausing evicts the server circuit, so component disposal cannot reach the browser
+(MudBlazor swallows the `JSDisconnectedException`; its JS `cancelListener` never runs). The stale
+`window.mudResizeObserver` entries keep watching the same DOM nodes with dead
+`DotNetObjectReference`s; the reflow when the resume overlay clears fires them →
+`invokeMethodAsync("OnSizeChanged")` against an object id the resumed circuit doesn't track. With
+`DetailedErrors` off, EVERY server-side JSInvokable failure — including "no tracked object with id
+N" — collapses into that same generic message; MudBlazor's JS never `.catch()`es the promise
+(the `try/catch` in `resizeHandler` covers only sync throws), so it surfaced as an unhandled
+rejection, which `blazor-diagnostics.js` painted as a scary circuit error. Two JS-only fixes:
+- **`circuit-pause.js`**: after a pause actually succeeds, `purgeDeadDotNetListeners()` cancels
+  every `window.mudResizeObserver._maps` entry (public `cancelListener(id)`) and calls
+  `window.mudResizeListenerFactory.dispose()` (viewport `RaiseOnResized` — same class). Safe
+  because a resumed circuit re-renders with fresh `firstRender` (the documented "comes back at
+  defaults" behavior), so MudTabs re-`Observe`s and the viewport service re-registers. Purge is
+  best-effort per registry; never purge when `pauseCircuit()` returned false (circuit still live).
+- **`blazor-diagnostics.js`**: unhandled promise rejections are logged to console +
+  `getBlazorDiagnostics()` but no longer show the "Blazor Circuit Error" banner — a rejected
+  JS→.NET call doesn't break the circuit. The banner remains for circuit-level failures
+  (start/reconnect hooks + Blazor's own fatal-error display).
+- **Upstream (checked against MudBlazor `dev`, still unfixed there):** `cancelListener()` doesn't
+  `clearTimeout` the pending ~200ms throttle and `resizeHandler`'s `invokeMethodAsync` has no
+  `.catch()` — so a rarer non-pause variant (component disposed within the throttle window of a
+  resize, e.g. navigating away from a MudTabs page mid-animation, when the JS cancel loses the RTT
+  race) still rejects; it now lands in the console instead of the banner. Upgrading MudBlazor
+  would not have fixed either. If other post-resume dead-ref errors ever appear (typing →
+  KeyInterceptor, scrolling → ScrollListener), the same purge pattern applies to those registries.
+
 ### 2026-08-23: MUD0002 cleanup — 89 dead MudBlazor attributes ported or deleted (0 warnings)
 
 **Every attribute MudBlazor was silently swallowing into `UserAttributes` is gone: 178 MUD0002

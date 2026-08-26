@@ -66,7 +66,6 @@ public class TileRepositorySaveBatchTests : IDisposable
     {
         _dbContext.Dispose();
         _connection.Dispose();
-        SqliteConnection.ClearAllPools();
     }
 
     private static TileData Tile(int mapId, int x, int y, string file, int zoom = 0) => new()

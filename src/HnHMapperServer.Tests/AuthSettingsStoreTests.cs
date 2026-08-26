@@ -35,7 +35,7 @@ public class AuthSettingsStoreTests : IDisposable
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"hnh-authsettings-test-{Guid.NewGuid():N}.db");
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite($"Data Source={_dbPath}")
+            .UseSqlite($"Data Source={_dbPath};Pooling=False")
             .Options;
         _db = new ApplicationDbContext(options);
         _db.Database.EnsureCreated();   // no migrations -> no "__global__" tenant row yet

@@ -32,7 +32,7 @@ public class TenantProvisioningServiceTests : IDisposable
         _dbPath = Path.Combine(Path.GetTempPath(), $"hnh-provision-test-{Guid.NewGuid():N}.db");
         _gridStorage = Path.Combine(Path.GetTempPath(), $"hnh-provision-storage-{Guid.NewGuid():N}");
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite($"Data Source={_dbPath}")
+            .UseSqlite($"Data Source={_dbPath};Pooling=False")
             .Options;
         _db = new ApplicationDbContext(options);
         _db.Database.EnsureCreated();

@@ -36,7 +36,7 @@ public class TenantDataPurgeServiceTests : IDisposable
         _gridStorage = Path.Combine(Path.GetTempPath(), $"hnh-purge-storage-{Guid.NewGuid():N}");
 
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite($"Data Source={_dbPath}")
+            .UseSqlite($"Data Source={_dbPath};Pooling=False")
             .Options;
 
         // No IHttpContextAccessor: the ambient tenant is null, exactly like a superadmin
@@ -522,7 +522,6 @@ public class TenantDataPurgeServiceTests : IDisposable
     public void Dispose()
     {
         _db.Dispose();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
 
         try { File.Delete(_dbPath); } catch (IOException) { }
         try { Directory.Delete(_gridStorage, recursive: true); } catch (Exception e) when (e is IOException or DirectoryNotFoundException) { }

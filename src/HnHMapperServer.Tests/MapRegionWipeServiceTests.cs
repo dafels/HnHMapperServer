@@ -33,7 +33,7 @@ public class MapRegionWipeServiceTests : IDisposable
         Directory.CreateDirectory(_gridStorage);
 
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite($"Data Source={_dbPath}")
+            .UseSqlite($"Data Source={_dbPath};Pooling=False")
             .Options;
 
         _db = new ApplicationDbContext(options);
@@ -73,7 +73,6 @@ public class MapRegionWipeServiceTests : IDisposable
     public void Dispose()
     {
         _db.Dispose();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { File.Delete(_dbPath); } catch (IOException) { }
         try { Directory.Delete(_gridStorage, recursive: true); }
         catch (Exception e) when (e is IOException or DirectoryNotFoundException) { }

@@ -33,7 +33,7 @@ public class FoodCatalogServiceAllVariationsTests : IDisposable
         _dbPath = Path.Combine(Path.GetTempPath(), $"hnh-cookbook-flat-test-{Guid.NewGuid():N}.db");
 
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite($"Data Source={_dbPath}")
+            .UseSqlite($"Data Source={_dbPath};Pooling=False")
             .Options;
 
         var httpContext = new DefaultHttpContext();

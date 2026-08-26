@@ -66,7 +66,6 @@ public class MapIntegrityServiceTests : IDisposable
     {
         _db.Dispose();
         _connection.Dispose();
-        SqliteConnection.ClearAllPools();
         try { Directory.Delete(_gridStorage, recursive: true); } catch { }
     }
 

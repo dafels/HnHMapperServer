@@ -40,7 +40,7 @@ public class FoodCatalogCanonicalValueTests : IDisposable
         _dbPath = Path.Combine(Path.GetTempPath(), $"hnh-cookbook-values-test-{Guid.NewGuid():N}.db");
 
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite($"Data Source={_dbPath}")
+            .UseSqlite($"Data Source={_dbPath};Pooling=False")
             .Options;
 
         _db = new ApplicationDbContext(options);
@@ -596,7 +596,6 @@ public class FoodCatalogCanonicalValueTests : IDisposable
     public void Dispose()
     {
         _db.Dispose();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         if (File.Exists(_dbPath))
         {
             try
