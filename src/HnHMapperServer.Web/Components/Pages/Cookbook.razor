@@ -60,7 +60,7 @@
                                      Immediate="true"
                                      Min="1" Max="999"
                                      Label="Quality"
-                                     HelperText="@($"FEP ×{QualityMultiplier:0.00}")"
+                                     HelperText="@($"FEP ×{QualityScale.Fep:0.00} · hunger ×{QualityScale.Hunger:0.00}")"
                                      Adornment="Adornment.Start"
                                      AdornmentText="Q"
                                      Variant="Variant.Outlined"
@@ -538,7 +538,7 @@
                                                     }
                                                 </div>
                                                 <span class="item-eff" title="FEP per hunger">
-                                                    @(item.Hunger > 0 ? ScaledFep(ItemTotal(item) / item.Hunger).ToString("0.0#") + "/h" : "—")
+                                                    @(item.Hunger > 0 ? ScaledPerHunger(ItemTotal(item) / item.Hunger).ToString("0.0#") + "/h" : "—")
                                                 </span>
                                             }
                                             @if (isVariant)
@@ -668,7 +668,13 @@
                                 <MudTableSortLabel T="FlatRow" SortBy="@(r => (double)r.V.Total)">Total</MudTableSortLabel>
                             </MudTh>
                             <MudTh Style="text-align: right;">
+                                <MudTableSortLabel T="FlatRow" SortBy="@(r => (double)r.V.WeightedTotal)">+2 Total</MudTableSortLabel>
+                            </MudTh>
+                            <MudTh Style="text-align: right;">
                                 <MudTableSortLabel T="FlatRow" SortBy="@(r => (double)r.V.PerHunger)">FEP/Hunger</MudTableSortLabel>
+                            </MudTh>
+                            <MudTh Style="text-align: right;">
+                                <MudTableSortLabel T="FlatRow" SortBy="@(r => (double)r.V.WeightedPerHunger)">+2 FEP/H</MudTableSortLabel>
                             </MudTh>
                         </HeaderContent>
                         <RowTemplate>
@@ -736,7 +742,7 @@
                                 }
                             </MudTd>
                             <MudTd Style="text-align: right;">@context.V.EffectiveEnergy</MudTd>
-                            <MudTd Style="text-align: right;">@context.V.EffectiveHunger.ToString("0.##")</MudTd>
+                            <MudTd Style="text-align: right;">@ScaledHunger(context.V.EffectiveHunger).ToString("0.##")</MudTd>
                             @if (_showStatColumns)
                             {
                                 foreach (var stat in StatOrderList)
@@ -785,12 +791,33 @@
                                 </button>
                             </MudTd>
                             <MudTd Style="text-align: right;">
+                                <button type="button" class="cell-filter-btn" title="@WeightedTotalTitle"
+                                        @onclick="() => FilterByWeightedTotalValue(context.V.WeightedTotal)"
+                                        @onclick:stopPropagation="true">
+                                    <strong>@ScaledFep(context.V.WeightedTotal).ToString("0.#")</strong>
+                                </button>
+                            </MudTd>
+                            <MudTd Style="text-align: right;">
                                 @if (context.V.EffectiveHunger > 0)
                                 {
                                     <button type="button" class="cell-filter-btn" title="Filter: FEP/hunger ≥ this"
                                             @onclick="() => FilterByEffValue(context.V.PerHunger)"
                                             @onclick:stopPropagation="true">
-                                        @ScaledFep(context.V.PerHunger).ToString("0.0#")
+                                        @ScaledPerHunger(context.V.PerHunger).ToString("0.0#")
+                                    </button>
+                                }
+                                else
+                                {
+                                    <text>—</text>
+                                }
+                            </MudTd>
+                            <MudTd Style="text-align: right;">
+                                @if (context.V.EffectiveHunger > 0)
+                                {
+                                    <button type="button" class="cell-filter-btn" title="@WeightedEffTitle"
+                                            @onclick="() => FilterByWeightedEffValue(context.V.WeightedPerHunger)"
+                                            @onclick:stopPropagation="true">
+                                        @ScaledPerHunger(context.V.WeightedPerHunger).ToString("0.0#")
                                     </button>
                                 }
                                 else
@@ -860,7 +887,13 @@
                             <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.TotalFep)">Total</MudTableSortLabel>
                         </MudTh>
                         <MudTh Style="text-align: right;">
+                            <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.WeightedTotalFep)">+2 Total</MudTableSortLabel>
+                        </MudTh>
+                        <MudTh Style="text-align: right;">
                             <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.FepPerHunger)">FEP/Hunger</MudTableSortLabel>
+                        </MudTh>
+                        <MudTh Style="text-align: right;">
+                            <MudTableSortLabel T="FoodRow" SortBy="@(r => (double)r.WeightedFepPerHunger)">+2 FEP/H</MudTableSortLabel>
                         </MudTh>
                     </HeaderContent>
                     <RowTemplate>
@@ -951,7 +984,7 @@
                             }
                         </MudTd>
                         <MudTd Style="text-align: right;">@context.EffectiveEnergy</MudTd>
-                        <MudTd Style="text-align: right;">@context.EffectiveHunger.ToString("0.##")</MudTd>
+                        <MudTd Style="text-align: right;">@ScaledHunger(context.EffectiveHunger).ToString("0.##")</MudTd>
                         @if (_showStatColumns)
                         {
                             foreach (var stat in StatOrderList)
@@ -1000,12 +1033,33 @@
                             </button>
                         </MudTd>
                         <MudTd Style="text-align: right;">
+                            <button type="button" class="cell-filter-btn" title="@WeightedTotalTitle"
+                                    @onclick="() => FilterByWeightedTotalValue(context.WeightedTotalFep)"
+                                    @onclick:stopPropagation="true">
+                                <strong>@ScaledFep(context.WeightedTotalFep).ToString("0.##")</strong>
+                            </button>
+                        </MudTd>
+                        <MudTd Style="text-align: right;">
                             @if (context.EffectiveHunger > 0)
                             {
                                 <button type="button" class="cell-filter-btn" title="Filter: FEP/hunger ≥ this"
                                         @onclick="() => FilterByEff(context)"
                                         @onclick:stopPropagation="true">
-                                    @ScaledFep(context.FepPerHunger).ToString("0.0#")
+                                    @ScaledPerHunger(context.FepPerHunger).ToString("0.0#")
+                                </button>
+                            }
+                            else
+                            {
+                                <text>—</text>
+                            }
+                        </MudTd>
+                        <MudTd Style="text-align: right;">
+                            @if (context.EffectiveHunger > 0)
+                            {
+                                <button type="button" class="cell-filter-btn" title="@WeightedEffTitle"
+                                        @onclick="() => FilterByWeightedEffValue(context.WeightedFepPerHunger)"
+                                        @onclick:stopPropagation="true">
+                                    @ScaledPerHunger(context.WeightedFepPerHunger).ToString("0.0#")
                                 </button>
                             }
                             else
@@ -1134,7 +1188,7 @@
                                             }
                                             <div class="detail-row">
                                                 <span class="detail-label">Energy per hunger</span>
-                                                <span>@(context.EffectiveHunger > 0 ? (context.EffectiveEnergy / context.EffectiveHunger).ToString("0.#") : "—")</span>
+                                                <span>@(context.EffectiveHunger > 0 ? (context.EffectiveEnergy / ScaledHunger(context.EffectiveHunger)).ToString("0.#") : "—")</span>
                                             </div>
                                             @if (context.Food.WikiUrl != null)
                                             {
@@ -1169,9 +1223,11 @@
                                                         <th></th>
                                                         <th>FEPs</th>
                                                         <th class="num">Total</th>
+                                                        <th class="num" title="@WeightedTotalTitle">+2 Total</th>
                                                         <th class="num">Hunger</th>
                                                         <th class="num">Energy</th>
                                                         <th class="num">FEP/Hunger</th>
+                                                        <th class="num" title="@WeightedEffTitle">+2 FEP/H</th>
                                                     </tr>
                                                     @foreach (var sibling in siblings)
                                                     {
@@ -1199,9 +1255,11 @@
                                                                 </div>
                                                             </td>
                                                             <td class="num"><strong>@ScaledFep(sibling.TotalFep).ToString("0.#")</strong></td>
-                                                            <td class="num">@sibling.EffectiveHunger.ToString("0.##")</td>
+                                                            <td class="num" title="@WeightedTotalTitle">@ScaledFep(sibling.WeightedTotalFep).ToString("0.#")</td>
+                                                            <td class="num">@ScaledHunger(sibling.EffectiveHunger).ToString("0.##")</td>
                                                             <td class="num">@sibling.EffectiveEnergy</td>
-                                                            <td class="num">@(sibling.EffectiveHunger > 0 ? ScaledFep(sibling.FepPerHunger).ToString("0.0#") : "—")</td>
+                                                            <td class="num">@(sibling.EffectiveHunger > 0 ? ScaledPerHunger(sibling.FepPerHunger).ToString("0.0#") : "—")</td>
+                                                            <td class="num" title="@WeightedEffTitle">@(sibling.EffectiveHunger > 0 ? ScaledPerHunger(sibling.WeightedFepPerHunger).ToString("0.0#") : "—")</td>
                                                         </tr>
                                                     }
                                                 </table>
@@ -1252,6 +1310,9 @@
                                                                 <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.Total)">Total</MudTableSortLabel>
                                                             </MudTh>
                                                             <MudTh Style="text-align: right;">
+                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.WeightedTotal)">+2 Total</MudTableSortLabel>
+                                                            </MudTh>
+                                                            <MudTh Style="text-align: right;">
                                                                 <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.EffectiveHunger)">Hunger</MudTableSortLabel>
                                                             </MudTh>
                                                             <MudTh Style="text-align: right;">
@@ -1259,6 +1320,9 @@
                                                             </MudTh>
                                                             <MudTh Style="text-align: right;">
                                                                 <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.PerHunger)">FEP/Hunger</MudTableSortLabel>
+                                                            </MudTh>
+                                                            <MudTh Style="text-align: right;">
+                                                                <MudTableSortLabel T="VariantRow" SortBy="@(r => (double)r.WeightedPerHunger)">+2 FEP/H</MudTableSortLabel>
                                                             </MudTh>
                                                         </HeaderContent>
                                                         <RowTemplate Context="variantRow">
@@ -1320,10 +1384,16 @@
                                                             <MudTd Style="text-align: right;">
                                                                 <strong>@ScaledFep(variantRow.Total).ToString("0.#")</strong>
                                                             </MudTd>
-                                                            <MudTd Style="text-align: right;">@variantRow.EffectiveHunger.ToString("0.##")</MudTd>
+                                                            <MudTd Style="text-align: right;" title="@WeightedTotalTitle">
+                                                                <strong>@ScaledFep(variantRow.WeightedTotal).ToString("0.#")</strong>
+                                                            </MudTd>
+                                                            <MudTd Style="text-align: right;">@ScaledHunger(variantRow.EffectiveHunger).ToString("0.##")</MudTd>
                                                             <MudTd Style="text-align: right;">@variantRow.EffectiveEnergy</MudTd>
                                                             <MudTd Style="text-align: right;">
-                                                                @(variantRow.EffectiveHunger > 0 ? ScaledFep(variantRow.PerHunger).ToString("0.0#") : "—")
+                                                                @(variantRow.EffectiveHunger > 0 ? ScaledPerHunger(variantRow.PerHunger).ToString("0.0#") : "—")
+                                                            </MudTd>
+                                                            <MudTd Style="text-align: right;" title="@WeightedEffTitle">
+                                                                @(variantRow.EffectiveHunger > 0 ? ScaledPerHunger(variantRow.WeightedPerHunger).ToString("0.0#") : "—")
                                                             </MudTd>
                                                         </RowTemplate>
                                                         <NoRecordsContent>
@@ -1375,7 +1445,11 @@
         FoodDto Food,
         string SearchBlob,
         decimal TotalFep,
+        /// <summary>Total with +2 FEPs counted double (the game's "(+2 Weighted) Total FEPs").</summary>
+        decimal WeightedTotalFep,
         decimal FepPerHunger,
+        /// <summary>Expected stat points per hunger: the weighted total over hunger.</summary>
+        decimal WeightedFepPerHunger,
         Dictionary<string, decimal> StatTotals,
         Dictionary<string, decimal> StatTierTotals,
         string? Prep,
@@ -1739,9 +1813,32 @@
     private MudTextField<string>? _filterFieldRef;
 
     /// <summary>Cell count of the master table — the detail row's colspan must match it.</summary>
-    private int VisibleColumnCount => _showStatColumns ? 18 : (_selectedStat != null ? 11 : 10);
+    private int VisibleColumnCount => _showStatColumns ? 20 : (_selectedStat != null ? 13 : 12);
 
-    private double QualityMultiplier => Math.Sqrt(Math.Max(1, _quality) / 10.0);
+    /// <summary>
+    /// Explains the +2 Total column wherever it appears. The value is computed here as
+    /// sum(value x tier); the game shows its own "(+2 Weighted) Total FEPs" line, which
+    /// game clients do not upload.
+    /// </summary>
+    /// <summary>
+    /// Explains the +2 FEP/H column. A +2 FEP fills the bar exactly like a +1 and wins the
+    /// roll with the same odds, but pays two stat points instead of one — so the raw total
+    /// cancels out of the per-hunger algebra and this is the leveling-efficiency number.
+    /// </summary>
+    private const string WeightedEffTitle =
+        "Expected stat points per hunger (+2 FEPs counted double) \u2014 the leveling-efficiency number; click to filter \u2265 this";
+
+    private const string WeightedTotalTitle =
+        "Total FEP with +2 lines counted double (a +2 FEP raises the stat by 2 when it wins the bar roll) \u2014 click to filter \u2265 this";
+
+    /// <summary>
+    /// Quality factors of the current Q input. FEPs scale with sqrt(q/10) and hunger with
+    /// its fourth root — the game client's own exponents (see FoodQuality) — so FEP per
+    /// hunger scales by the fourth root too, not the FEP factor.
+    /// </summary>
+    private FoodQualityScale QualityScale => FoodQualityScale.For(_quality);
+
+    private double QualityMultiplier => QualityScale.Fep;
 
     // ----- Notification deep link (?highlight=ids&hlworld=genus) -----
 
@@ -2013,7 +2110,7 @@
             .Where(g => g.Count() > 1)
             .ToDictionary(
                 g => g.Key,
-                g => g.OrderByDescending(r => r.TotalFep).ToList(),
+                g => g.OrderByDescending(r => r.WeightedTotalFep).ToList(),
                 StringComparer.Ordinal);
 
         foreach (var foodId in _variations.Keys.ToList())
@@ -2036,7 +2133,11 @@
                     + food.RecipeText)
             .ToLowerInvariant();
         var total = feps.Sum(f => f.Value);
+        // A +2 FEP raises the stat by 2 when it wins the bar roll, so it is worth twice
+        // as much per point — the game shows this as "(+2 Weighted) Total FEPs".
+        var weightedTotal = feps.Sum(f => f.Value * f.Tier);
         var perHunger = hunger > 0 ? total / hunger : 0m;
+        var weightedPerHunger = hunger > 0 ? weightedTotal / hunger : 0m;
         var statTotals = feps
             .GroupBy(f => f.Attribute, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
@@ -2046,8 +2147,8 @@
         var prep = PrepPrefixes.FirstOrDefault(p =>
             food.Name.StartsWith(p + " ", StringComparison.Ordinal));
         var baseName = prep != null ? food.Name[(prep.Length + 1)..] : food.Name;
-        return new FoodRow(food, blob, total, perHunger, statTotals, statTierTotals, prep, baseName,
-            feps, hunger, energy);
+        return new FoodRow(food, blob, total, weightedTotal, perHunger, weightedPerHunger,
+            statTotals, statTierTotals, prep, baseName, feps, hunger, energy);
     }
 
     /// <summary>Selected world as a genus hash for value lookups (null = no world / Untagged).</summary>
@@ -2438,8 +2539,9 @@
 
         if (!ordered)
         {
-            // Default order: best recipe first — the reason to open this view.
-            rows = rows.OrderByDescending(r => r.V.Total);
+            // Default order: best recipe first — the reason to open this view. Weighted,
+            // because a +2-heavy recipe genuinely levels faster than an equal raw total.
+            rows = rows.OrderByDescending(r => r.V.WeightedTotal);
         }
 
         // A focused variant pins to the front; the stable sort keeps the rest ordered.
@@ -3100,7 +3202,17 @@
     private static bool WorldMatches(List<string> worlds, string world) =>
         world == UntaggedWorldKey ? worlds.Count == 0 : worlds.Contains(world);
 
-    private decimal ScaledFep(decimal baseValue) => baseValue * (decimal)QualityMultiplier;
+    private decimal ScaledFep(decimal baseValue) => baseValue * (decimal)QualityScale.Fep;
+
+    /// <summary>Hunger cost at the current quality — it grows with the fourth root of q/10.</summary>
+    private decimal ScaledHunger(decimal baseValue) => baseValue * (decimal)QualityScale.Hunger;
+
+    /// <summary>
+    /// FEP per hunger at the current quality. Both sides scale, so the ratio grows by
+    /// the fourth root of q/10 — scaling it by the FEP factor overstated efficiency
+    /// (2x at q160) on exactly the column read for efficiency.
+    /// </summary>
+    private decimal ScaledPerHunger(decimal baseRatio) => baseRatio * (decimal)QualityScale.PerHunger;
 
     private static string StatColor(string attribute, int tier = 1) =>
         FepPalette.Color(attribute, tier);
@@ -3258,18 +3370,20 @@
     // ----- FEP threshold filters (search-box expressions like "str>50%", "int2>15") -----
 
     private static FepConditionTarget TargetOf(FoodRow r) =>
-        new(r.TotalFep, r.FepPerHunger, r.EffectiveHunger, r.EffectiveEnergy, r.StatTotals, r.StatTierTotals);
+        new(r.TotalFep, r.WeightedTotalFep, r.FepPerHunger, r.WeightedFepPerHunger,
+            r.EffectiveHunger, r.EffectiveEnergy, r.StatTotals, r.StatTierTotals);
 
     private static FepConditionTarget TargetOf(VariantRow v) =>
-        new(v.Total, v.PerHunger, v.EffectiveHunger, v.EffectiveEnergy, v.StatTotals, v.StatTierTotals);
+        new(v.Total, v.WeightedTotal, v.PerHunger, v.WeightedPerHunger,
+            v.EffectiveHunger, v.EffectiveEnergy, v.StatTotals, v.StatTierTotals);
 
     /// <summary>AND-evaluates all active conditions against one row (shared Core semantics).</summary>
     private bool MatchesConditions(FepConditionTarget t) =>
-        FepConditionEvaluator.Matches(t, _allConditions, QualityMultiplier);
+        FepConditionEvaluator.Matches(t, _allConditions, QualityScale);
 
     /// <summary>What one condition measures on a row — also the value chip-click sorting uses.</summary>
     private decimal ConditionValue(FepConditionTarget t, FepFilterCondition c) =>
-        FepConditionEvaluator.Value(t, c, QualityMultiplier);
+        FepConditionEvaluator.Value(t, c, QualityScale);
 
     private static string ConditionLabel(FepFilterCondition c)
     {
@@ -3277,8 +3391,10 @@
         {
             FepFilterKey.Stat => c.Attribute + (c.Tier is int tier ? $"+{tier}" : string.Empty),
             FepFilterKey.Total => "Total",
+            FepFilterKey.WeightedTotal => "+2 Total",
             FepFilterKey.Hunger => "Hunger",
             FepFilterKey.Energy => "Energy",
+            FepFilterKey.WeightedEff => "+2 FEP/H",
             _ => "FEP/H"
         };
         var op = c.Op switch
@@ -3361,6 +3477,8 @@
     private static readonly (string Key, string Label, string Tooltip)[] FilterKeyHelpers =
     {
         ("total", "Total", "Total FEP at the current quality"),
+        ("wtotal", "+2 Total", "Total FEP with +2 lines counted double"),
+        ("weff", "+2 FEP/H", "Expected stat points per hunger (+2 counted double)"),
         ("hunger", "Hunger", "Hunger cost"),
         ("energy", "Energy", "Energy"),
         ("eff", "FEP/H", "FEP per hunger at the current quality")
@@ -3425,11 +3543,21 @@
             + Math.Round(ScaledFep(total), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
             toggle: false);
 
+    private void FilterByWeightedTotalValue(decimal weightedTotal) =>
+        ApplyToolExpression("wtotal>="
+            + Math.Round(ScaledFep(weightedTotal), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+            toggle: false);
+
+    private void FilterByWeightedEffValue(decimal weightedPerHunger) =>
+        ApplyToolExpression("weff>="
+            + Math.Round(ScaledPerHunger(weightedPerHunger), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+            toggle: false);
+
     private void FilterByEff(FoodRow r) => FilterByEffValue(r.FepPerHunger);
 
     private void FilterByEffValue(decimal perHunger) =>
         ApplyToolExpression("eff>="
-            + Math.Round(ScaledFep(perHunger), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+            + Math.Round(ScaledPerHunger(perHunger), 2).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
             toggle: false);
 
     private static bool SameShape(FepFilterCondition a, FepFilterCondition b) =>
@@ -3483,8 +3611,10 @@
     {
         FepFilterKey.Stat => c.Attribute + (c.Tier?.ToString() ?? string.Empty) + (c.IsPercent ? "%" : string.Empty),
         FepFilterKey.Total => "total",
+        FepFilterKey.WeightedTotal => "wtotal",
         FepFilterKey.Hunger => "hunger",
         FepFilterKey.Energy => "energy",
+        FepFilterKey.WeightedEff => "weff",
         _ => "eff"
     };
 

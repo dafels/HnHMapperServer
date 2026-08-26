@@ -1,3 +1,4 @@
+using HnHMapperServer.Core.Cookbook;
 using HnHMapperServer.Core.Models;
 using HnHMapperServer.Infrastructure.Identity;
 using Microsoft.AspNetCore.Http;
@@ -952,6 +953,11 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
             entity.Property(e => e.Energy).IsRequired();
             entity.Property(e => e.Hunger).IsRequired();
             entity.Property(e => e.ImportedAt).IsRequired();
+            // Provenance of the headline values (see FoodValueSource). Existing rows
+            // predate client-wins precedence and were all built wiki-first.
+            entity.Property(e => e.ValueSource).IsRequired().HasMaxLength(20)
+                .HasDefaultValue(FoodValueSource.Wiki);
+            entity.Property(e => e.ValueWorld).IsRequired(false).HasMaxLength(GameWorlds.MaxGenusLength);
 
             entity.HasIndex(e => e.TenantId);
             // One food name per tenant
@@ -2235,6 +2241,19 @@ public sealed class FoodEntity
     public DateTime ImportedAt { get; set; }
 
     /// <summary>
+    /// Where Energy/Hunger/Feps above came from: "Upload" (a game client — the source of
+    /// truth), "Import" (a game-data dump or restored export), or "Wiki" (last resort).
+    /// Drives whether an incoming upload may overwrite them (see FoodValueSource.Rank).
+    /// </summary>
+    public string ValueSource { get; set; } = FoodValueSource.Wiki;
+
+    /// <summary>
+    /// Genus hash of the world the canonical values were observed in, when known
+    /// (see GameWorlds). NULL for wiki values and untagged imports.
+    /// </summary>
+    public string? ValueWorld { get; set; }
+
+    /// <summary>
     /// Identity UserId of the player whose client upload created this food;
     /// NULL for admin-imported foods. Plain string (no FK) so user deletion
     /// never cascades into the catalog.
@@ -2389,6 +2408,14 @@ public sealed class FoodVariantWorldValue
     public int Energy { get; set; }
 
     public decimal Hunger { get; set; }
+
+    /// <summary>
+    /// True when a game client actually reported these values for this world; false for
+    /// snapshots seeded from stored columns by the bulk world assignment. A real
+    /// observation replaces a seeded one unconditionally — without this flag the
+    /// lowest-total-wins heuristic lets seeded data reject live uploads forever.
+    /// </summary>
+    public bool Observed { get; set; }
 
     public List<FoodWorldFep> Feps { get; set; } = new();
 }

@@ -36,6 +36,17 @@ public interface IFoodCatalogService
     Task<CookbookWorldAssignResultDto> AssignUntaggedToWorldAsync(string tenantId, string world, CancellationToken ct = default);
 
     /// <summary>
+    /// Re-derives every food's canonical Energy/Hunger/FEP values from the best
+    /// observation already recorded for it — a game-client upload from the newest world
+    /// first, then any upload, then an imported dump record; foods with no recorded
+    /// variation keep what they have. Repairs catalogs whose headline values came from
+    /// the bundled wiki dump, which is not revisited every game world. Idempotent, and
+    /// it touches only those three columns: contributors, world tags, TimesSeen,
+    /// ingredient signatures (and therefore panels and favorites) are left alone.
+    /// </summary>
+    Task<CookbookValueRefreshResultDto> RefreshCanonicalValuesAsync(string tenantId, CancellationToken ct = default);
+
+    /// <summary>
     /// Returns all recorded recipe variations of one food (current tenant), best first.
     /// </summary>
     Task<List<FoodVariantDto>> GetVariationsAsync(int foodId, CancellationToken ct = default);

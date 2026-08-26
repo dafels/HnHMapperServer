@@ -12,15 +12,29 @@ public enum FepFilterKey
     /// <summary>A FEP stat (STR..PSY), optionally tier-specific.</summary>
     Stat,
 
-    /// <summary>Total FEP of the food.</summary>
+    /// <summary>Total FEP of the food (the game's "(Actual) Total FEPs").</summary>
     Total,
+
+    /// <summary>
+    /// Total FEP with +2 lines counted double — the game's "(+2 Weighted) Total FEPs".
+    /// A +2 FEP raises the stat by 2 when it wins the bar roll, so it is worth twice as
+    /// much per point; ranking foods on the unweighted total undervalues +2-heavy ones.
+    /// </summary>
+    WeightedTotal,
 
     Hunger,
 
     Energy,
 
-    /// <summary>FEP per hunger.</summary>
-    Eff
+    /// <summary>FEP per hunger — how much bar one point of hunger buys.</summary>
+    Eff,
+
+    /// <summary>
+    /// Weighted FEP per hunger: expected stat points per hunger, the leveling-efficiency
+    /// number. A +2 FEP fills the bar like a +1 but pays double when it wins the roll, so
+    /// the raw total cancels out of the per-hunger algebra and only the weighted one counts.
+    /// </summary>
+    WeightedEff
 }
 
 public enum FepFilterOp
@@ -62,7 +76,7 @@ public static partial class FepFilterParser
     // \b before the key, a mandatory operator, and the trailing separator lookahead give token
     // semantics: "straw", "beefstr>5", "int21>5" and "str>50x" never match and stay ordinary text.
     [GeneratedRegex(
-        @"\b(?<key>str|agi|int|con|per|cha|dex|will|psy|total|hunger|energy|eff)" +
+        @"\b(?<key>str|agi|int|con|per|cha|dex|will|psy|wtotal|total|hunger|energy|weff|eff)" +
         @"(?<tier>[12])?\s*(?<op>>=|<=|==|=|>|<)\s*(?<val>\d+(?:\.\d+)?)\s*(?<pct>%)?(?=$|[\s,])",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ConditionRegex();
@@ -134,8 +148,10 @@ public static partial class FepFilterParser
         var key = isStat ? FepFilterKey.Stat : keyText.ToLowerInvariant() switch
         {
             "total" => FepFilterKey.Total,
+            "wtotal" => FepFilterKey.WeightedTotal,
             "hunger" => FepFilterKey.Hunger,
             "energy" => FepFilterKey.Energy,
+            "weff" => FepFilterKey.WeightedEff,
             _ => FepFilterKey.Eff
         };
 

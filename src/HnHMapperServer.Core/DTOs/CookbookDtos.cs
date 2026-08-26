@@ -231,6 +231,12 @@ public class FoodWorldValueDto
 
     public decimal Hunger { get; set; }
 
+    /// <summary>
+    /// True when a game client reported these values for this world; false for snapshots
+    /// seeded from stored columns by the bulk world assignment.
+    /// </summary>
+    public bool Observed { get; set; }
+
     public List<FoodFepDto> Feps { get; set; } = new();
 }
 
@@ -327,6 +333,34 @@ public class CookbookWorldAssignResultDto
 
     /// <summary>Normalized genus hash that was assigned.</summary>
     public string World { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Outcome of refreshing a tenant's canonical food values from the best observation
+/// already on file (see IFoodCatalogService.RefreshCanonicalValuesAsync).
+/// </summary>
+public class CookbookValueRefreshResultDto
+{
+    /// <summary>Foods examined.</summary>
+    public int Foods { get; set; }
+
+    /// <summary>Foods whose Energy/Hunger/FEP values changed.</summary>
+    public int Updated { get; set; }
+
+    /// <summary>Foods now carrying values a game client actually reported.</summary>
+    public int FromUploads { get; set; }
+
+    /// <summary>Foods now carrying values from an imported dump or restored export.</summary>
+    public int FromImports { get; set; }
+
+    /// <summary>Foods with no recorded observation at all — still on wiki values.</summary>
+    public int LeftOnWiki { get; set; }
+
+    /// <summary>
+    /// Foods whose hunger had to come from somewhere other than the chosen observation —
+    /// the client rounds hunger to 2 decimals, so a sub-0.005 food arrives as 0.
+    /// </summary>
+    public int HungerFallbacks { get; set; }
 }
 
 /// <summary>

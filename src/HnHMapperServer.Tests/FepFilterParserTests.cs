@@ -9,6 +9,36 @@ namespace HnHMapperServer.Tests;
 public class FepFilterParserTests
 {
     [Fact]
+    public void Parses_WeightedTotalKey_WithoutCollidingWithTotal()
+    {
+        var (conditions, residual) = FepFilterParser.Parse("wtotal>=16");
+
+        var c = Assert.Single(conditions);
+        Assert.Equal(FepFilterKey.WeightedTotal, c.Key);
+        Assert.Equal(FepFilterOp.Ge, c.Op);
+        Assert.Equal(16m, c.Value);
+        Assert.Equal(string.Empty, residual);
+
+        Assert.Equal(FepFilterKey.Total, Assert.Single(FepFilterParser.Parse("total>=16").Conditions).Key);
+
+        // Tiers and % shares stay stat-only, and a glued word is still plain text.
+        Assert.Empty(FepFilterParser.Parse("wtotal2>=16").Conditions);
+        Assert.Empty(FepFilterParser.Parse("wtotal>=16%").Conditions);
+        Assert.Empty(FepFilterParser.Parse("bwtotal>=16").Conditions);
+    }
+
+    [Fact]
+    public void Parses_WeightedEffKey_WithoutCollidingWithEff()
+    {
+        var c = Assert.Single(FepFilterParser.Parse("weff>=4").Conditions);
+        Assert.Equal(FepFilterKey.WeightedEff, c.Key);
+        Assert.Equal(4m, c.Value);
+
+        Assert.Equal(FepFilterKey.Eff, Assert.Single(FepFilterParser.Parse("eff>=4").Conditions).Key);
+        Assert.Empty(FepFilterParser.Parse("aweff>=4").Conditions);
+    }
+
+    [Fact]
     public void Parses_PercentCondition()
     {
         var (conditions, residual) = FepFilterParser.Parse("str>50%");

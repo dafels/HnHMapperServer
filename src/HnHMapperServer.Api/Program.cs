@@ -182,6 +182,7 @@ builder.Services.AddScoped<IHmapSourceService, HmapSourceService>();  // HMap so
 
 // Cookbook food catalog + per-user food panels (tenant-scoped)
 builder.Services.AddScoped<IFoodCatalogService, FoodCatalogService>();
+builder.Services.AddScoped<ICookbookValueBackfill, CookbookValueBackfill>();
 builder.Services.AddScoped<IFoodPanelService, FoodPanelService>();
 
 // Register memory cache for preview URL signing service
@@ -254,7 +255,8 @@ builder.Services.AddHostedService<OrphanedMarkerCleanupService>(); // Orphaned m
 builder.Services.AddHostedService<TenantActivityFlushService>(); // Tenant activity flush service (2-min interval)
 builder.Services.AddHostedService<PublicMapGenerationBackgroundService>(); // Public map tile generation
 builder.Services.AddHostedService<LargeTileGenerationService>(); // Private map 400x400 WebP tile generation (pre-generates missing tiles every 30s)
-builder.Services.AddHostedService<MapIntegrityCheckService>(); // Daily cross-tenant integrity scan; logs WARNING when issues found
+builder.Services.AddHostedService<MapIntegrityCheckService>();
+builder.Services.AddHostedService<CookbookValueBackfillService>(); // One-time repair of canonical food values (wiki -> game-client data); no-op once applied // Daily cross-tenant integrity scan; logs WARNING when issues found
 
 // Configure shared data protection for cookie sharing with Web
 var dataProtectionPath = Path.Combine(

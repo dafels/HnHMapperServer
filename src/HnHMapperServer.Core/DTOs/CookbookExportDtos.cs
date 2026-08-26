@@ -48,6 +48,16 @@ public class CookbookExportFoodDto
     /// <summary>Canonical (all-worlds) hunger cost per bite.</summary>
     public decimal Hunger { get; set; }
 
+    /// <summary>
+    /// Provenance of the canonical values: "Upload", "Import" or "Wiki" (see FoodValueSource).
+    /// Absent in exports written before value provenance existed — those restore as "Import",
+    /// so any later client upload outranks them.
+    /// </summary>
+    public string? ValueSource { get; set; }
+
+    /// <summary>Genus hash of the world the canonical values were observed in, when known.</summary>
+    public string? ValueWorld { get; set; }
+
     public string? WikiUrl { get; set; }
 
     /// <summary>Canonical recipe line from the wiki, when one was matched.</summary>

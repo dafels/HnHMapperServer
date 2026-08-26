@@ -32,6 +32,8 @@ public partial class FoodCatalogService : IFoodCatalogService
     private const int MaxUploadNameLength = 200;
     private const int MaxUploadResourceLength = 300;
     private const int VariantBatchSize = 2000;
+    /// <summary>Foods per page of the canonical value refresh (their variants load with them).</summary>
+    private const int FoodBatchSize = 200;
     private const int MaxSignatureLength = 1000;
 
     private readonly ApplicationDbContext _dbContext;
@@ -357,6 +359,81 @@ public partial class FoodCatalogService : IFoodCatalogService
         return result;
     }
 
+    public async Task<CookbookValueRefreshResultDto> RefreshCanonicalValuesAsync(
+        string tenantId, CancellationToken ct = default)
+    {
+        var result = new CookbookValueRefreshResultDto();
+
+        // Keyset paging by food id with the batch's variants fetched in one query:
+        // a tenant holds ~1k foods and ~50k variants, so neither side is loaded whole.
+        var lastId = 0;
+        while (true)
+        {
+            var foods = await _dbContext.Foods.IgnoreQueryFilters()
+                .Where(f => f.TenantId == tenantId && f.Id > lastId)
+                .OrderBy(f => f.Id)
+                .Take(FoodBatchSize)
+                .ToListAsync(ct);
+            if (foods.Count == 0)
+            {
+                break;
+            }
+
+            lastId = foods[^1].Id;
+            var foodIds = foods.Select(f => f.Id).ToList();
+            var variantsByFood = (await _dbContext.FoodVariants.IgnoreQueryFilters()
+                    .Where(v => v.TenantId == tenantId && foodIds.Contains(v.FoodId))
+                    .ToListAsync(ct))
+                .GroupBy(v => v.FoodId)
+                .ToDictionary(g => g.Key, g => g.ToList());
+
+            foreach (var food in foods)
+            {
+                result.Foods++;
+                var outcome = ApplyBestObservation(
+                    food, variantsByFood.GetValueOrDefault(food.Id) ?? new List<FoodVariantEntity>());
+                if (outcome.Changed)
+                {
+                    result.Updated++;
+                }
+
+                if (outcome.HungerFallback)
+                {
+                    result.HungerFallbacks++;
+                }
+
+                switch (FoodValueSource.Rank(food.ValueSource))
+                {
+                    case 2:
+                        result.FromUploads++;
+                        break;
+                    case 1:
+                        result.FromImports++;
+                        break;
+                    default:
+                        result.LeftOnWiki++;
+                        break;
+                }
+            }
+
+            await _dbContext.SaveChangesAsync(ct);
+            _dbContext.ChangeTracker.Clear();
+        }
+
+        if (result.Updated > 0)
+        {
+            _cache.Remove(CatalogCacheKey(tenantId));
+            _cache.Remove(ConditionStatsCacheKey(tenantId));
+        }
+
+        _logger.LogInformation(
+            "Cookbook value refresh for tenant {TenantId}: {Updated} of {Foods} foods updated "
+            + "({FromUploads} from client uploads, {FromImports} from imports, {LeftOnWiki} still wiki-only)",
+            tenantId, result.Updated, result.Foods, result.FromUploads, result.FromImports, result.LeftOnWiki);
+
+        return result;
+    }
+
     public async Task<List<FoodConditionMatchDto>> GetConditionMatchesAsync(string expression, int quality, string? world = null, CancellationToken ct = default)
     {
         var tenantId = _tenantContext.GetCurrentTenantId();
@@ -414,7 +491,7 @@ public partial class FoodCatalogService : IFoodCatalogService
         }) ?? new List<FoodConditionStats>();
 
         // Same quality math as the cookbook UI's QualityMultiplier.
-        var multiplier = Math.Sqrt(Math.Max(1, quality) / 10.0);
+        var scale = FoodQualityScale.For(quality);
 
         // World scoping mirrors the UI: a selected world evaluates world-effective values
         // (per-world snapshot, canonical fallback) and counts only that bucket's variants.
@@ -434,9 +511,9 @@ public partial class FoodCatalogService : IFoodCatalogService
             .Select(s => new FoodConditionMatchDto
             {
                 FoodId = s.FoodId,
-                BaseMatches = FepConditionEvaluator.Matches(BaseTarget(s), conditions, multiplier),
+                BaseMatches = FepConditionEvaluator.Matches(BaseTarget(s), conditions, scale),
                 MatchingVariants = s.Variants.Count(v =>
-                    InBucket(v.Worlds) && FepConditionEvaluator.Matches(VariantTarget(v), conditions, multiplier))
+                    InBucket(v.Worlds) && FepConditionEvaluator.Matches(VariantTarget(v), conditions, scale))
             })
             .Where(m => m.BaseMatches || m.MatchingVariants > 0)
             .ToList();
@@ -628,6 +705,8 @@ public partial class FoodCatalogService : IFoodCatalogService
                     ResourceName = f.ResourceName,
                     Energy = f.Energy,
                     Hunger = f.Hunger,
+                    ValueSource = f.ValueSource,
+                    ValueWorld = f.ValueWorld,
                     WikiUrl = f.WikiUrl,
                     RecipeText = f.RecipeText,
                     CookingStation = f.CookingStation,
@@ -754,7 +833,9 @@ public partial class FoodCatalogService : IFoodCatalogService
                 continue;
             }
 
-            var entity = BuildFoodEntity(name, baseRecord, wiki, tenantId, importedAt, out var wikiMatched);
+            var entity = BuildFoodEntity(
+                name, baseRecord, wiki, tenantId, importedAt,
+                FoodValueSource.Import, null, out var wikiMatched);
             if (wikiMatched)
             {
                 result.WikiMatched++;
@@ -911,6 +992,12 @@ public partial class FoodCatalogService : IFoodCatalogService
                 ResourceName = resource,
                 Energy = food.Energy,
                 Hunger = food.Hunger,
+                // Exports written before value provenance existed restore as "Import",
+                // so a later client upload outranks them (see FoodValueSource).
+                ValueSource = FoodValueSource.Rank(food.ValueSource) > 0 || food.ValueSource == FoodValueSource.Wiki
+                    ? food.ValueSource!
+                    : FoodValueSource.Import,
+                ValueWorld = GameWorlds.Normalize(food.ValueWorld),
                 WikiUrl = TrimToNull(food.WikiUrl, 500),
                 RecipeText = TrimToNull(food.RecipeText, 500),
                 CookingStation = TrimToNull(food.CookingStation, 300),
@@ -1119,6 +1206,7 @@ public partial class FoodCatalogService : IFoodCatalogService
                 Genus = genus,
                 Energy = value.Energy,
                 Hunger = value.Hunger,
+                Observed = value.Observed,
                 Feps = MapWorldFeps(MapSnapshotFeps(value.Feps))
             });
         }
@@ -1164,12 +1252,16 @@ public partial class FoodCatalogService : IFoodCatalogService
             var name = NormalizeName(source.ItemName!);
             var signature = ComputeSignature(source.Ingredients);
             var genus = GameWorlds.Normalize(upload.Genus);
+            // Parsed once per record: the variant, its world snapshot and the food's
+            // canonical values all need it (and ParseDumpFeps logs unknown FEP names).
+            var recordFeps = ParseDumpFeps(source.Feps, name);
+            var recordTotal = recordFeps.Sum(f => f.Value);
 
             var food = await _dbContext.Foods.IgnoreQueryFilters()
                 .FirstOrDefaultAsync(f => f.TenantId == tenantId && f.Name == name, ct);
             if (food == null)
             {
-                food = BuildFoodEntity(name, source, wiki, tenantId, now, out _);
+                food = BuildFoodEntity(name, source, wiki, tenantId, now, FoodValueSource.Upload, genus, out _);
                 food.ContributedBy = contributedByUserId;
                 _dbContext.Foods.Add(food);
                 await _dbContext.SaveChangesAsync(ct);
@@ -1204,9 +1296,9 @@ public partial class FoodCatalogService : IFoodCatalogService
                         ? new List<string> { genus }
                         : new List<string>(),
                     WorldValues = genus != null
-                        ? new List<FoodVariantWorldValue> { BuildWorldValue(genus, source, name) }
+                        ? new List<FoodVariantWorldValue> { BuildWorldValue(genus, source, recordFeps) }
                         : new List<FoodVariantWorldValue>(),
-                    Feps = ParseDumpFeps(source.Feps, name),
+                    Feps = recordFeps,
                     Ingredients = MapIngredients(source.Ingredients)
                 });
                 result.NewVariants++;
@@ -1225,36 +1317,49 @@ public partial class FoodCatalogService : IFoodCatalogService
                 }
                 // Keep the lowest observed FEP total as the representative record
                 // (closest to base quality — same heuristic as the import).
-                var newTotal = source.Feps?.Sum(f => f.Value) ?? 0m;
+                var newTotal = recordTotal;
                 var oldTotal = variant.Feps.Sum(f => f.Value);
                 if (newTotal > 0 && (oldTotal == 0 || newTotal < oldTotal))
                 {
-                    variant.Feps = ParseDumpFeps(source.Feps, name);
+                    variant.Feps = recordFeps;
                     variant.Hunger = source.Hunger;
                     variant.Energy = (int)Math.Round(source.Energy);
                 }
 
-                // Same heuristic per world: each world keeps its own representative snapshot.
+                // Same heuristic per world: each world keeps its own representative
+                // snapshot — except that a real observation always replaces a snapshot
+                // the bulk world assignment seeded from stored columns, whatever the
+                // totals say. Otherwise seeded data could reject live uploads forever.
                 if (genus != null)
                 {
                     var worldValue = variant.WorldValues.FirstOrDefault(w => w.Genus == genus);
                     if (worldValue == null)
                     {
-                        variant.WorldValues.Add(BuildWorldValue(genus, source, name));
+                        variant.WorldValues.Add(BuildWorldValue(genus, source, recordFeps));
                     }
                     else
                     {
                         var oldWorldTotal = worldValue.Feps.Sum(f => f.Value);
-                        if (newTotal > 0 && (oldWorldTotal == 0 || newTotal < oldWorldTotal))
+                        if (!worldValue.Observed
+                            || (newTotal > 0 && (oldWorldTotal == 0 || newTotal < oldWorldTotal)))
                         {
                             worldValue.Energy = (int)Math.Round(source.Energy);
                             worldValue.Hunger = source.Hunger;
-                            worldValue.Feps = MapWorldFeps(ParseDumpFeps(source.Feps, name));
+                            worldValue.Observed = true;
+                            worldValue.Feps = MapWorldFeps(recordFeps);
                         }
                     }
                 }
 
                 result.Duplicates++;
+                changed = true;
+            }
+
+            // The client is the source of truth for the food's headline values too —
+            // without this they stayed frozen at whatever created the row (usually the
+            // wiki), so a world's real numbers never reached the catalog.
+            if (TryPromoteCanonical(food, FoodValueSource.Upload, genus, source, recordFeps))
+            {
                 changed = true;
             }
         }
@@ -1386,15 +1491,24 @@ public partial class FoodCatalogService : IFoodCatalogService
     }
 
     /// <summary>
-    /// Builds a food entity from a base record: wiki values (canonical base q10, categories,
-    /// satiations) when the name matches a usable wiki page, dump values otherwise.
+    /// Builds a food entity from a base record. The game record supplies the values —
+    /// it is what the running world actually gives, while the wiki page is community
+    /// data that is not revisited every world. The wiki supplies descriptive fields
+    /// (recipe, station, url, groupings) whenever the name matches, and steps in for
+    /// values only when the record carries none, or for a hunger the client rounded
+    /// away (it sends 2 decimals, so a sub-0.005 food arrives as 0).
     /// </summary>
+    /// <param name="valueSource">Provenance of the record: upload or import.</param>
+    /// <param name="valueWorld">Genus the record was observed in, when known.</param>
+    /// <param name="wikiMatched">True when a wiki page with usable values enriched this food.</param>
     private FoodEntity BuildFoodEntity(
         string name,
         SourceFoodRecord baseRecord,
         Dictionary<string, WikiPage>? wiki,
         string tenantId,
         DateTime importedAt,
+        string valueSource,
+        string? valueWorld,
         out bool wikiMatched)
     {
         var entity = new FoodEntity
@@ -1407,22 +1521,41 @@ public partial class FoodCatalogService : IFoodCatalogService
         };
 
         wikiMatched = false;
+        WikiPage? valuePage = null;
+        decimal wikiHungerValue = 0m;
+        decimal wikiEnergyValue = 0m;
         if (wiki != null && wiki.TryGetValue(name, out var page) && page != null)
         {
-            // Descriptive fields (recipe, station, url, groupings) apply on any name
-            // match; base values only when the page's hunger+energy are usable.
             ApplyWikiDescriptiveFields(entity, page);
             if (TryGetMetaDecimal(page, "hunger", out var wikiHunger)
                 && TryGetMetaDecimal(page, "energy", out var wikiEnergy))
             {
-                ApplyWikiValues(entity, page, wikiHunger, wikiEnergy);
+                valuePage = page;
+                wikiHungerValue = wikiHunger;
+                wikiEnergyValue = wikiEnergy;
                 wikiMatched = true;
             }
         }
 
-        if (!wikiMatched)
+        var recordFeps = ParseDumpFeps(baseRecord.Feps, name);
+        var recordEnergy = (int)Math.Round(baseRecord.Energy);
+        var recordHasValues = recordFeps.Count > 0 || recordEnergy > 0 || baseRecord.Hunger > 0;
+
+        if (recordHasValues || valuePage == null)
         {
-            ApplyDumpValues(entity, baseRecord, name);
+            entity.Energy = recordEnergy;
+            entity.Hunger = baseRecord.Hunger > 0 || valuePage == null
+                ? baseRecord.Hunger
+                : wikiHungerValue;
+            entity.Feps.AddRange(recordFeps);
+            entity.ValueSource = valueSource;
+            entity.ValueWorld = valueWorld;
+        }
+        else
+        {
+            ApplyWikiValues(entity, valuePage, wikiHungerValue, wikiEnergyValue);
+            entity.ValueSource = FoodValueSource.Wiki;
+            entity.ValueWorld = null;
         }
 
         entity.Feps = entity.Feps
@@ -1473,12 +1606,14 @@ public partial class FoodCatalogService : IFoodCatalogService
             .ToList();
 
     /// <summary>One world's representative snapshot of an upload record.</summary>
-    private FoodVariantWorldValue BuildWorldValue(string genus, SourceFoodRecord source, string name) => new()
+    /// <summary>A world snapshot from a real game-client record — the source of truth.</summary>
+    private static FoodVariantWorldValue BuildWorldValue(string genus, SourceFoodRecord source, List<FoodFep> feps) => new()
     {
         Genus = genus,
         Energy = (int)Math.Round(source.Energy),
         Hunger = source.Hunger,
-        Feps = MapWorldFeps(ParseDumpFeps(source.Feps, name))
+        Observed = true,
+        Feps = MapWorldFeps(feps)
     };
 
     private static List<FoodWorldFep> MapWorldFeps(List<FoodFep> feps) =>
@@ -1493,14 +1628,235 @@ public partial class FoodCatalogService : IFoodCatalogService
         Genus = genus,
         Energy = variant.Energy,
         Hunger = variant.Hunger,
+        // Asserted by an admin, not observed in that world: a later real upload from
+        // this world replaces it outright instead of competing on FEP total.
+        Observed = false,
         Feps = MapWorldFeps(variant.Feps)
     };
+
+    /// <summary>One stored observation a food's canonical values could be taken from.</summary>
+    private sealed record CanonicalCandidate(
+        string Source,
+        string? World,
+        bool Observed,
+        bool IsBaseVariant,
+        int Energy,
+        decimal Hunger,
+        List<FoodFep> Feps)
+    {
+        public decimal Total { get; } = Feps.Sum(f => f.Value);
+    }
+
+    private readonly record struct CanonicalOutcome(bool Changed, bool HungerFallback);
+
+    /// <summary>
+    /// Release order used to rank observations: newer world first, an unknown genus
+    /// after the known ones, and an untagged observation last of all.
+    /// </summary>
+    private static int WorldOrder(string? genus) =>
+        genus == null ? -2 : GameWorlds.OrderOf(genus);
+
+    /// <summary>
+    /// Best observation first: a real client observation beats a seeded or imported one,
+    /// then the newest world, then the plain item over a recipe variation, then the
+    /// lowest FEP total (closest to base quality), then one that actually has a hunger.
+    /// </summary>
+    private static int CompareCandidates(CanonicalCandidate a, CanonicalCandidate b)
+    {
+        var byObserved = b.Observed.CompareTo(a.Observed);
+        if (byObserved != 0)
+        {
+            return byObserved;
+        }
+
+        var byWorld = WorldOrder(b.World).CompareTo(WorldOrder(a.World));
+        if (byWorld != 0)
+        {
+            return byWorld;
+        }
+
+        var byBase = b.IsBaseVariant.CompareTo(a.IsBaseVariant);
+        if (byBase != 0)
+        {
+            return byBase;
+        }
+
+        var byTotal = a.Total.CompareTo(b.Total);
+        return byTotal != 0 ? byTotal : (b.Hunger > 0).CompareTo(a.Hunger > 0);
+    }
+
+    /// <summary>
+    /// Rewrites a food's canonical values from the best observation among its variations.
+    /// Foods with no recorded variation keep what they have (wiki values, normally).
+    /// </summary>
+    private static CanonicalOutcome ApplyBestObservation(FoodEntity food, List<FoodVariantEntity> variants)
+    {
+        var candidates = new List<CanonicalCandidate>();
+        foreach (var variant in variants)
+        {
+            var isBase = variant.IngredientSignature.Length == 0;
+            foreach (var world in variant.WorldValues)
+            {
+                candidates.Add(new CanonicalCandidate(
+                    world.Observed ? FoodValueSource.Upload : FoodValueSource.Import,
+                    world.Genus,
+                    world.Observed,
+                    isBase,
+                    world.Energy,
+                    world.Hunger,
+                    world.Feps.Select(f => new FoodFep { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value })
+                        .ToList()));
+            }
+
+            // The variant's own columns: a client upload from before world tagging when
+            // contributors were recorded, an imported dump record otherwise.
+            var observed = variant.Contributors.Count > 0;
+            candidates.Add(new CanonicalCandidate(
+                observed ? FoodValueSource.Upload : FoodValueSource.Import,
+                null,
+                observed,
+                isBase,
+                variant.Energy,
+                variant.Hunger,
+                variant.Feps.Select(f => new FoodFep { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value })
+                    .ToList()));
+        }
+
+        // An observation with neither FEPs nor hunger says nothing. Liquids produce
+        // these: names are volume-normalized ("0.01 l of Cave Slime" -> "Cave Slime"),
+        // so a tiny sip collapses onto the same food and its values round to zero.
+        // Adopting one would replace real values with 0 across the board.
+        candidates.RemoveAll(c => c.Total <= 0 && c.Hunger <= 0);
+        if (candidates.Count == 0)
+        {
+            return new CanonicalOutcome(false, false);
+        }
+
+        candidates.Sort(CompareCandidates);
+        var best = candidates[0];
+
+        // Hunger is rounded to 2 decimals by the game client, so a food below 0.005
+        // arrives as 0 — which would make FEP/hunger meaningless. Take the best
+        // observation that has one instead, and keep the stored value if none does.
+        var hunger = best.Hunger;
+        var hungerFallback = false;
+        if (hunger <= 0)
+        {
+            hungerFallback = true;
+            var withHunger = candidates.FirstOrDefault(c => c.Hunger > 0);
+            hunger = withHunger?.Hunger ?? food.Hunger;
+        }
+
+        var feps = CloneOrderedFeps(best.Feps);
+        var changed = food.Energy != best.Energy
+            || food.Hunger != hunger
+            || !SameFeps(food.Feps, feps);
+
+        food.Energy = best.Energy;
+        food.Hunger = hunger;
+        food.Feps = feps;
+        food.ValueSource = best.Source;
+        food.ValueWorld = best.World;
+
+        return new CanonicalOutcome(changed, hungerFallback);
+    }
+
+    /// <summary>
+    /// Promotes one incoming record to the food's canonical values when it outranks
+    /// what is stored: a client upload beats an import beats the wiki, a newer world
+    /// beats an older one, and within the same source and world the lowest FEP total
+    /// wins (closest to base quality — the heuristic variations already use).
+    /// </summary>
+    private static bool TryPromoteCanonical(
+        FoodEntity food, string source, string? genus, SourceFoodRecord record, List<FoodFep> feps)
+    {
+        var energy = (int)Math.Round(record.Energy);
+        // Nothing usable, or an information-free record (a sip of a liquid, whose FEPs
+        // and hunger both round to zero) — never let either overwrite stored values.
+        if (feps.Sum(f => f.Value) <= 0 && record.Hunger <= 0)
+        {
+            return false;
+        }
+
+        var newRank = FoodValueSource.Rank(source);
+        var currentRank = FoodValueSource.Rank(food.ValueSource);
+        if (newRank < currentRank)
+        {
+            return false;
+        }
+
+        if (newRank == currentRank)
+        {
+            var newOrder = WorldOrder(genus);
+            var currentOrder = WorldOrder(food.ValueWorld);
+            if (newOrder < currentOrder)
+            {
+                return false;
+            }
+
+            if (newOrder == currentOrder)
+            {
+                var newTotal = feps.Sum(f => f.Value);
+                var currentTotal = food.Feps.Sum(f => f.Value);
+                if (newTotal <= 0 || (currentTotal > 0 && newTotal >= currentTotal))
+                {
+                    return false;
+                }
+            }
+        }
+
+        var hunger = record.Hunger > 0 ? record.Hunger : food.Hunger;
+        var ordered = CloneOrderedFeps(feps);
+        var changed = food.Energy != energy
+            || food.Hunger != hunger
+            || !SameFeps(food.Feps, ordered);
+
+        food.Energy = energy;
+        food.Hunger = hunger;
+        food.Feps = ordered;
+        food.ValueSource = source;
+        food.ValueWorld = genus;
+
+        return changed;
+    }
+
+    /// <summary>
+    /// Copies FEP lines into fresh instances in display order. The copy matters: the
+    /// same list is also assigned to a variant, and two EF owners must never share
+    /// owned-entity instances.
+    /// </summary>
+    private static List<FoodFep> CloneOrderedFeps(IEnumerable<FoodFep> feps) =>
+        feps.Select(f => new FoodFep { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value })
+            .OrderBy(f => StatOrder.TryGetValue(f.Attribute, out var order) ? order : int.MaxValue)
+            .ThenBy(f => f.Tier)
+            .ToList();
+
+    private static bool SameFeps(List<FoodFep> a, List<FoodFep> b)
+    {
+        if (a.Count != b.Count)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < a.Count; i++)
+        {
+            if (!string.Equals(a[i].Attribute, b[i].Attribute, StringComparison.OrdinalIgnoreCase)
+                || a[i].Tier != b[i].Tier
+                || a[i].Value != b[i].Value)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static FoodWorldValueDto MapWorldValueDto(FoodVariantWorldValue value) => new()
     {
         Genus = value.Genus,
         Energy = value.Energy,
         Hunger = value.Hunger,
+        Observed = value.Observed,
         Feps = value.Feps
             .Select(f => new FoodFepDto { Attribute = f.Attribute, Tier = f.Tier, Value = f.Value })
             .ToList()
@@ -1599,7 +1955,10 @@ public partial class FoodCatalogService : IFoodCatalogService
         return text;
     }
 
-    /// <summary>Canonical base-q10 values (hunger, energy, FEPs) from the wiki page.</summary>
+    /// <summary>
+    /// Base-q10 values (hunger, energy, FEPs) from the wiki page. Last resort — used only
+    /// for a food whose game record carries no values at all (see BuildFoodEntity).
+    /// </summary>
     private static void ApplyWikiValues(FoodEntity entity, WikiPage page, decimal hunger, decimal energy)
     {
         entity.Hunger = hunger;
@@ -1617,14 +1976,6 @@ public partial class FoodCatalogService : IFoodCatalogService
                 entity.Feps.Add(new FoodFep { Attribute = abbrev, Tier = 2, Value = tier2 });
             }
         }
-    }
-
-    /// <summary>Values straight from the game-data record (no usable wiki page).</summary>
-    private void ApplyDumpValues(FoodEntity entity, SourceFoodRecord baseRecord, string name)
-    {
-        entity.Hunger = baseRecord.Hunger;
-        entity.Energy = (int)Math.Round(baseRecord.Energy);
-        entity.Feps.AddRange(ParseDumpFeps(baseRecord.Feps, name));
     }
 
     /// <summary>Parses game-dump FEP names ("Strength +2") into (Attribute, Tier, Value), stat-ordered.</summary>

@@ -14,7 +14,11 @@ public sealed record CookbookVariantRow(
     string RecipeText,
     string SearchBlob,
     decimal Total,
+    /// <summary>Total with +2 FEPs counted double (the game's "(+2 Weighted) Total FEPs").</summary>
+    decimal WeightedTotal,
     decimal PerHunger,
+    /// <summary>Expected stat points per hunger: the weighted total over hunger.</summary>
+    decimal WeightedPerHunger,
     Dictionary<string, decimal> StatTotals,
     Dictionary<string, decimal> StatTierTotals,
     List<FoodFepDto> EffectiveFeps,
@@ -43,6 +47,7 @@ public static class CookbookRows
         var text = string.Join(", ", variant.Ingredients.Select(i =>
             i.Percentage != 100 ? $"{i.Name} {i.Percentage:0.#}%" : i.Name));
         var total = feps.Sum(f => f.Value);
+        var weightedTotal = feps.Sum(f => f.Value * f.Tier);
         var statTotals = feps
             .GroupBy(f => f.Attribute, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.Sum(f => f.Value), StringComparer.OrdinalIgnoreCase);
@@ -54,7 +59,9 @@ public static class CookbookRows
             text,
             text.ToLowerInvariant(),
             total,
+            weightedTotal,
             hunger > 0 ? total / hunger : 0m,
+            hunger > 0 ? weightedTotal / hunger : 0m,
             statTotals,
             statTierTotals,
             feps,
