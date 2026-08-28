@@ -126,7 +126,9 @@ public class TenantService : ITenantService
             CreatedAt = entity.CreatedAt,
             IsActive = entity.IsActive,
             DiscordWebhookUrl = entity.DiscordWebhookUrl,
-            DiscordNotificationsEnabled = entity.DiscordNotificationsEnabled
+            DiscordNotificationsEnabled = entity.DiscordNotificationsEnabled,
+            DiscordCookbookWebhookUrl = entity.DiscordCookbookWebhookUrl,
+            DiscordCookbookNotificationsEnabled = entity.DiscordCookbookNotificationsEnabled
         };
     }
 }

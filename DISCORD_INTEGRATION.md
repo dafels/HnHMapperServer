@@ -1,16 +1,17 @@
 # Discord Integration Guide
 
-Complete guide for setting up timer notifications in Discord for HavenMap.
+Complete guide for setting up timer and cookbook notifications in Discord for HavenMap.
 
 ---
 
 ## Overview
 
-HavenMap can send beautiful, rich-formatted notifications to Discord when timers expire or approach expiry. Each tenant can configure their own Discord webhook to receive notifications in their dedicated channel.
+HavenMap can send beautiful, rich-formatted notifications to Discord when timers expire or approach expiry, and when new foods are discovered in the cookbook. Each tenant configures two independent channels — **timer alerts** and **cookbook discoveries** — each with its own enable toggle and webhook URL, so they can post to two different Discord channels (or share one).
 
 **Supported Notifications:**
 - ⏰ Pre-expiry warnings at 4 intervals: 1 day, 4 hours, 1 hour, 10 minutes
 - 🔔 Timer expiration notifications
+- 🍳 Cookbook food-discovery digests (separate channel, optional)
 - 📍 Clickable map links that navigate directly to marker locations
 - 🎨 Marker icons displayed as thumbnails
 
@@ -56,14 +57,17 @@ HavenMap can send beautiful, rich-formatted notifications to Discord when timers
 
 ### Step 2: Configure Discord Integration
 
-1. Scroll to the **Discord Integration** section
-2. Toggle **Enable Discord Notifications** to **ON**
-3. Paste your webhook URL into the **Webhook URL** field
+1. Scroll to the **Discord Integration** section — it has two subsections: **Timer alerts** and **Cookbook discoveries**
+2. Toggle **Enable timer notifications** to **ON**
+3. Paste your webhook URL into the **Timer Webhook URL** field
    - Make sure it starts with `https://discord.com/api/webhooks/`
-4. Click **Test Connection** button
-   - Check your Discord channel for a test message
+4. (Optional) Toggle **Enable cookbook notifications** to **ON** and paste a second webhook URL into the **Cookbook Webhook URL** field to route food discoveries to a different channel
+   - Leave the cookbook URL blank to send cookbook notifications to the timer webhook
+   - Toggle it **OFF** to silence cookbook Discord pings entirely
+5. Click **Save Discord Settings**
+6. Click **Test Timer Webhook** (and **Test Cookbook Webhook** if enabled)
+   - Check your Discord channel(s) for a test message
    - If successful, you'll see: "✅ Test Notification - Your Discord webhook is configured correctly!"
-5. Click **Save Settings**
 
 ---
 
@@ -278,8 +282,8 @@ If you have many timers expiring simultaneously, some notifications may be delay
 ### Database Security
 
 Webhook URLs are stored in the `Tenants` table:
-- Column: `DiscordWebhookUrl`
-- Tenant-isolated (each tenant has their own webhook)
+- Columns: `DiscordWebhookUrl` (timer alerts) and `DiscordCookbookWebhookUrl` (cookbook discoveries)
+- Tenant-isolated (each tenant has their own webhooks)
 - Protected by ASP.NET Core authentication/authorization
 
 **Production Recommendations:**
@@ -293,34 +297,31 @@ Webhook URLs are stored in the `Tenants` table:
 
 ### Multiple Discord Channels
 
-Each tenant can have **one webhook URL**. To send notifications to multiple channels:
+Each tenant has **two independent channels**, configured in Admin → Settings → Discord Integration:
 
-**Option 1: Discord Webhook Forwarding**
-- Use a Discord bot to forward messages from one channel to others
-- Requires custom bot development
+- **Timer alerts** (`MarkerTimerExpired`, `StandaloneTimerExpired`, `TimerPreExpiryWarning`) — the
+  tenant's main webhook (`DiscordWebhookUrl` + `DiscordNotificationsEnabled`).
+- **Cookbook discoveries** (`CookbookFoodAdded`) — its own toggle and webhook
+  (`DiscordCookbookWebhookUrl` + `DiscordCookbookNotificationsEnabled`). When the cookbook webhook
+  URL is blank, cookbook notifications fall back to the timer webhook — but only while the timer
+  channel is itself enabled and configured. Toggling cookbook off silences cookbook pings entirely.
 
-**Option 2: Multiple Tenants**
-- Create separate tenants for different groups
-- Each tenant has its own webhook and timers
+Point the two webhooks at different Discord channels to separate the streams. Both settings are
+saved together via `PUT /api/tenants/{tenantId}/discord-settings` — note the endpoint **overwrites
+all four fields**, so raw API callers must always send the full state (the admin UI does).
+`POST /api/tenants/{tenantId}/discord-test?channel=timers|cookbook` sends a channel-appropriate
+test message to whichever URL that channel would actually use.
+
+For more channels than that (e.g. per-group timers), the older workarounds still apply: a Discord
+bot that forwards messages, or separate tenants.
 
 ### Custom Notification Filtering
 
-Currently, **all timer notifications** are sent to Discord (warnings + expiry).
-
-To customize which notifications are sent, you would need to modify the code:
-
-**File**: `HnHMapperServer.Services/Services/NotificationService.cs`
-
-**Example**: Only send expiry notifications (no warnings)
-```csharp
-// Around line 96, add condition:
-if (tenant?.DiscordNotificationsEnabled == true &&
-    !string.IsNullOrWhiteSpace(tenant.DiscordWebhookUrl) &&
-    dto.Type != "TimerPreExpiryWarning") // Skip warnings
-{
-    await _discordWebhookService.SendNotificationAsync(notificationDto, tenant.DiscordWebhookUrl);
-}
-```
+Routing lives in one place: `HnHMapperServer.Services/Services/DiscordNotificationRouter.cs`.
+`GetChannel` maps a notification type to a channel (unknown types go to the timer channel) and
+`ResolveWebhookUrl` picks the webhook URL for a tenant, or `null` to send nothing.
+`NotificationService.CreateAsync` calls both, so custom filtering (e.g. skipping
+`TimerPreExpiryWarning`) belongs in the router rather than in `NotificationService`.
 
 ### Base URL Configuration
 
@@ -368,7 +369,10 @@ services:
 **A**: Yes, by modifying `DiscordWebhookService.cs` → `BuildEmbedAsync()` method. You can change colors, emojis, fields, and formatting.
 
 ### Q: How do I disable Discord notifications temporarily?
-**A**: Admin → Settings → Toggle "Enable Discord Notifications" to **OFF**. Webhook URL remains saved.
+**A**: Admin → Settings → Toggle "Enable timer notifications" (and/or "Enable cookbook notifications") to **OFF**. Webhook URLs remain saved.
+
+### Q: Can cookbook discoveries go to a different channel than timer alerts?
+**A**: Yes — the Cookbook discoveries subsection has its own webhook URL. Set it to a webhook from a second Discord channel. Leaving it blank sends cookbook notifications to the timer webhook; toggling it off disables them.
 
 ### Q: Can multiple users receive notifications?
 **A**: Yes! All users with access to the Discord channel will see notifications. Notifications are sent to the channel (via webhook), not to individual users.

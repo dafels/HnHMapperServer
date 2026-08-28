@@ -525,14 +525,14 @@
                                     <table class="panel-table">
                                         <thead>
                                             <tr>
-                                                <th>Food</th>
+                                                <th>@PanelSortLabel(panel.Id, "food", "Food")</th>
                                                 <th>FEPs</th>
-                                                <th class="num">Energy</th>
-                                                <th class="num">Hunger</th>
-                                                <th class="num">Total</th>
-                                                <th class="num" title="@WeightedTotalTitle">+2 Total</th>
-                                                <th class="num">FEP/Hunger</th>
-                                                <th class="num" title="@WeightedEffTitle">+2 FEP/H</th>
+                                                <th class="num">@PanelSortLabel(panel.Id, "energy", "Energy")</th>
+                                                <th class="num">@PanelSortLabel(panel.Id, "hunger", "Hunger")</th>
+                                                <th class="num">@PanelSortLabel(panel.Id, "total", "Total")</th>
+                                                <th class="num" title="@WeightedTotalTitle">@PanelSortLabel(panel.Id, "wtotal", "+2 Total")</th>
+                                                <th class="num">@PanelSortLabel(panel.Id, "eff", "FEP/Hunger")</th>
+                                                <th class="num" title="@WeightedEffTitle">@PanelSortLabel(panel.Id, "weff", "+2 FEP/H")</th>
                                                 <th></th>
                                             </tr>
                                         </thead>
@@ -551,9 +551,9 @@
                                                     <td class="panel-table-food">
                                                         @if (row.Food != null)
                                                         {
-                                                            <img class="chip-icon" src="@LocalIconSrc(row.Food.Food)" onerror="@RemoteIconFallback(row.Food.Food)" alt="" />
+                                                            <img class="food-icon" src="@LocalIconSrc(row.Food.Food)" onerror="@RemoteIconFallback(row.Food.Food)" loading="lazy" alt="" />
                                                         }
-                                                        <span>@row.Item.FoodName</span>
+                                                        <span class="food-name">@row.Item.FoodName</span>
                                                         @if (row.Item.IngredientSignature.Length > 0)
                                                         {
                                                             <span class="item-sub">@ShortVariantLabel(row.Item)</span>
@@ -573,6 +573,17 @@
                                                                 </span>
                                                             }
                                                         </div>
+                                                        @if (row.Total > 0)
+                                                        {
+                                                            <div class="fep-bar">
+                                                                @foreach (var fep in row.Item.Feps)
+                                                                {
+                                                                    <div class="fep-bar-segment @(fep.Tier == 2 ? "tier2" : "")"
+                                                                         style="width: @RatioWidth(fep.Value, row.Total); background: @StatColor(fep.Attribute, fep.Tier);"
+                                                                         @attributes="FtAttrs(fep, row.Total)">@(fep.Tier == 2 && Ratio(fep.Value, row.Total) >= 0.14m ? "+2" : "")</div>
+                                                                }
+                                                            </div>
+                                                        }
                                                     </td>
                                                     <td class="num">@row.Item.Energy</td>
                                                     <td class="num">@ScaledHunger(row.Item.Hunger).ToString("0.##")</td>
@@ -3910,8 +3921,69 @@
             ? $"showing {shown} of {total} \u2014 {hidden} hidden by filters"
             : $"{total} {(total == 1 ? "item" : "items")}";
 
-    private List<PanelRow> PanelRowsFor(FoodPanelDto panel) =>
-        panel.Items
+    // Header sorting like the catalog tables: click cycles ascending \u2192 descending \u2192 off,
+    // where off = the panel's own drag order. View-only \u2014 the stored order never changes.
+    private readonly Dictionary<int, (string Key, bool Desc)> _panelSort = new();
+
+    private void TogglePanelSort(int panelId, string key)
+    {
+        if (_panelSort.TryGetValue(panelId, out var current) && current.Key == key)
+        {
+            if (current.Desc)
+            {
+                _panelSort.Remove(panelId);
+            }
+            else
+            {
+                _panelSort[panelId] = (key, true);
+            }
+        }
+        else
+        {
+            _panelSort[panelId] = (key, false);
+        }
+    }
+
+    /// <summary>MudBlazor's own sort-label icon classes, so the arrow behaves like MudTableSortLabel.</summary>
+    private string PanelSortIconClass(int panelId, string key) =>
+        _panelSort.TryGetValue(panelId, out var s) && s.Key == key
+            ? (s.Desc ? "mud-table-sort-label-icon mud-direction-desc" : "mud-table-sort-label-icon mud-direction-asc")
+            : "mud-table-sort-label-icon";
+
+    private RenderFragment PanelSortLabel(int panelId, string key, string label) =>
+        @<span class="mud-table-sort-label mud-clickable" role="button"
+               @onclick="() => TogglePanelSort(panelId, key)">
+            @label
+            <MudIcon Icon="@Icons.Material.Filled.ArrowUpward" Class="@PanelSortIconClass(panelId, key)" />
+        </span>;
+
+    private static List<PanelRow> ApplyPanelSort(List<PanelRow> rows, string key, bool desc)
+    {
+        if (key == "food")
+        {
+            // Name plus the variant label \u2014 the same text the Food cell shows.
+            Func<PanelRow, string> name = r => r.Item.FoodName + " " + (r.Item.Label ?? string.Empty);
+            return (desc
+                ? rows.OrderByDescending(name, StringComparer.OrdinalIgnoreCase)
+                : rows.OrderBy(name, StringComparer.OrdinalIgnoreCase)).ToList();
+        }
+
+        // Quality scaling multiplies every row by the same factor, so raw values sort identically.
+        Func<PanelRow, decimal> value = key switch
+        {
+            "energy" => r => r.Item.Energy,
+            "hunger" => r => r.Item.Hunger,
+            "total" => r => r.Total,
+            "wtotal" => r => r.WeightedTotal,
+            "eff" => r => r.PerHunger,
+            _ => r => r.WeightedPerHunger,
+        };
+        return (desc ? rows.OrderByDescending(value) : rows.OrderBy(value)).ToList();
+    }
+
+    private List<PanelRow> PanelRowsFor(FoodPanelDto panel)
+    {
+        var rows = panel.Items
             .OrderBy(i => i.Position)
             .Select(item =>
             {
@@ -3927,6 +3999,11 @@
                     item.Hunger > 0 ? weighted / item.Hunger : 0m);
             })
             .ToList();
+
+        return _panelSort.TryGetValue(panel.Id, out var sort)
+            ? ApplyPanelSort(rows, sort.Key, sort.Desc)
+            : rows;
+    }
 
     /// <summary>
     /// A panel row shows when its FOOD passes the current filters. Food level rather than
@@ -4391,6 +4468,8 @@
         if (_draggingChip is { } chip && chip.PanelId == panel.Id && panel.IsOwn && chip.ItemId != targetItem.ItemId)
         {
             ClearDrag();
+            // Reordering edits the drag order, so drop any header sort hiding it.
+            _panelSort.Remove(panel.Id);
             var order = panel.Items.Select(i => i.ItemId).ToList();
             order.Remove(chip.ItemId);
             var targetIndex = order.IndexOf(targetItem.ItemId);

@@ -143,7 +143,7 @@ public class DiscordWebhookService : IDiscordWebhookService
     /// <summary>
     /// Test a Discord webhook URL by sending a test message.
     /// </summary>
-    public async Task<bool> TestWebhookAsync(string webhookUrl)
+    public async Task<bool> TestWebhookAsync(string webhookUrl, DiscordNotificationChannel channel = DiscordNotificationChannel.Timers)
     {
         if (string.IsNullOrWhiteSpace(webhookUrl))
         {
@@ -155,8 +155,12 @@ public class DiscordWebhookService : IDiscordWebhookService
         {
             var testEmbed = new
             {
-                title = "✅ Test Notification",
-                description = "Your Discord webhook is configured correctly! You will receive notifications here when timers expire.",
+                title = channel == DiscordNotificationChannel.Cookbook
+                    ? "🍳 Test Notification"
+                    : "✅ Test Notification",
+                description = channel == DiscordNotificationChannel.Cookbook
+                    ? "Your Discord webhook is configured correctly! You will receive notifications here when new foods are discovered in the cookbook."
+                    : "Your Discord webhook is configured correctly! You will receive notifications here when timers expire.",
                 color = 3066993, // Green color
                 footer = new
                 {

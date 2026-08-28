@@ -173,21 +173,22 @@
                     Discord Integration
                 </MudText>
                 <MudText Typo="Typo.body2" Class="mb-3">
-                    Send timer notifications to a Discord channel via webhook. Notifications will be sent when timers expire.
+                    Send timer alerts and cookbook food discoveries to Discord via webhooks. Each has its own webhook URL, so they can post to two different channels.
                 </MudText>
 
+                <MudText Typo="Typo.subtitle1" Class="mb-2">Timer alerts</MudText>
                 <MudSwitch @bind-Value="@_discordEnabled"
-                          Label="Enable Discord Notifications"
+                          Label="Enable timer notifications"
                           Color="Color.Primary"
                           Class="mb-3" />
 
                 @if (_discordEnabled)
                 {
-                    <MudTextField Label="Discord Webhook URL"
+                    <MudTextField Label="Timer Webhook URL"
                                  @bind-Value="@_discordWebhookUrl"
                                  Variant="Variant.Outlined"
                                  Placeholder="https://discord.com/api/webhooks/..."
-                                 HelperText="Paste your Discord webhook URL here"
+                                 HelperText="Timer alerts are sent to this webhook"
                                  Class="mb-3"
                                  Lines="2" />
 
@@ -201,6 +202,25 @@
                             <li>Click "Copy Webhook URL"</li>
                         </ol>
                     </MudAlert>
+                }
+
+                <MudDivider Class="my-3" />
+
+                <MudText Typo="Typo.subtitle1" Class="mb-2">Cookbook discoveries</MudText>
+                <MudSwitch @bind-Value="@_cookbookDiscordEnabled"
+                          Label="Enable cookbook notifications"
+                          Color="Color.Primary"
+                          Class="mb-3" />
+
+                @if (_cookbookDiscordEnabled)
+                {
+                    <MudTextField Label="Cookbook Webhook URL"
+                                 @bind-Value="@_cookbookDiscordWebhookUrl"
+                                 Variant="Variant.Outlined"
+                                 Placeholder="https://discord.com/api/webhooks/..."
+                                 HelperText="Leave blank to send cookbook notifications to the timer webhook"
+                                 Class="mb-3"
+                                 Lines="2" />
                 }
 
                 <MudStack Row="true" Spacing="2" Class="mt-3">
@@ -225,7 +245,7 @@
                         <MudButton Variant="Variant.Outlined"
                                   Color="Color.Secondary"
                                   StartIcon="@Icons.Material.Filled.Send"
-                                  OnClick="TestDiscordWebhook"
+                                  OnClick="@(() => TestDiscordWebhook("timers"))"
                                   Disabled="@_isTestingDiscord">
                             @if (_isTestingDiscord)
                             {
@@ -234,7 +254,26 @@
                             }
                             else
                             {
-                                <span>Send Test Notification</span>
+                                <span>Test Timer Webhook</span>
+                            }
+                        </MudButton>
+                    }
+
+                    @if (_cookbookDiscordEnabled && (!string.IsNullOrWhiteSpace(_cookbookDiscordWebhookUrl) || !string.IsNullOrWhiteSpace(_discordWebhookUrl)))
+                    {
+                        <MudButton Variant="Variant.Outlined"
+                                  Color="Color.Secondary"
+                                  StartIcon="@Icons.Material.Filled.Send"
+                                  OnClick="@(() => TestDiscordWebhook("cookbook"))"
+                                  Disabled="@_isTestingCookbookDiscord">
+                            @if (_isTestingCookbookDiscord)
+                            {
+                                <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="me-2" />
+                                <span>Testing...</span>
+                            }
+                            else
+                            {
+                                <span>Test Cookbook Webhook</span>
                             }
                         </MudButton>
                     }
@@ -291,8 +330,11 @@
     // Discord integration fields
     private bool _discordEnabled = false;
     private string? _discordWebhookUrl = string.Empty;
+    private bool _cookbookDiscordEnabled = false;
+    private string? _cookbookDiscordWebhookUrl = string.Empty;
     private bool _isSavingDiscord = false;
     private bool _isTestingDiscord = false;
+    private bool _isTestingCookbookDiscord = false;
 
     // Map upload settings fields
     private bool _allowGridUpdates = true;
@@ -345,6 +387,8 @@
                 {
                     _discordEnabled = _tenantSettings.DiscordNotificationsEnabled;
                     _discordWebhookUrl = _tenantSettings.DiscordWebhookUrl;
+                    _cookbookDiscordEnabled = _tenantSettings.DiscordCookbookNotificationsEnabled;
+                    _cookbookDiscordWebhookUrl = _tenantSettings.DiscordCookbookWebhookUrl;
                 }
             }
             else
@@ -545,7 +589,9 @@
             var payload = new
             {
                 Enabled = _discordEnabled,
-                WebhookUrl = _discordWebhookUrl
+                WebhookUrl = _discordWebhookUrl,
+                CookbookEnabled = _cookbookDiscordEnabled,
+                CookbookWebhookUrl = _cookbookDiscordWebhookUrl
             };
             var response = await httpClient.PutAsJsonAsync($"/api/tenants/{tenantId}/discord-settings", payload);
 
@@ -585,16 +631,17 @@
         }
     }
 
-    private async Task TestDiscordWebhook()
+    private async Task TestDiscordWebhook(string channel)
     {
         if (_tenantSettings == null) return;
 
-        _isTestingDiscord = true;
+        var isCookbook = channel == "cookbook";
+        if (isCookbook) { _isTestingCookbookDiscord = true; } else { _isTestingDiscord = true; }
         try
         {
             var tenantId = TenantContext.CurrentTenant?.Id ?? _tenantSettings.Id;
             var httpClient = HttpClientFactory.CreateClient("API");
-            var response = await httpClient.PostAsync($"/api/tenants/{tenantId}/discord-test", null);
+            var response = await httpClient.PostAsync($"/api/tenants/{tenantId}/discord-test?channel={channel}", null);
 
             if (response.IsSuccessStatusCode)
             {
@@ -627,7 +674,7 @@
         }
         finally
         {
-            _isTestingDiscord = false;
+            if (isCookbook) { _isTestingCookbookDiscord = false; } else { _isTestingDiscord = false; }
         }
     }
 

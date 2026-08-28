@@ -577,7 +577,9 @@ public static class TenantAdminEndpoints
             IsActive = tenant.IsActive,
             UserCount = userCount,
             DiscordWebhookUrl = tenant.DiscordWebhookUrl,
-            DiscordNotificationsEnabled = tenant.DiscordNotificationsEnabled
+            DiscordNotificationsEnabled = tenant.DiscordNotificationsEnabled,
+            DiscordCookbookWebhookUrl = tenant.DiscordCookbookWebhookUrl,
+            DiscordCookbookNotificationsEnabled = tenant.DiscordCookbookNotificationsEnabled
         };
 
         return Results.Ok(tenantDto);
@@ -925,14 +927,15 @@ public static class TenantAdminEndpoints
             }
         }
 
-        // Validate webhook URL format if provided
-        if (!string.IsNullOrWhiteSpace(dto.WebhookUrl))
+        // Validate webhook URL formats if provided
+        static bool IsInvalidWebhookUrl(string? url) =>
+            !string.IsNullOrWhiteSpace(url) &&
+            !url.StartsWith("https://discord.com/api/webhooks/", StringComparison.OrdinalIgnoreCase) &&
+            !url.StartsWith("https://discordapp.com/api/webhooks/", StringComparison.OrdinalIgnoreCase);
+
+        if (IsInvalidWebhookUrl(dto.WebhookUrl) || IsInvalidWebhookUrl(dto.CookbookWebhookUrl))
         {
-            if (!dto.WebhookUrl.StartsWith("https://discord.com/api/webhooks/", StringComparison.OrdinalIgnoreCase) &&
-                !dto.WebhookUrl.StartsWith("https://discordapp.com/api/webhooks/", StringComparison.OrdinalIgnoreCase))
-            {
-                return Results.BadRequest(new { error = "Invalid Discord webhook URL. Must start with https://discord.com/api/webhooks/ or https://discordapp.com/api/webhooks/" });
-            }
+            return Results.BadRequest(new { error = "Invalid Discord webhook URL. Must start with https://discord.com/api/webhooks/ or https://discordapp.com/api/webhooks/" });
         }
 
         // Find tenant
@@ -944,22 +947,27 @@ public static class TenantAdminEndpoints
 
         var oldEnabled = tenant.DiscordNotificationsEnabled;
         var oldWebhookUrl = tenant.DiscordWebhookUrl;
+        var oldCookbookEnabled = tenant.DiscordCookbookNotificationsEnabled;
+        var oldCookbookWebhookUrl = tenant.DiscordCookbookWebhookUrl;
 
         // Update settings
         tenant.DiscordNotificationsEnabled = dto.Enabled;
         tenant.DiscordWebhookUrl = dto.WebhookUrl;
+        tenant.DiscordCookbookNotificationsEnabled = dto.CookbookEnabled;
+        tenant.DiscordCookbookWebhookUrl = dto.CookbookWebhookUrl;
 
         await db.SaveChangesAsync();
 
         // Audit log
+        static string MaskUrl(string? url) => string.IsNullOrEmpty(url) ? "none" : "***";
         await auditService.LogAsync(new AuditEntry
         {
             TenantId = tenantId,
             Action = "DiscordSettingsUpdated",
             EntityType = "TenantSettings",
             EntityId = tenantId,
-            OldValue = $"Enabled: {oldEnabled}, WebhookUrl: {(string.IsNullOrEmpty(oldWebhookUrl) ? "none" : "***")}",
-            NewValue = $"Enabled: {dto.Enabled}, WebhookUrl: {(string.IsNullOrEmpty(dto.WebhookUrl) ? "none" : "***")}"
+            OldValue = $"Enabled: {oldEnabled}, WebhookUrl: {MaskUrl(oldWebhookUrl)}, CookbookEnabled: {oldCookbookEnabled}, CookbookWebhookUrl: {MaskUrl(oldCookbookWebhookUrl)}",
+            NewValue = $"Enabled: {dto.Enabled}, WebhookUrl: {MaskUrl(dto.WebhookUrl)}, CookbookEnabled: {dto.CookbookEnabled}, CookbookWebhookUrl: {MaskUrl(dto.CookbookWebhookUrl)}"
         });
 
         logger.LogInformation("Discord settings updated for tenant {TenantId}: Enabled={Enabled}", tenantId, dto.Enabled);
@@ -975,7 +983,8 @@ public static class TenantAdminEndpoints
         string tenantId,
         ApplicationDbContext db,
         IDiscordWebhookService discordService,
-        HttpContext context)
+        HttpContext context,
+        string? channel = null)
     {
         // Verify user has access to this tenant (unless SuperAdmin)
         if (!context.User.IsInRole(AuthorizationConstants.Roles.SuperAdmin))
@@ -987,6 +996,19 @@ public static class TenantAdminEndpoints
             }
         }
 
+        DiscordNotificationChannel testChannel;
+        switch (channel?.ToLowerInvariant())
+        {
+            case null or "" or "timers":
+                testChannel = DiscordNotificationChannel.Timers;
+                break;
+            case "cookbook":
+                testChannel = DiscordNotificationChannel.Cookbook;
+                break;
+            default:
+                return Results.BadRequest(new { error = "Unknown channel. Use 'timers' or 'cookbook'." });
+        }
+
         // Find tenant
         var tenant = await db.Tenants.FirstOrDefaultAsync(t => t.Id == tenantId);
         if (tenant == null)
@@ -994,13 +1016,27 @@ public static class TenantAdminEndpoints
             return Results.NotFound(new { error = "Tenant not found" });
         }
 
-        if (string.IsNullOrWhiteSpace(tenant.DiscordWebhookUrl))
+        // Resolve the URL a real notification on this channel would use (incl. the
+        // cookbook→timers fallback); the enabled toggles are deliberately ignored so a
+        // saved URL can be tested before the channel is switched on.
+        var webhookUrl = DiscordNotificationRouter.ResolveWebhookUrl(
+            new TenantDto
+            {
+                DiscordWebhookUrl = tenant.DiscordWebhookUrl,
+                DiscordNotificationsEnabled = tenant.DiscordNotificationsEnabled,
+                DiscordCookbookWebhookUrl = tenant.DiscordCookbookWebhookUrl,
+                DiscordCookbookNotificationsEnabled = tenant.DiscordCookbookNotificationsEnabled
+            },
+            testChannel,
+            requireEnabled: false);
+
+        if (webhookUrl == null)
         {
             return Results.BadRequest(new { error = "Discord webhook URL is not configured" });
         }
 
         // Test the webhook
-        var success = await discordService.TestWebhookAsync(tenant.DiscordWebhookUrl);
+        var success = await discordService.TestWebhookAsync(webhookUrl, testChannel);
 
         if (success)
         {

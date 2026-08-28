@@ -15,6 +15,8 @@ public class TenantDto
     public double StorageUsagePercent => StorageQuotaMB > 0 ? (CurrentStorageMB / StorageQuotaMB) * 100 : 0;
     public string? DiscordWebhookUrl { get; set; }
     public bool DiscordNotificationsEnabled { get; set; }
+    public string? DiscordCookbookWebhookUrl { get; set; }
+    public bool DiscordCookbookNotificationsEnabled { get; set; }
 }
 
 /// <summary>
@@ -49,4 +51,14 @@ public class UpdateDiscordSettingsDto
     /// Discord webhook URL (must start with https://discord.com/api/webhooks/)
     /// </summary>
     public string? WebhookUrl { get; set; }
+
+    /// <summary>
+    /// Whether Discord notifications for cookbook discoveries are enabled
+    /// </summary>
+    public bool CookbookEnabled { get; set; }
+
+    /// <summary>
+    /// Discord webhook URL for cookbook discoveries; blank falls back to WebhookUrl
+    /// </summary>
+    public string? CookbookWebhookUrl { get; set; }
 }

@@ -1066,26 +1066,36 @@
     overflow-x: auto;
 }
 
+/* Matches the catalog's dense MudTable: body2 typography, MudBlazor's dense cell
+   padding, the mud table-line and hover colors, app.css's forced header color, and
+   MudBlazor's own sort-label header controls (their CSS is global, so the classes
+   style themselves outside a mud-table too). */
 .panel-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.84rem;
+    font-size: var(--mud-typography-body2-size, 0.875rem);
+    color: var(--mud-palette-text-primary, #424242);
 }
 
 .panel-table th {
-    padding: 4px 10px;
+    padding: 6px 24px 6px 16px;
     text-align: left;
     font-weight: 600;
-    font-size: 0.76rem;
-    color: var(--ck-text-muted);
-    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    font-size: var(--mud-typography-subtitle2-size, 0.875rem);
+    color: #2c3e50;
+    border-bottom: 1px solid var(--mud-palette-table-lines, #e0e0e0);
     white-space: nowrap;
 }
 
 .panel-table td {
-    padding: 4px 10px;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+    padding: 6px 24px 6px 16px;
+    border-bottom: 1px solid var(--mud-palette-table-lines, #e0e0e0);
     vertical-align: middle;
+}
+
+.panel-table th:last-child,
+.panel-table td:last-child {
+    padding-right: 16px;
 }
 
 .panel-table th.num,
@@ -1099,7 +1109,7 @@
 }
 
 .panel-table tbody tr:hover {
-    background: rgba(100, 181, 246, 0.14);
+    background: var(--mud-palette-table-hover, rgba(0, 0, 0, 0.04));
 }
 
 .panel-table tbody tr.unknown td {
@@ -1111,6 +1121,14 @@
     align-items: center;
     gap: 6px;
     max-width: 320px;
+}
+
+/* FEP composition bar under the pills — the detail view's bar, sized like the
+   variations table's (220px, no detail-block margin). */
+.panel-table .fep-bar {
+    width: 220px;
+    max-width: 100%;
+    margin: 3px 0 0;
 }
 
 /* The "+2" chip belongs to the stat chip it follows — pulled tight so the pair reads

@@ -1,4 +1,5 @@
 using HnHMapperServer.Core.DTOs;
+using HnHMapperServer.Services.Services;
 
 namespace HnHMapperServer.Services.Interfaces;
 
@@ -19,6 +20,7 @@ public interface IDiscordWebhookService
     /// Test a Discord webhook URL by sending a test message.
     /// </summary>
     /// <param name="webhookUrl">Discord webhook URL to test</param>
+    /// <param name="channel">Which channel's wording the test message uses</param>
     /// <returns>True if test was successful, false otherwise</returns>
-    Task<bool> TestWebhookAsync(string webhookUrl);
+    Task<bool> TestWebhookAsync(string webhookUrl, DiscordNotificationChannel channel = DiscordNotificationChannel.Timers);
 }

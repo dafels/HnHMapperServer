@@ -46,6 +46,16 @@ public sealed class TenantEntity
     public bool DiscordNotificationsEnabled { get; set; } = false;
 
     /// <summary>
+    /// Discord webhook URL for cookbook discovery notifications (nullable; falls back to DiscordWebhookUrl when blank)
+    /// </summary>
+    public string? DiscordCookbookWebhookUrl { get; set; }
+
+    /// <summary>
+    /// Whether Discord notifications for cookbook discoveries are enabled for this tenant
+    /// </summary>
+    public bool DiscordCookbookNotificationsEnabled { get; set; } = false;
+
+    /// <summary>
     /// UTC timestamp of the last tenant activity (grid uploads, position updates)
     /// </summary>
     public DateTime? LastActivityAt { get; set; }

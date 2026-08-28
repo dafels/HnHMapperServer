@@ -637,6 +637,41 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Recent Changes
 
+### 2026-08-28: Cookbook panels/Favorites — catalog table design + sortable headers
+
+**The panel/Favorites tables now render in the catalog tables' design and their headers sort
+like the catalog's (user request).** The tables stay hand-rolled HTML (MudTable's RowTemplate
+cannot carry the `draggable`/`@ondrop` attributes the reorder/move affordances need), aligned
+instead:
+- **Design:** `.panel-table` CSS mirrors the dense MudTable — body2 14px text on
+  `--mud-palette-text-primary`, MudBlazor's dense cell padding (`6px 24px 6px 16px`,
+  last-child 16px), `--mud-palette-table-lines` borders, `--mud-palette-table-hover` row hover,
+  and the `#2c3e50`/600 header treatment app.css forces on every mud table header. Rows use the
+  catalog's `food-icon` (32px) and weight-600 `food-name` instead of the old 18px chip styling.
+- **Sorting:** headers reuse **MudBlazor's own sort-label classes** (`mud-table-sort-label
+  mud-clickable` + `MudIcon ArrowUpward` with `mud-table-sort-label-icon mud-direction-asc/desc`)
+  — MudBlazor.min.css's selectors are unprefixed, so they style themselves outside a mud-table
+  and the arrow/hover/rotation are pixel-identical for free. Click cycles asc → desc → **off =
+  the panel's own drag order** (same cycle as MudTableSortLabel); state is per panel
+  (`_panelSort`), view-only, never persisted. Sortable: Food (name + variant label, the cell's
+  own text), Energy, Hunger, Total, +2 Total, FEP/Hunger, +2 FEP/H; FEPs stays unsortable like
+  the catalog's pill column. Raw values sort for the quality-scaled columns (the scale is one
+  positive factor per column, so order is identical). A same-panel reorder **drop clears that
+  panel's sort** — otherwise the drop would be invisible under the sort override.
+- **FEP bars (same session, follow-up request):** each panel row's FEPs cell renders the
+  detail view's `.fep-bar` under the pills — proportional segments by raw-value share of the
+  row's Total, tier-2 diagonal hatch, "+2" label on segments ≥14% wide — sized like the
+  variations table's bar (220px, 3px top margin) via a `.panel-table .fep-bar` override.
+  Only rendered when Total > 0; unresolved entries keep their stored FEPs so they get one too.
+- **Verified live** (dev DB, admin login): asc/desc/manual cycle exact on a 14-row panel,
+  per-panel independence, computed header styles byte-equal to the catalog table's
+  (`rgb(44,62,80)`/600/`6px 24px 6px 16px`); bars: segment widths sum to 100%, hatch pseudo
+  renders, "+2" shown on wide tier-2 segments and suppressed under 14%; no new console errors.
+  Suite untouched (UI-only; no bUnit harness). **Dev-cache footnote:** a rebuild that changes only a `.razor.css` does not
+  touch the assembly, so `?v=` (assembly mtime) stays and browsers keep the old immutable-cached
+  bundle — hard-refresh locally, or touch a .cs/.razor file; production's BUILD_COMMIT stamp is
+  unaffected.
+
 ### 2026-08-26: Cookbook — panels as tables, multi-select AND filters, +2 made visible
 
 Three user-decided changes on top of the value work below.

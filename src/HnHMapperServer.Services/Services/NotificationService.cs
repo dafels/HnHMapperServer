@@ -73,10 +73,13 @@ public class NotificationService : INotificationService
                 var discordWebhookService = scope.ServiceProvider.GetRequiredService<IDiscordWebhookService>();
 
                 var tenant = await tenantService.GetTenantAsync(dto.TenantId);
-                if (tenant?.DiscordNotificationsEnabled == true &&
-                    !string.IsNullOrWhiteSpace(tenant.DiscordWebhookUrl))
+                var webhookUrl = tenant == null
+                    ? null
+                    : DiscordNotificationRouter.ResolveWebhookUrl(
+                        tenant, DiscordNotificationRouter.GetChannel(notificationDto.Type));
+                if (webhookUrl != null)
                 {
-                    await discordWebhookService.SendNotificationAsync(notificationDto, tenant.DiscordWebhookUrl);
+                    await discordWebhookService.SendNotificationAsync(notificationDto, webhookUrl);
                 }
             }
             catch (Exception ex)
