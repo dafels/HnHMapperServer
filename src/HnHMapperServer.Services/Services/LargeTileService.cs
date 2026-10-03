@@ -179,6 +179,42 @@ public class LargeTileService : ILargeTileService
     }
 
     /// <summary>
+    /// Writes a tile so readers only ever see the old file or the complete new one: the bytes go
+    /// to a temp file in the same directory, then a rename replaces the target (atomic on Linux;
+    /// a reader holding the old file keeps reading the old inode). Overwriting in place let a
+    /// viewer request landing mid-write read a truncated WebP. The temp name does not end in
+    /// .webp, so pyramid enumeration/deletion never picks it up.
+    /// </summary>
+    private static async Task WriteFileAtomicAsync(string path, byte[] bytes)
+    {
+        var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await File.WriteAllBytesAsync(tempPath, bytes);
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    File.Move(tempPath, path, overwrite: true);
+                    return;
+                }
+                catch (IOException) when (attempt < 3)
+                {
+                    // Windows refuses to replace a file another handle has open; retry briefly.
+                    await Task.Delay(25 * (attempt + 1));
+                }
+            }
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                try { File.Delete(tempPath); } catch (IOException) { }
+            }
+        }
+    }
+
+    /// <summary>
     /// Internal method that performs the actual tile generation.
     /// Separated to support request coalescing via Task sharing.
     /// Semaphore only used for zoom=0 (DB queries) to avoid deadlock with recursive zoom 1-6.
@@ -775,7 +811,7 @@ public class LargeTileService : ILargeTileService
             var bytes = ms.ToArray();
 
             // Write to disk asynchronously
-            await File.WriteAllBytesAsync(outputPath, bytes);
+            await WriteFileAtomicAsync(outputPath, bytes);
 
             return bytes;
         }
@@ -858,7 +894,7 @@ public class LargeTileService : ILargeTileService
         await img.SaveAsWebpAsync(ms, WebpEncoder);
         var bytes = ms.ToArray();
 
-        await File.WriteAllBytesAsync(outputPath, bytes);
+        await WriteFileAtomicAsync(outputPath, bytes);
 
         _logger.LogDebug("Generated zoom-0 large tile: {Path}", outputPath);
         return bytes;
@@ -927,7 +963,7 @@ public class LargeTileService : ILargeTileService
         await img.SaveAsWebpAsync(ms, WebpEncoder);
         var bytes = ms.ToArray();
 
-        await File.WriteAllBytesAsync(outputPath, bytes);
+        await WriteFileAtomicAsync(outputPath, bytes);
 
         _logger.LogDebug("Generated zoom-{Zoom} large tile: {Path}", zoom, outputPath);
         return bytes;
@@ -997,7 +1033,7 @@ public class LargeTileService : ILargeTileService
         await img.SaveAsWebpAsync(ms, WebpEncoder);
         var bytes = ms.ToArray();
 
-        await File.WriteAllBytesAsync(outputPath, bytes);
+        await WriteFileAtomicAsync(outputPath, bytes);
 
         _logger.LogDebug("Generated zoom-{Zoom} large tile from files: {Path}", zoom, outputPath);
         return bytes;
