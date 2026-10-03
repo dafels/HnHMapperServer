@@ -1258,7 +1258,9 @@ public static class SuperadminEndpoints
         ILogger<Program> logger,
         int page = 1,
         int pageSize = 25,
-        string? search = null)
+        string? search = null,
+        string? sortBy = null,
+        bool sortDesc = true)
     {
         try
         {
@@ -1266,59 +1268,61 @@ public static class SuperadminEndpoints
             if (pageSize < 1) pageSize = 25;
             if (page < 1) page = 1;
 
-            // Build base query
-            var query = db.Maps
-                .IgnoreQueryFilters()
-                .AsNoTracking();
+            // Counts are projected as correlated subqueries so the whole list can be sorted by
+            // them in SQL before paging (sorting only the loaded page would be misleading).
+            var query =
+                from m in db.Maps.IgnoreQueryFilters().AsNoTracking()
+                join t in db.Tenants.IgnoreQueryFilters().AsNoTracking() on m.TenantId equals t.Id into tj
+                from t in tj.DefaultIfEmpty()
+                select new
+                {
+                    Map = m,
+                    TenantName = t != null ? t.Name : "Unknown",
+                    TileCount = db.Tiles.IgnoreQueryFilters().Count(x => x.MapId == m.Id),
+                    CustomMarkerCount = db.CustomMarkers.IgnoreQueryFilters().Count(x => x.MapId == m.Id)
+                };
 
-            // Apply search filter
+            // Search matches map name, tenant name or tenant id
             if (!string.IsNullOrWhiteSpace(search))
-                query = query.Where(m => m.Name.Contains(search));
+                query = query.Where(r => r.Map.Name.Contains(search)
+                    || r.TenantName.Contains(search)
+                    || r.Map.TenantId.Contains(search));
 
-            // Get total count
             var totalCount = await query.CountAsync();
 
-            // Load tenants dictionary for lookup
-            var tenants = await db.Tenants
-                .IgnoreQueryFilters()
-                .AsNoTracking()
-                .ToDictionaryAsync(t => t.Id, t => t.Name);
+            query = (sortBy?.ToLowerInvariant()) switch
+            {
+                "id" => sortDesc ? query.OrderByDescending(r => r.Map.Id) : query.OrderBy(r => r.Map.Id),
+                "name" => sortDesc ? query.OrderByDescending(r => r.Map.Name) : query.OrderBy(r => r.Map.Name),
+                "tenant" => sortDesc ? query.OrderByDescending(r => r.TenantName) : query.OrderBy(r => r.TenantName),
+                "status" => sortDesc ? query.OrderByDescending(r => r.Map.Hidden) : query.OrderBy(r => r.Map.Hidden),
+                "tiles" => sortDesc ? query.OrderByDescending(r => r.TileCount) : query.OrderBy(r => r.TileCount),
+                "custom" => sortDesc ? query.OrderByDescending(r => r.CustomMarkerCount) : query.OrderBy(r => r.CustomMarkerCount),
+                "priority" => sortDesc ? query.OrderByDescending(r => r.Map.Priority) : query.OrderBy(r => r.Map.Priority),
+                _ => sortDesc ? query.OrderByDescending(r => r.Map.CreatedAt) : query.OrderBy(r => r.Map.CreatedAt)
+            };
 
-            // Get paginated maps
-            var maps = await query
-                .OrderByDescending(m => m.CreatedAt)
+            var rows = await query
                 .Skip((page - 1) * pageSize)
                 .Take(pageSize)
                 .ToListAsync();
 
-            // Build DTOs with counts (now only for the page, not all maps)
-            var mapDtos = new List<GlobalMapDto>();
-            foreach (var map in maps)
+            var mapDtos = rows.Select(r => new GlobalMapDto
             {
-                var tileCount = await db.Tiles
-                    .IgnoreQueryFilters()
-                    .CountAsync(t => t.MapId == map.Id);
+                Id = r.Map.Id,
+                Name = r.Map.Name,
+                TenantId = r.Map.TenantId,
+                TenantName = r.TenantName,
+                Hidden = r.Map.Hidden,
+                Priority = r.Map.Priority,
+                CreatedAt = r.Map.CreatedAt,
+                TileCount = r.TileCount,
+                MarkerCount = 0, // Skip expensive marker count
+                CustomMarkerCount = r.CustomMarkerCount
+            }).ToList();
 
-                var customMarkerCount = await db.CustomMarkers
-                    .IgnoreQueryFilters()
-                    .CountAsync(cm => cm.MapId == map.Id);
-
-                mapDtos.Add(new GlobalMapDto
-                {
-                    Id = map.Id,
-                    Name = map.Name,
-                    TenantId = map.TenantId,
-                    TenantName = tenants.GetValueOrDefault(map.TenantId, "Unknown"),
-                    Hidden = map.Hidden,
-                    Priority = map.Priority,
-                    CreatedAt = map.CreatedAt,
-                    TileCount = tileCount,
-                    MarkerCount = 0, // Skip expensive marker count
-                    CustomMarkerCount = customMarkerCount
-                });
-            }
-
-            logger.LogInformation("SuperAdmin: Loaded {Count}/{Total} maps (page {Page})", mapDtos.Count, totalCount, page);
+            logger.LogInformation("SuperAdmin: Loaded {Count}/{Total} maps (page {Page}, sort {SortBy} {Dir})",
+                mapDtos.Count, totalCount, page, sortBy ?? "created", sortDesc ? "desc" : "asc");
 
             return Results.Ok(new
             {

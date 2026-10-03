@@ -595,7 +595,7 @@ public class PublicMapGenerationService : IPublicMapGenerationService
                             {
                                 using var childImg = await Image.LoadAsync<Rgba32>(childPath);
                                 // Resize 400x400 child tile to 200x200 (quarter of parent)
-                                childImg.Mutate(ctx => ctx.Resize(200, 200));
+                                childImg.Mutate(ctx => ctx.Resize(200, 200, KnownResamplers.Box));
                                 // Place in appropriate quadrant
                                 img.Mutate(ctx => ctx.DrawImage(childImg, new Point(200 * dx, 200 * dy), 1f));
                                 hasAnyChild = true;

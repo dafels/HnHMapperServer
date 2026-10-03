@@ -866,7 +866,7 @@ public class LargeTileService : ILargeTileService
 
     /// <summary>
     /// Generates a zoom 1-6 large tile by combining 2x2 = 4 child large tiles.
-    /// Uses NearestNeighbor resampler for faster resize with crisp pixel-art appearance.
+    /// Uses a Box resampler (2x2 average) so downscaled zooms do not alias.
     /// NOTE: This method may call DbContext via GetOrGenerateLargeTileAsync - not safe for parallel execution.
     /// </summary>
     private async Task<byte[]?> GenerateZoomNLargeTileAsync(string tenantId, int mapId, int zoom, int x, int y)
@@ -892,11 +892,11 @@ public class LargeTileService : ILargeTileService
                     try
                     {
                         using var childImg = Image.Load<Rgba32>(childBytes);
-                        // Resize 400x400 child to 200x200 using NearestNeighbor for speed and crisp pixels
+                        // Resize 400x400 child to 200x200 with a Box (2x2 average) filter to avoid aliasing
                         childImg.Mutate(ctx => ctx.Resize(new ResizeOptions
                         {
                             Size = new Size(LargeTileSize / 2, LargeTileSize / 2),
-                            Sampler = KnownResamplers.NearestNeighbor
+                            Sampler = KnownResamplers.Box
                         }));
                         // Place in appropriate quadrant
                         img.Mutate(ctx => ctx.DrawImage(childImg, new Point(dx * (LargeTileSize / 2), dy * (LargeTileSize / 2)), 1f));
@@ -962,11 +962,11 @@ public class LargeTileService : ILargeTileService
                     {
                         var childBytes = await File.ReadAllBytesAsync(childPath);
                         using var childImg = Image.Load<Rgba32>(childBytes);
-                        // Resize 400x400 child to 200x200 using NearestNeighbor for speed and crisp pixels
+                        // Resize 400x400 child to 200x200 with a Box (2x2 average) filter to avoid aliasing
                         childImg.Mutate(ctx => ctx.Resize(new ResizeOptions
                         {
                             Size = new Size(LargeTileSize / 2, LargeTileSize / 2),
-                            Sampler = KnownResamplers.NearestNeighbor
+                            Sampler = KnownResamplers.Box
                         }));
                         // Place in appropriate quadrant
                         img.Mutate(ctx => ctx.DrawImage(childImg, new Point(dx * (LargeTileSize / 2), dy * (LargeTileSize / 2)), 1f));

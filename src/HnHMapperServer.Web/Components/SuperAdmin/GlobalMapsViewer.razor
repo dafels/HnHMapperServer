@@ -14,175 +14,142 @@
             <MudButton Variant="Variant.Filled"
                       Color="Color.Primary"
                       StartIcon="@Icons.Material.Filled.Refresh"
-                      OnClick="LoadMaps"
+                      OnClick="Reload"
                       Disabled="@_isLoading">
                 Refresh
             </MudButton>
         </div>
 
-        @if (_isLoading)
-        {
-            <MudProgressLinear Indeterminate="true" />
-        }
-        else if (_response == null || !_response.Maps.Any())
-        {
-            <MudAlert Severity="Severity.Info">
-                No maps found across all tenants.
-            </MudAlert>
-        }
-        else
-        {
-            <MudTable T="GlobalMapDto" Items="@_response.Maps" Hover="true" Dense="true">
-                <ToolBarContent>
-                    <MudTextField @bind-Value="_searchString"
-                                 Placeholder="Search by map name..."
-                                 Adornment="Adornment.Start"
-                                 AdornmentIcon="@Icons.Material.Filled.Search"
-                                 IconSize="Size.Medium"
-                                 Class="mt-0"
-                                 Immediate="true"
-                                 DebounceInterval="300"
-                                 OnDebounceIntervalElapsed="OnSearchChanged" />
-                    <MudSpacer />
-                    <MudText Typo="Typo.body2" Class="mr-2">
-                        Showing @_response.Maps.Count on page @_currentPage of @_response.TotalPages (@_response.TotalCount total)
-                    </MudText>
-                    <MudSelect T="int" @bind-Value="_pageSize" Label="Page Size" Dense="true" Variant="Variant.Outlined" Margin="Margin.Dense" Class="mr-2" Style="width: 120px;">
-                        <MudSelectItem Value="25">25</MudSelectItem>
-                        <MudSelectItem Value="50">50</MudSelectItem>
-                        <MudSelectItem Value="100">100</MudSelectItem>
-                    </MudSelect>
-                    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.NavigateBefore" OnClick="PreviousPage" Disabled="@(_currentPage <= 1)" Size="Size.Small">Previous</MudButton>
-                    <MudButton Variant="Variant.Outlined" EndIcon="@Icons.Material.Filled.NavigateNext" OnClick="NextPage" Disabled="@(_currentPage >= _response.TotalPages)" Size="Size.Small" Class="ml-2">Next</MudButton>
-                </ToolBarContent>
-                <HeaderContent>
-                    <MudTh>Map ID</MudTh>
-                    <MudTh>Map Name</MudTh>
-                    <MudTh>Tenant</MudTh>
-                    <MudTh>Status</MudTh>
-                    <MudTh>Tiles</MudTh>
-                    <MudTh>Markers</MudTh>
-                    <MudTh>Custom</MudTh>
-                    <MudTh>Priority</MudTh>
-                    <MudTh>Created</MudTh>
-                    <MudTh>Actions</MudTh>
-                </HeaderContent>
-                <RowTemplate>
-                    <MudTd DataLabel="Map ID">
-                        <code>@context.Id</code>
-                    </MudTd>
-                    <MudTd DataLabel="Map Name">
-                        <MudText Typo="Typo.body2">@context.Name</MudText>
-                    </MudTd>
-                    <MudTd DataLabel="Tenant">
-                        <MudStack Spacing="0">
-                            <MudText Typo="Typo.body2">@context.TenantName</MudText>
-                            <code class="text-muted" style="font-size: 0.75rem;">@context.TenantId</code>
-                        </MudStack>
-                    </MudTd>
-                    <MudTd DataLabel="Status">
-                        <MudChip T="string" Size="Size.Small" Color="@(context.Hidden ? Color.Warning : Color.Success)">
-                            @(context.Hidden ? "Hidden" : "Visible")
-                        </MudChip>
-                    </MudTd>
-                    <MudTd DataLabel="Tiles">
-                        <MudText Typo="Typo.body2">@context.TileCount</MudText>
-                    </MudTd>
-                    <MudTd DataLabel="Markers">
-                        <MudText Typo="Typo.body2">@context.MarkerCount</MudText>
-                    </MudTd>
-                    <MudTd DataLabel="Custom">
-                        <MudText Typo="Typo.body2">@context.CustomMarkerCount</MudText>
-                    </MudTd>
-                    <MudTd DataLabel="Priority">
-                        <MudText Typo="Typo.body2">@context.Priority</MudText>
-                    </MudTd>
-                    <MudTd DataLabel="Created">
-                        <MudText Typo="Typo.body2">@context.CreatedAt.ToString("yyyy-MM-dd HH:mm")</MudText>
-                    </MudTd>
-                    <MudTd DataLabel="Actions">
-                        <MudStack Row="true" Spacing="1">
-                            <MudTooltip Text="View tenant maps">
-                                <MudIconButton Icon="@Icons.Material.Filled.Visibility"
-                                              Color="Color.Primary"
-                                              Size="Size.Small"
-                                              Href="@($"/superadmin/map/{context.TenantId}")" />
-                            </MudTooltip>
-                            <MudTooltip Text="Rebuild WebP tiles (repairs stale/ghost zoom imagery)">
-                                <MudIconButton Icon="@Icons.Material.Filled.AutoFixHigh"
-                                              Color="Color.Warning"
-                                              Size="Size.Small"
-                                              Disabled="@(_rebuildingMapId == context.Id)"
-                                              OnClick="@(() => RebuildWebpTiles(context))" />
-                            </MudTooltip>
-                            <MudTooltip Text="Delete map">
-                                <MudIconButton Icon="@Icons.Material.Filled.Delete"
-                                              Color="Color.Error"
-                                              Size="Size.Small"
-                                              OnClick="@(() => DeleteMap(context))" />
-                            </MudTooltip>
-                        </MudStack>
-                    </MudTd>
-                </RowTemplate>
-            </MudTable>
-
-            @if (_response.TotalPages > 1)
-            {
-                <div class="d-flex justify-center mt-3">
-                    <MudPagination Count="@_response.TotalPages" Selected="@_currentPage" SelectedChanged="@OnPageChanged" />
-                </div>
-            }
-        }
+        <MudTable @ref="_table" T="GlobalMapDto" ServerData="LoadServerData" Hover="true" Dense="true"
+                  RowsPerPage="25" Loading="@_isLoading" LoadingProgressColor="Color.Primary">
+            <ToolBarContent>
+                <MudTextField T="string" Value="_searchString" ValueChanged="OnSearchChanged"
+                             Placeholder="Search by map name or tenant..."
+                             Adornment="Adornment.Start"
+                             AdornmentIcon="@Icons.Material.Filled.Search"
+                             IconSize="Size.Medium"
+                             Class="mt-0"
+                             Immediate="true"
+                             DebounceInterval="300" />
+                <MudSpacer />
+                <MudText Typo="Typo.body2">@_totalCount maps</MudText>
+            </ToolBarContent>
+            <HeaderContent>
+                <MudTh><MudTableSortLabel T="GlobalMapDto" SortLabel="id">Map ID</MudTableSortLabel></MudTh>
+                <MudTh><MudTableSortLabel T="GlobalMapDto" SortLabel="name">Map Name</MudTableSortLabel></MudTh>
+                <MudTh><MudTableSortLabel T="GlobalMapDto" SortLabel="tenant">Tenant</MudTableSortLabel></MudTh>
+                <MudTh><MudTableSortLabel T="GlobalMapDto" SortLabel="status">Status</MudTableSortLabel></MudTh>
+                <MudTh><MudTableSortLabel T="GlobalMapDto" SortLabel="tiles">Tiles</MudTableSortLabel></MudTh>
+                <MudTh><MudTableSortLabel T="GlobalMapDto" SortLabel="custom">Custom markers</MudTableSortLabel></MudTh>
+                <MudTh><MudTableSortLabel T="GlobalMapDto" SortLabel="priority">Priority</MudTableSortLabel></MudTh>
+                <MudTh><MudTableSortLabel T="GlobalMapDto" SortLabel="created" InitialDirection="SortDirection.Descending">Created</MudTableSortLabel></MudTh>
+                <MudTh>Actions</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd DataLabel="Map ID">
+                    <code>@context.Id</code>
+                </MudTd>
+                <MudTd DataLabel="Map Name">
+                    <MudText Typo="Typo.body2">@context.Name</MudText>
+                </MudTd>
+                <MudTd DataLabel="Tenant">
+                    <MudStack Spacing="0">
+                        <MudText Typo="Typo.body2">@context.TenantName</MudText>
+                        <code class="text-muted" style="font-size: 0.75rem;">@context.TenantId</code>
+                    </MudStack>
+                </MudTd>
+                <MudTd DataLabel="Status">
+                    <MudChip T="string" Size="Size.Small" Color="@(context.Hidden ? Color.Warning : Color.Success)">
+                        @(context.Hidden ? "Hidden" : "Visible")
+                    </MudChip>
+                </MudTd>
+                <MudTd DataLabel="Tiles">
+                    <MudText Typo="Typo.body2">@context.TileCount.ToString("N0")</MudText>
+                </MudTd>
+                <MudTd DataLabel="Custom markers">
+                    <MudText Typo="Typo.body2">@context.CustomMarkerCount.ToString("N0")</MudText>
+                </MudTd>
+                <MudTd DataLabel="Priority">
+                    <MudText Typo="Typo.body2">@context.Priority</MudText>
+                </MudTd>
+                <MudTd DataLabel="Created">
+                    <MudText Typo="Typo.body2">@context.CreatedAt.ToString("yyyy-MM-dd HH:mm")</MudText>
+                </MudTd>
+                <MudTd DataLabel="Actions">
+                    <MudStack Row="true" Spacing="1">
+                        <MudTooltip Text="View tenant maps">
+                            <MudIconButton Icon="@Icons.Material.Filled.Visibility"
+                                          Color="Color.Primary"
+                                          Size="Size.Small"
+                                          Href="@($"/superadmin/map/{context.TenantId}")" />
+                        </MudTooltip>
+                        <MudTooltip Text="Rebuild WebP tiles (repairs stale/ghost zoom imagery)">
+                            <MudIconButton Icon="@Icons.Material.Filled.AutoFixHigh"
+                                          Color="Color.Warning"
+                                          Size="Size.Small"
+                                          Disabled="@(_rebuildingMapId == context.Id)"
+                                          OnClick="@(() => RebuildWebpTiles(context))" />
+                        </MudTooltip>
+                        <MudTooltip Text="Delete map">
+                            <MudIconButton Icon="@Icons.Material.Filled.Delete"
+                                          Color="Color.Error"
+                                          Size="Size.Small"
+                                          OnClick="@(() => DeleteMap(context))" />
+                        </MudTooltip>
+                    </MudStack>
+                </MudTd>
+            </RowTemplate>
+            <NoRecordsContent>
+                <MudText Typo="Typo.body2">No maps found.</MudText>
+            </NoRecordsContent>
+            <PagerContent>
+                <MudTablePager PageSizeOptions="new[] { 25, 50, 100 }" />
+            </PagerContent>
+        </MudTable>
     </MudStack>
 </MudPaper>
 
 @code {
-    private MapResponse? _response;
-    private bool _isLoading = true;
+    private MudTable<GlobalMapDto>? _table;
+    private bool _isLoading;
     private string _searchString = "";
-    private int _currentPage = 1;
-    private int _pageSize = 25;
-    private int _previousPageSize = 25;
+    private int _totalCount;
 
-    protected override async Task OnInitializedAsync()
+    private Task Reload() => _table?.ReloadServerData() ?? Task.CompletedTask;
+
+    private async Task OnSearchChanged(string value)
     {
-        await LoadMaps();
+        _searchString = value ?? "";
+        await Reload();
     }
 
-    protected override async Task OnParametersSetAsync()
-    {
-        if (_pageSize != _previousPageSize)
-        {
-            _previousPageSize = _pageSize;
-            _currentPage = 1;
-            await LoadMaps();
-        }
-    }
-
-    private async Task LoadMaps()
+    private async Task<TableData<GlobalMapDto>> LoadServerData(TableState state, CancellationToken token)
     {
         _isLoading = true;
         try
         {
-            Logger.LogInformation("LoadMaps: Loading maps (page {Page}, pageSize {PageSize})", _currentPage, _pageSize);
             var httpClient = HttpClientFactory.CreateClient("API");
-            var url = $"/api/superadmin/maps?page={_currentPage}&pageSize={_pageSize}";
+            var url = $"/api/superadmin/maps?page={state.Page + 1}&pageSize={state.PageSize}";
             if (!string.IsNullOrWhiteSpace(_searchString))
                 url += $"&search={Uri.EscapeDataString(_searchString)}";
+            if (!string.IsNullOrEmpty(state.SortLabel) && state.SortDirection != SortDirection.None)
+                url += $"&sortBy={state.SortLabel}&sortDesc={(state.SortDirection == SortDirection.Descending ? "true" : "false")}";
 
-            var response = await httpClient.GetAsync(url);
-
+            var response = await httpClient.GetAsync(url, token);
             if (response.IsSuccessStatusCode)
             {
-                _response = await response.Content.ReadFromJsonAsync<MapResponse>();
-                Logger.LogInformation("LoadMaps: Loaded {Count} maps", _response?.Maps?.Count ?? 0);
+                var data = await response.Content.ReadFromJsonAsync<MapResponse>(token);
+                _totalCount = data?.TotalCount ?? 0;
+                return new TableData<GlobalMapDto> { Items = data?.Maps ?? new(), TotalItems = _totalCount };
             }
-            else
-            {
-                var errorBody = await response.Content.ReadAsStringAsync();
-                Logger.LogWarning("Failed to load maps: {StatusCode}, Body={Body}", response.StatusCode, errorBody);
-                Snackbar.Add("Failed to load maps. Please try again.", Severity.Error);
-            }
+
+            var errorBody = await response.Content.ReadAsStringAsync(token);
+            Logger.LogWarning("Failed to load maps: {StatusCode}, Body={Body}", response.StatusCode, errorBody);
+            Snackbar.Add("Failed to load maps. Please try again.", Severity.Error);
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded by a newer sort/page/search request
         }
         catch (Exception ex)
         {
@@ -193,36 +160,7 @@
         {
             _isLoading = false;
         }
-    }
-
-    private async Task OnSearchChanged()
-    {
-        _currentPage = 1;
-        await LoadMaps();
-    }
-
-    private async Task OnPageChanged(int page)
-    {
-        _currentPage = page;
-        await LoadMaps();
-    }
-
-    private async Task PreviousPage()
-    {
-        if (_currentPage > 1)
-        {
-            _currentPage--;
-            await LoadMaps();
-        }
-    }
-
-    private async Task NextPage()
-    {
-        if (_response != null && _currentPage < _response.TotalPages)
-        {
-            _currentPage++;
-            await LoadMaps();
-        }
+        return new TableData<GlobalMapDto> { Items = Array.Empty<GlobalMapDto>(), TotalItems = _totalCount };
     }
 
     public class MapResponse
@@ -307,7 +245,7 @@
             if (response.IsSuccessStatusCode)
             {
                 Snackbar.Add($"Map '{map.Name}' deleted successfully.", Severity.Success);
-                await LoadMaps(); // Reload the list
+                await Reload();
             }
             else
             {
