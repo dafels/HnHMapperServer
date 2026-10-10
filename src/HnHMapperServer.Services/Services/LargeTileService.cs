@@ -36,13 +36,15 @@ public class LargeTileService : ILargeTileService
     private static readonly ConcurrentDictionary<string, CacheEntry> _tileCache = new();
     private static long _cacheAccessCounter = 0;
 
-    // Request deduplication: track in-progress generation tasks to avoid duplicate work
-    private static readonly ConcurrentDictionary<string, Task<byte[]?>> _generationInProgress = new();
+    // Request deduplication: one in-progress generation per tile, shared by concurrent requests.
+    // Lazy so that a request losing the registration race never starts a duplicate generation.
+    private static readonly ConcurrentDictionary<string, Lazy<Task<byte[]?>>> _generationInProgress = new();
 
     // Negative cache: remember tiles that don't exist to avoid repeated DB queries
-    private static readonly ConcurrentDictionary<string, DateTime> _nonExistentTileCache = new();
     private const int NegativeCacheTtlMinutes = 5;
     private const int MaxNegativeCacheEntries = 10000;
+    private static readonly NegativeTileCache _negativeCache =
+        new(MaxNegativeCacheEntries, TimeSpan.FromMinutes(NegativeCacheTtlMinutes));
 
     // Concurrency limiter: prevent DB overload from too many simultaneous generations
     private static readonly SemaphoreSlim _generationSemaphore = new(8, 8);
@@ -97,7 +99,7 @@ public class LargeTileService : ILargeTileService
                 var avgMs = stats.OnTheFlyGenerated > 0 ? stats.TotalGenerationTimeMs / stats.OnTheFlyGenerated : 0;
                 _logger.LogInformation(
                     "{Prefix} Stats [{Tenant}] MemHits={MemHits} DiskHits={DiskHits} NegHits={NegHits} Coalesced={Coalesced} Generated={Generated} Failed={Failed} Dirty={Dirty} AvgGenTime={AvgMs}ms CacheSize={CacheSize} NegCacheSize={NegCacheSize}",
-                    LogPrefix, tenantId, stats.MemoryCacheHits, stats.CacheHits, stats.NegativeCacheHits, stats.Coalesced, stats.OnTheFlyGenerated, stats.OnTheFlyFailed, stats.DirtyMarked, avgMs, _tileCache.Count, _nonExistentTileCache.Count);
+                    LogPrefix, tenantId, stats.MemoryCacheHits, stats.CacheHits, stats.NegativeCacheHits, stats.Coalesced, stats.OnTheFlyGenerated, stats.OnTheFlyFailed, stats.DirtyMarked, avgMs, _tileCache.Count, _negativeCache.Count);
             }
         }
     }
@@ -108,6 +110,26 @@ public class LargeTileService : ILargeTileService
     }
 
     public async Task<byte[]?> GetOrGenerateLargeTileAsync(string tenantId, int mapId, int zoom, int x, int y)
+    {
+        try
+        {
+            return await GetOrGenerateCoreAsync(tenantId, mapId, zoom, x, y);
+        }
+        catch (Exception ex)
+        {
+            // Logged once here, at the tile the caller asked for; the recursion below only throws.
+            _logger.LogError(ex, "{Prefix} ERROR [{Tenant}] map={MapId} z={Zoom} ({X},{Y}) - generation failed",
+                LogPrefix, tenantId, mapId, zoom, x, y);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Cache → negative cache → disk → coalesced generation. Throws when generation fails, so
+    /// a failure is never confused with "no source tiles": a failed tile is not negative-cached,
+    /// and a parent built from it fails too instead of being written to disk with a hole.
+    /// </summary>
+    private async Task<byte[]?> GetOrGenerateCoreAsync(string tenantId, int mapId, int zoom, int x, int y)
     {
         var cacheKey = $"{tenantId}/{mapId}/{zoom}/{x}_{y}";
         var stats = GetStats(tenantId);
@@ -122,15 +144,10 @@ public class LargeTileService : ILargeTileService
         }
 
         // Check negative cache (tiles that don't exist)
-        if (_nonExistentTileCache.TryGetValue(cacheKey, out var expiry))
+        if (_negativeCache.Contains(cacheKey))
         {
-            if (DateTime.UtcNow < expiry)
-            {
-                Interlocked.Increment(ref stats.NegativeCacheHits);
-                return null;
-            }
-            // Expired, remove and re-check
-            _nonExistentTileCache.TryRemove(cacheKey, out _);
+            Interlocked.Increment(ref stats.NegativeCacheHits);
+            return null;
         }
 
         var path = GetLargeTilePath(tenantId, mapId, zoom, x, y);
@@ -144,37 +161,24 @@ public class LargeTileService : ILargeTileService
             return bytes;
         }
 
-        // Check if another request is already generating this tile (request coalescing)
-        if (_generationInProgress.TryGetValue(cacheKey, out var existingTask))
+        // Coalesce concurrent requests for the same tile. Registering before starting means a
+        // request that loses the race awaits the winner instead of running a duplicate.
+        var generation = new Lazy<Task<byte[]?>>(
+            () => GenerateLargeTileInternalAsync(tenantId, mapId, zoom, x, y, cacheKey, stats));
+        var registered = _generationInProgress.GetOrAdd(cacheKey, generation);
+        if (!ReferenceEquals(registered, generation))
         {
             Interlocked.Increment(ref stats.Coalesced);
-            return await existingTask;
+            return await registered.Value;
         }
 
-        // Start generation and register it for coalescing
-        var generationTask = GenerateLargeTileInternalAsync(tenantId, mapId, zoom, x, y, cacheKey, stats);
-
-        if (_generationInProgress.TryAdd(cacheKey, generationTask))
+        try
         {
-            try
-            {
-                return await generationTask;
-            }
-            finally
-            {
-                _generationInProgress.TryRemove(cacheKey, out _);
-            }
+            return await generation.Value;
         }
-        else
+        finally
         {
-            // Another thread added it first, await that one instead
-            Interlocked.Increment(ref stats.Coalesced);
-            if (_generationInProgress.TryGetValue(cacheKey, out var otherTask))
-            {
-                return await otherTask;
-            }
-            // Race condition: task completed and was removed, try again recursively
-            return await GetOrGenerateLargeTileAsync(tenantId, mapId, zoom, x, y);
+            _generationInProgress.TryRemove(KeyValuePair.Create(cacheKey, generation));
         }
     }
 
@@ -252,8 +256,9 @@ public class LargeTileService : ILargeTileService
             {
                 Interlocked.Increment(ref stats.OnTheFlyFailed);
 
-                // Add to negative cache to avoid repeated checks
-                AddToNegativeCache(cacheKey);
+                // Add to negative cache to avoid repeated checks. Only reached for a genuine
+                // "no source tiles": a generation error throws past this instead.
+                _negativeCache.Add(cacheKey);
 
                 // Use Debug level - this is expected for unexplored areas, not a warning
                 _logger.LogDebug(
@@ -288,10 +293,10 @@ public class LargeTileService : ILargeTileService
 
     private void EvictOldestCacheEntries(int count)
     {
-        // Filter out null values to handle race condition where entries are removed
-        // by another thread while we're iterating
-        var oldest = _tileCache
-            .Where(kv => kv.Value != null)
+        // Sort a ToArray() snapshot, never the live dictionary: LINQ over a ConcurrentDictionary
+        // sizes its buffer from Count and then calls CopyTo, and a concurrent add or remove in
+        // between throws or yields empty entries (see NegativeTileCache).
+        var oldest = _tileCache.ToArray()
             .OrderBy(kv => kv.Value.LastAccess)
             .Take(count)
             .Select(kv => kv.Key)
@@ -303,52 +308,12 @@ public class LargeTileService : ILargeTileService
         }
     }
 
-    private void AddToNegativeCache(string key)
-    {
-        // Evict oldest entries if cache is too large
-        if (_nonExistentTileCache.Count >= MaxNegativeCacheEntries)
-        {
-            EvictExpiredNegativeCacheEntries();
-        }
-
-        _nonExistentTileCache[key] = DateTime.UtcNow.AddMinutes(NegativeCacheTtlMinutes);
-    }
-
-    private void EvictExpiredNegativeCacheEntries()
-    {
-        var now = DateTime.UtcNow;
-        var expired = _nonExistentTileCache
-            .Where(kv => kv.Value < now)
-            .Select(kv => kv.Key)
-            .ToList();
-
-        foreach (var key in expired)
-        {
-            _nonExistentTileCache.TryRemove(key, out _);
-        }
-
-        // If still too large after removing expired, remove oldest 10%
-        if (_nonExistentTileCache.Count >= MaxNegativeCacheEntries)
-        {
-            var oldest = _nonExistentTileCache
-                .OrderBy(kv => kv.Value)
-                .Take(MaxNegativeCacheEntries / 10)
-                .Select(kv => kv.Key)
-                .ToList();
-
-            foreach (var key in oldest)
-            {
-                _nonExistentTileCache.TryRemove(key, out _);
-            }
-        }
-    }
-
     private void InvalidateCacheEntry(string tenantId, int mapId, int zoom, int x, int y)
     {
         var cacheKey = $"{tenantId}/{mapId}/{zoom}/{x}_{y}";
         _tileCache.TryRemove(cacheKey, out _);
         // Also clear from negative cache - tile might exist now after upload
-        _nonExistentTileCache.TryRemove(cacheKey, out _);
+        _negativeCache.Remove(cacheKey);
     }
 
     public void InvalidateTenantCache(string tenantId)
@@ -371,13 +336,7 @@ public class LargeTileService : ILargeTileService
             }
         }
 
-        foreach (var key in _nonExistentTileCache.Keys)
-        {
-            if (key.StartsWith(prefix, StringComparison.Ordinal))
-            {
-                _nonExistentTileCache.TryRemove(key, out _);
-            }
-        }
+        _negativeCache.RemoveByPrefix(prefix);
     }
 
     public (int FilesDeleted, long BytesFreed) DeleteMapWebpTiles(string tenantId, int mapId)
@@ -461,7 +420,7 @@ public class LargeTileService : ILargeTileService
             // negative-cache hit and 404'd, even though we'd just received an upload that
             // populated source tiles for that coord.
             var removedPositive = _tileCache.TryRemove(cacheKey, out _);
-            var removedNegative = _nonExistentTileCache.TryRemove(cacheKey, out _);
+            var removedNegative = _negativeCache.Remove(cacheKey);
             if (removedPositive || removedNegative)
             {
                 invalidatedCount++;
@@ -518,10 +477,13 @@ public class LargeTileService : ILargeTileService
         {
             // Clear from caches — source tiles may have been removed
             _tileCache.TryRemove(cacheKey, out _);
-            AddToNegativeCache(cacheKey);
 
+            // A failed regeneration must not mark the tile missing: the negative cache is
+            // checked before the disk, so it would hide the existing file for five minutes.
             if (!generationFailed)
             {
+                _negativeCache.Add(cacheKey);
+
                 // Source tiles are genuinely gone: a stale file left on disk would keep serving
                 // ghost imagery forever (GetOrGenerateLargeTileAsync serves any existing file
                 // as-is). Deleting it makes the emptiness propagate — parent regeneration
@@ -708,24 +670,20 @@ public class LargeTileService : ILargeTileService
         return generatedCount;
     }
 
+    /// <summary>
+    /// Returns null only when the tile has no source tiles. Errors propagate: catching them here
+    /// used to turn every failure into "empty", so the failed tile was negative-cached and its
+    /// parents were composed without it and written to disk.
+    /// </summary>
     private async Task<byte[]?> GenerateLargeTileAsync(string tenantId, int mapId, int zoom, int x, int y)
     {
-        try
+        if (zoom == 0)
         {
-            if (zoom == 0)
-            {
-                return await GenerateZoom0LargeTileAsync(tenantId, mapId, x, y);
-            }
-            else
-            {
-                return await GenerateZoomNLargeTileAsync(tenantId, mapId, zoom, x, y);
-            }
+            return await GenerateZoom0LargeTileAsync(tenantId, mapId, x, y);
         }
-        catch (Exception ex)
+        else
         {
-            _logger.LogError(ex, "{Prefix} ERROR [{Tenant}] map={MapId} z={Zoom} ({X},{Y}) - generation failed",
-                LogPrefix, tenantId, mapId, zoom, x, y);
-            return null;
+            return await GenerateZoomNLargeTileAsync(tenantId, mapId, zoom, x, y);
         }
     }
 
@@ -899,10 +857,30 @@ public class LargeTileService : ILargeTileService
     /// <summary>
     /// Generates a zoom 1-6 large tile by combining 2x2 = 4 child large tiles.
     /// Uses a Box resampler (2x2 average) so downscaled zooms do not alias.
-    /// NOTE: This method may call DbContext via GetOrGenerateLargeTileAsync - not safe for parallel execution.
+    /// NOTE: This method uses DbContext (footprint check, and children via GetOrGenerateCoreAsync) - not safe for parallel execution.
     /// </summary>
     private async Task<byte[]?> GenerateZoomNLargeTileAsync(string tenantId, int mapId, int zoom, int x, int y)
     {
+        // Only a footprint holding at least one zoom-0 source tile can render anything. Without
+        // this check an unexplored zoom-6 tile recursed through all 5,461 descendants: 4,096
+        // zoom-0 queries per request, and one negative-cache entry each, which kept that cache
+        // full and evicting constantly. One indexed query answers it instead (~2 ms worst case).
+        var span = TilesPerLargeTile << zoom; // base tiles per side under this tile
+        var baseMinX = x * span;
+        var baseMinY = y * span;
+        var hasSourceTiles = await _dbContext.Tiles
+            .AsNoTracking()
+            .IgnoreQueryFilters()
+            .AnyAsync(t => t.TenantId == tenantId
+                && t.MapId == mapId
+                && t.Zoom == 0
+                && t.CoordX >= baseMinX && t.CoordX < baseMinX + span
+                && t.CoordY >= baseMinY && t.CoordY < baseMinY + span);
+        if (!hasSourceTiles)
+        {
+            return null;
+        }
+
         // Create 400x400 transparent canvas
         using var img = new Image<Rgba32>(LargeTileSize, LargeTileSize);
         img.Mutate(ctx => ctx.BackgroundColor(Color.Transparent));
@@ -917,8 +895,9 @@ public class LargeTileService : ILargeTileService
                 var childX = x * 2 + dx;
                 var childY = y * 2 + dy;
 
-                // Get child tile bytes (from cache, disk, or generate)
-                var childBytes = await GetOrGenerateLargeTileAsync(tenantId, mapId, zoom - 1, childX, childY);
+                // Get child tile bytes (from cache, disk, or generate). A child that fails throws
+                // and fails this tile too, rather than leaving a hole that gets saved to disk.
+                var childBytes = await GetOrGenerateCoreAsync(tenantId, mapId, zoom - 1, childX, childY);
                 if (childBytes != null)
                 {
                     try

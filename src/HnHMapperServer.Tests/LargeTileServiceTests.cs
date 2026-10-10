@@ -13,7 +13,9 @@ namespace HnHMapperServer.Tests;
 /// Tests for LargeTileService's pyramid-consistency behavior: force-regeneration must delete a
 /// stale WebP file when its sources are genuinely gone (so wipes/merges stop ghosting old
 /// imagery), must NOT delete on a transient generation error, and map-level cache invalidation
-/// must actually evict the static in-memory caches.
+/// must actually evict the static in-memory caches. A generation failure must never be treated
+/// as "empty" (no negative-cache entry, no parent saved with a hole), and zoomed-out tiles over
+/// unexplored areas must not recurse into their children.
 ///
 /// LargeTileService's caches are static (shared across instances/tests), so every test uses a
 /// unique tenant id to stay isolated.
@@ -116,6 +118,76 @@ public class LargeTileServiceTests : IDisposable
 
         Assert.Null(result);
         Assert.True(File.Exists(stalePath), "a transient generation error must never delete a good file");
+    }
+
+    [Fact]
+    public async Task ForceRegenerate_GenerationError_DoesNotHideExistingFile()
+    {
+        var tenantId = NewTenantId();
+        WriteFakeWebp(tenantId, 10, 0, 0, 0);
+
+        _db.Dispose();
+        Assert.Null(await _service.ForceRegenerateLargeTileAsync(tenantId, 10, 0, 0, 0));
+
+        // A failed regeneration must not record the tile as missing: the negative cache is
+        // checked before the disk, so it would hide the still-valid file for five minutes.
+        var served = await _service.GetOrGenerateLargeTileAsync(tenantId, 10, 0, 0, 0);
+        Assert.Equal(new byte[] { 1, 2, 3 }, served);
+    }
+
+    [Fact]
+    public async Task GetOrGenerate_ChildFailure_FailsParentInsteadOfSavingAHole()
+    {
+        // Zoom-1 tile (0,0) has content in two quarters, zoom-0 (0,0) and (1,0). Generating
+        // zoom-0 (1,0) is made to fail by putting a directory where its file has to be written.
+        var tenantId = NewTenantId();
+        const int mapId = 7;
+        SeedZoom0Row(tenantId, mapId, 0, 0, WriteGridPng(tenantId, "left"));
+        SeedZoom0Row(tenantId, mapId, 4, 0, WriteGridPng(tenantId, "right"));
+        var blocked = _service.GetLargeTilePath(tenantId, mapId, 0, 1, 0);
+        Directory.CreateDirectory(blocked);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => _service.GetOrGenerateLargeTileAsync(tenantId, mapId, 1, 0, 0));
+        Assert.False(File.Exists(_service.GetLargeTilePath(tenantId, mapId, 1, 0, 0)),
+            "a parent must not be saved with a quarter missing because a child failed");
+
+        // Once the cause is gone the next request builds the whole parent: the failure was
+        // neither negative-cached nor kept as a partial tile.
+        Directory.Delete(blocked);
+        var bytes = await _service.GetOrGenerateLargeTileAsync(tenantId, mapId, 1, 0, 0);
+
+        Assert.NotNull(bytes);
+        using var img = Image.Load<Rgba32>(bytes);
+        Assert.True(img[25, 25].A > 0, "left quarter, from zoom-0 (0,0), is missing");
+        Assert.True(img[225, 25].A > 0, "right quarter, from zoom-0 (1,0), is missing");
+    }
+
+    [Fact]
+    public async Task GetOrGenerate_EmptyFootprint_DoesNotRecurseIntoChildren()
+    {
+        var tenantId = NewTenantId();
+        const int mapId = 8;
+
+        // Nothing under zoom-2 (0,0), so one footprint query answers it.
+        Assert.Null(await _service.GetOrGenerateLargeTileAsync(tenantId, mapId, 2, 0, 0));
+
+        // Had it recursed, every child would now be negative-cached as empty for five minutes
+        // and this new data would stay invisible at zoom 1.
+        SeedZoom0Row(tenantId, mapId, 0, 0, WriteGridPng(tenantId, "fresh"));
+        Assert.NotNull(await _service.GetOrGenerateLargeTileAsync(tenantId, mapId, 1, 0, 0));
+    }
+
+    [Fact]
+    public async Task GetOrGenerate_FootprintCheck_HandlesNegativeCoordinates()
+    {
+        var tenantId = NewTenantId();
+        const int mapId = 9;
+        SeedZoom0Row(tenantId, mapId, -1, -1, WriteGridPng(tenantId, "north-west"));
+
+        // A zoom-3 tile spans 32 base tiles: (-1,-1) covers -32..-1 on both axes, (0,0) 0..31.
+        Assert.NotNull(await _service.GetOrGenerateLargeTileAsync(tenantId, mapId, 3, -1, -1));
+        Assert.Null(await _service.GetOrGenerateLargeTileAsync(tenantId, mapId, 3, 0, 0));
+        Assert.Null(await _service.GetOrGenerateLargeTileAsync(tenantId, mapId, 3, -1, 0));
     }
 
     [Fact]

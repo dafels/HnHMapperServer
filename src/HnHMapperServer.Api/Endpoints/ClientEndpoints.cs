@@ -289,10 +289,7 @@ public static partial class ClientEndpoints
             activityService.RecordActivity(tenantId);
 
         // Read raw JSON and deserialize with case-insensitive options (Go client sends lowercase)
-        var gridUpdate = await context.Request.ReadFromJsonAsync<GridUpdateDto>(new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true
-        });
+        var gridUpdate = await ReadJsonBodyAsync<GridUpdateDto>(context, logger, "gridUpdate");
 
         if (gridUpdate == null)
             return Results.BadRequest("Invalid grid update payload");
@@ -643,8 +640,7 @@ public static partial class ClientEndpoints
         }
 
         // 2. Parse request
-        var request = await context.Request.ReadFromJsonAsync<OverlayUploadDto>(
-            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        var request = await ReadJsonBodyAsync<OverlayUploadDto>(context, logger, "overlayUpload");
 
         if (request == null || string.IsNullOrEmpty(request.GridId))
         {
@@ -770,10 +766,7 @@ public static partial class ClientEndpoints
             activityService.RecordActivity(tenantId);
 
         // Read raw JSON with case-insensitive options (Go client sends lowercase: coords, gridID, name, etc.)
-        var positions = await context.Request.ReadFromJsonAsync<Dictionary<string, Dictionary<string, object>>>(new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true
-        });
+        var positions = await ReadJsonBodyAsync<Dictionary<string, Dictionary<string, object>>>(context, logger, "positionUpdate");
 
         if (positions == null)
             return Results.BadRequest("Invalid position update payload");
@@ -889,6 +882,31 @@ public static partial class ClientEndpoints
         }
 
         return Results.Ok();
+    }
+
+    private static readonly JsonSerializerOptions CaseInsensitiveJsonOpts = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    /// <summary>
+    /// Reads a JSON request body, or returns null when it is empty or malformed so the endpoint
+    /// answers 400 instead of throwing. Clients sometimes post an empty body when their
+    /// connection is cut mid-request (seen in production around restarts), and the unhandled
+    /// JsonException surfaced as a 500.
+    /// </summary>
+    private static async Task<T?> ReadJsonBodyAsync<T>(HttpContext context, ILogger<Program> logger, string endpoint)
+        where T : class
+    {
+        try
+        {
+            return await context.Request.ReadFromJsonAsync<T>(CaseInsensitiveJsonOpts);
+        }
+        catch (JsonException error)
+        {
+            logger.LogWarning("{Endpoint}: rejecting unparseable JSON body: {Error}", endpoint, error.Message);
+            return null;
+        }
     }
 
     /// <summary>

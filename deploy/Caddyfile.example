@@ -20,6 +20,8 @@
 # Logging in asks for this password first, then for the dashboard's own token.
 # ============================================================================
 # dashboard.yourdomain.com {
+#   # Keeps browsers on HTTPS: the dashboard's login cookie isn't marked Secure behind a proxy.
+#   header Strict-Transport-Security "max-age=31536000"
 #   basic_auth {
 #     admin $2a$14$paste-the-hash-here
 #   }

@@ -165,7 +165,8 @@ services:
       # Login token (second gate after Caddy's basic auth). Empty = a new one on every start,
       # printed in `docker compose logs dashboard`.
       DASHBOARD__FRONTEND__BROWSERTOKEN: ${DASHBOARD_BROWSER_TOKEN:-}
-      ASPIRE_DASHBOARD_FORWARDEDHEADERS_ENABLED: "true"
+      # Leave ASPIRE_DASHBOARD_FORWARDEDHEADERS_ENABLED off: with it, the 13.6 dashboard sets a
+      # secure login cookie behind the proxy and then rejects it, so the token login loops.
       # Keep telemetry across restarts. The image runs as uid 1654, which owns /home/app, so
       # the volume goes there (a new volume mounted at e.g. /data would belong to root).
       ASPIRE_DASHBOARD_PERSISTENCE_MODE: Resume

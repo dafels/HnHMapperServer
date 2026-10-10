@@ -1323,7 +1323,18 @@ public static class MapEndpoints
             return Results.NotFound();
 
         // Get or generate the large tile (returns bytes from in-memory cache, disk, or generation)
-        var tileBytes = await largeTileService.GetOrGenerateLargeTileAsync(tenantId, mapId, zoom, x, y);
+        byte[]? tileBytes;
+        try
+        {
+            tileBytes = await largeTileService.GetOrGenerateLargeTileAsync(tenantId, mapId, zoom, x, y);
+        }
+        catch (Exception)
+        {
+            // Generation failed (the service logged it). Unlike an empty area this is temporary,
+            // so it must not be cached like the 404 below: no-store lets the next view retry.
+            context.Response.Headers.Append("Cache-Control", "no-store");
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
 
         if (tileBytes == null)
         {

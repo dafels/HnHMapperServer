@@ -16,6 +16,10 @@ public interface ILargeTileService
     /// <param name="x">X coordinate in 400x400 tile system</param>
     /// <param name="y">Y coordinate in 400x400 tile system</param>
     /// <returns>WebP tile bytes, or null if no source tiles exist</returns>
+    /// <exception cref="Exception">
+    /// Generation failed (database or I/O error), already logged. Deliberately not null: callers
+    /// must not cache a failure as a missing tile.
+    /// </exception>
     Task<byte[]?> GetOrGenerateLargeTileAsync(string tenantId, int mapId, int zoom, int x, int y);
 
     /// <summary>
