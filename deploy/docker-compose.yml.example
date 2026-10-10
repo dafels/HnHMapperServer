@@ -1,252 +1,185 @@
 # Docker Compose stack for HnH Mapper production deployment (MULTI-TENANT)
-# Includes: API service, Web service, Caddy reverse proxy, and Watchtower for auto-updates
+# Includes: API service, Web service, Caddy reverse proxy (HTTPS) and Watchtower (auto-updates).
+# Optional: the Aspire dashboard for logs, traces and metrics (off unless enabled in .env).
 #
-# IMPORTANT: Replace 'OWNER' in image names with your GitHub username/organization
-# Example: ghcr.io/yourusername/hnhmapper-api:main
+# Setup (on the server, e.g. in /opt/hnhmap):
+# 1. Copy this file to 'docker-compose.yml', '.env.example' to '.env' and 'Caddyfile.example'
+#    to 'Caddyfile'. Check the values in .env and put your domain in the Caddyfile.
+# 2. Create the data directory from DATA_DIR (default /srv/hnh-map).
+# 3. Run: docker compose up -d
 #
-# Prerequisites:
-# - Create /srv/hnh-map directory on the host with appropriate permissions
-# - Copy this file and Caddyfile to /opt/hnhmap/ on the VPS
-# - Run: docker compose up -d
-#
-# For private images, login to GHCR first:
-#   echo $PAT | docker login ghcr.io -u USERNAME --password-stdin
+# Your own settings live only in .env and the Caddyfile, so this file can be replaced by a newer
+# version from the repository as-is.
 #
 # Multi-Tenancy Notes:
 # - Default tenant "default-tenant-1" created automatically on first startup
-# - Bootstrap admin assigned to default tenant (username: admin, password: admin123!)
-# - Database migrations auto-apply (creates multi-tenant tables)
-# - Self-registration disabled - new users require invitation codes
-# - Full documentation: see deploy/VPS-SETUP.md and deploy/FIRST-TIME-SETUP.md
+# - Bootstrap admin assigned to default tenant (username: admin, password: admin123!) -
+#   change the password immediately after the first login
+# - Database migrations auto-apply
+# - Self-registration disabled - new users join with invite links
 
-# Cap every container's stdout/stderr log — the default json-file driver grows
-# unbounded (uncapped logs once filled 52GB on the VPS). 50MB x 3 files = 150MB
-# max per service.
+name: hnhmap
+
+# Cap every container's log: the default json-file driver grows without limit (uncapped logs
+# once filled 52GB on a server). 50MB x 3 files = 150MB per container.
 x-logging: &default-logging
   driver: json-file
   options:
     max-size: "50m"
     max-file: "3"
 
+# api and web log the most: 300MB x 10 files = 3GB each.
+x-app-logging: &app-logging
+  driver: json-file
+  options:
+    max-size: "300m"
+    max-file: "10"
+
 services:
   # ============================================================================
-  # API Service - Handles game client communication and backend operations
+  # API Service - game client communication and backend operations
   # ============================================================================
   api:
-    # Pull image from GitHub Container Registry
-    # Replace OWNER with your GitHub username or organization
-    image: ghcr.io/OWNER/hnhmapper-api:main
-    
-    # Build configuration (used when building locally instead of pulling from registry)
-    # Uncomment 'build' section and comment out 'image' to build locally
-    # build:
-    #   context: ..
-    #   dockerfile: docker/api.Dockerfile
-    #   args:
-    #     BUILD_VERSION: ${BUILD_VERSION:-dev}
-    #     BUILD_COMMIT: ${BUILD_COMMIT:-dev}
-    #     BUILD_DATE: ${BUILD_DATE:-1970-01-01T00:00:00Z}
-    
+    # IMAGE_PREFIX (.env) points at the official images or at your own registry.
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX in .env}/hnhmapper-api:main
     container_name: hnhm-api
-    logging: *default-logging
-
-    # Hard memory cap. .NET reads the cgroup limit and keeps its GC heap under
-    # ~75% of it; if memory ever runs away again the kernel kills just this
-    # container (the restart policy brings it back) instead of starving the
-    # whole VPS — the host has no swap.
-    mem_limit: 3g
-    
-    # Restart policy: always restart unless manually stopped
     restart: unless-stopped
-    
-    # Environment variables for the API service
+    logging: *app-logging
+
+    # .NET keeps its GC heap under ~75% of this limit; if memory ever runs away the kernel
+    # restarts just this container instead of starving the whole server.
+    mem_limit: 3g
+
     environment:
-      # Path to shared data storage (maps, database, keys)
-      # Multi-tenant structure: /data/tenants/{tenantId}/grids/
-      - GridStorage=/data
+      GridStorage: /data
+      ASPNETCORE_ENVIRONMENT: Production
+      # Caddy terminates TLS
+      EnableCors: "false"
+      EnableHttpsRedirect: "false"
+      # First start only: creates the default tenant and this admin user
+      BootstrapAdmin__Enabled: "true"
+      BootstrapAdmin__Username: admin
+      BootstrapAdmin__Password: admin123!
+      # Default only; SuperAdmin -> Sign-in owns this once saved there
+      SelfRegistration__Enabled: "false"
+      # Empty unless the optional dashboard is enabled in .env (then telemetry goes there)
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: api
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=production
 
-      # ASP.NET Core environment (Production for security hardening)
-      - ASPNETCORE_ENVIRONMENT=Production
-
-      # Security settings (disable CORS, HTTPS redirect handled by Caddy)
-      - EnableCors=false
-      - EnableHttpsRedirect=false
-
-      # Bootstrap admin configuration (MULTI-TENANT)
-      # On first startup:
-      # 1. Default tenant "default-tenant-1" is created automatically
-      # 2. Admin user is created and assigned to default tenant
-      # 3. Admin given TenantAdmin role with all permissions
-      # 4. No approval workflow required (PendingApproval = false)
-      # ⚠️ CRITICAL: Change the password immediately after first login!
-      - BootstrapAdmin__Enabled=true
-      - BootstrapAdmin__Username=admin
-      - BootstrapAdmin__Password=admin123!
-
-      # Sign-in & onboarding (open registration, self-service maps, Steam / Discord sign-in) are managed by
-      # the superadmin in the web UI: SuperAdmin -> Sign-in (with setup guides). They are stored in the
-      # database; the value below only seeds the very first start and is ignored once saved in the UI.
-      - SelfRegistration__Enabled=true
-    
-    # Mount host directory for persistent data storage
-    # Shared between API and Web services for:
-    # - SQLite database (grids.db)
-    # - ASP.NET Data Protection keys (DataProtection-Keys/) - Required for cookie auth
-    # - Tenant-specific tile storage (tenants/{tenantId}/grids/)
-    # Multi-tenant directory structure:
-    #   /srv/hnh-map/
-    #   ├── grids.db                    # SQLite database with multi-tenant tables
-    #   ├── DataProtection-Keys/        # Cookie encryption keys (auto-created)
-    #   └── tenants/                    # Tenant-isolated file storage
-    #       ├── default-tenant-1/grids/ # Default tenant tiles
-    #       └── {other-tenants}/grids/  # Additional tenant tiles
+    # Shared with web: grids.db, tenant tile storage and the DataProtection keys
+    # (cookie encryption) both services must agree on.
     volumes:
-      - /srv/hnh-map:/data
+      - ${DATA_DIR:?set DATA_DIR in .env}:/data
 
-    # Connect to internal network (not exposed to host, only accessible via Caddy)
-    networks:
-      - hnmap
-    
-    # Label for Watchtower to monitor and update this service
+    # Watchtower updates only containers carrying this label
     labels:
       - com.centurylinklabs.watchtower.enable=true
-  
+
   # ============================================================================
-  # Web Service - Blazor Server UI for user dashboard and admin panel
+  # Web Service - Blazor Server UI (dashboard, map, admin panels)
   # ============================================================================
   web:
-    # Pull image from GitHub Container Registry
-    # Replace OWNER with your GitHub username or organization
-    image: ghcr.io/OWNER/hnhmapper-web:main
-    
-    # Build configuration (used when building locally instead of pulling from registry)
-    # Uncomment 'build' section and comment out 'image' to build locally
-    # build:
-    #   context: ..
-    #   dockerfile: docker/web.Dockerfile
-    #   args:
-    #     BUILD_VERSION: ${BUILD_VERSION:-dev}
-    #     BUILD_COMMIT: ${BUILD_COMMIT:-dev}
-    #     BUILD_DATE: ${BUILD_DATE:-1970-01-01T00:00:00Z}
-    
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX in .env}/hnhmapper-web:main
     container_name: hnhm-web
-    logging: *default-logging
-
-    # Hard memory cap (same rationale as the api service). Baseline is ~1.2GB:
-    # PublicTileCacheService preloads every public-map tile PNG into memory at
-    # startup (the exact MB is logged on boot) + Blazor Server circuit state.
-    mem_limit: 3g
-    
-    # Restart policy: always restart unless manually stopped
     restart: unless-stopped
-    
-    # Environment variables for the Web service
+    logging: *app-logging
+    mem_limit: 3g
+
     environment:
-      # Path to shared data storage (must match API for cookie key sharing)
-      - GridStorage=/data
-      
-      # ASP.NET Core environment (Production for security hardening)
-      - ASPNETCORE_ENVIRONMENT=Production
-      
-      # API base URL for service-to-service calls (Docker Compose internal network)
-      - ApiBaseUrl=http://api:8080
-      
-      # Disable HTTPS redirect (Caddy handles TLS termination)
-      - EnableHttpsRedirect=false
-    
-    # Mount host directory for persistent data storage
-    # Shares the same volume as API for cookie encryption keys
+      GridStorage: /data
+      ASPNETCORE_ENVIRONMENT: Production
+      ApiBaseUrl: http://api:8080
+      EnableHttpsRedirect: "false"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: web
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=production
+
     volumes:
-      - /srv/hnh-map:/data
-    
-    # Connect to internal network (not exposed to host)
-    networks: 
-      - hnmap
-    
-    # Label for Watchtower to monitor and update this service
+      - ${DATA_DIR:?set DATA_DIR in .env}:/data
+
     labels:
       - com.centurylinklabs.watchtower.enable=true
-  
+
   # ============================================================================
-  # Caddy Reverse Proxy - Routes traffic to API and Web services with HTTPS
+  # Caddy - HTTPS reverse proxy (Let's Encrypt certificates), routes to api/web
   # ============================================================================
   caddy:
-    # Official Caddy image (Alpine-based, lightweight)
     image: caddy:2
-
     container_name: hnhm-caddy
-    logging: *default-logging
-
-    # Restart policy: always restart unless manually stopped
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "200m"
+        max-file: "5"
 
-    # Expose HTTP and HTTPS ports to the host (public access points)
     ports:
-      - "80:80"    # HTTP (auto-redirects to HTTPS)
-      - "443:443"  # HTTPS
+      - "80:80"
+      - "443:443"
+      # HTTP/3 (QUIC): Caddy advertises it, so publish UDP too
+      - "443:443/udp"
 
-    # Mount Caddyfile configuration and persistent certificate storage
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data      # Let's Encrypt certificates (persistent)
-      - caddy_config:/config  # Caddy configuration (persistent)
-    
-    # Connect to internal network to communicate with API and Web
-    networks: 
-      - hnmap
-    
-    # Label for Watchtower to monitor Caddy updates (optional)
-    labels:
-      - com.centurylinklabs.watchtower.enable=true
-  
+      - caddy_data:/data      # certificates - keep this volume
+      - caddy_config:/config
+
+    # No Watchtower label on purpose: Caddy owns ports 80/443, so an automatic update would
+    # drop every user for a few seconds. Update it by hand at a quiet time:
+    #   docker compose pull caddy && docker compose up -d caddy
+
   # ============================================================================
-  # Watchtower - Automatic container updates from GHCR
+  # Watchtower - pulls new api/web images and restarts those containers
   # ============================================================================
   watchtower:
-    # Official Watchtower image for automatic Docker updates
-    image: containrrr/watchtower
-    
+    # Maintained fork of containrrr/watchtower
+    image: nickfedor/watchtower
     container_name: hnhm-watchtower
-    logging: *default-logging
-    
-    # Restart policy: always restart unless manually stopped
     restart: unless-stopped
-    
-    # Watchtower configuration:
-    # --interval 60: Check for updates every 60 seconds
-    # --label-enable: Only update containers with watchtower.enable=true label
-    # --cleanup: Remove the replaced image after each update (without this every
-    #   deploy leaves the old image behind — 550 stale images once accumulated)
+    logging: *default-logging
+
+    # Check every 60s, update only labelled containers, delete each replaced image
+    # (without --cleanup every deploy leaves the old image behind)
     command: --interval 60 --label-enable --cleanup
-    
-    # Mount Docker socket to control containers (required for Watchtower)
+
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    
-    # Connect to internal network (Watchtower doesn't need it, but included for consistency)
-    networks: 
-      - hnmap
-    
-    # For private GHCR images, enable registry authentication
+      # Images in a private registry? `docker login` on the host, then mount its credentials:
+      # - /home/youruser/.docker/config.json:/config.json:ro
+
+  # ============================================================================
+  # Optional: Aspire dashboard - logs, traces and metrics of api and web.
+  # Starts only with COMPOSE_PROFILES=dashboard in .env (see .env.example), and needs
+  # the dashboard block from Caddyfile.example in your Caddyfile.
+  # ============================================================================
+  dashboard:
+    profiles: [dashboard]
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:13.6
+    container_name: hnhm-dashboard
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 3g
+
     environment:
-      - WATCHTOWER_REGISTRY_AUTH=true
+      # Login token (second gate after Caddy's basic auth). Empty = a new one on every start,
+      # printed in `docker compose logs dashboard`.
+      DASHBOARD__FRONTEND__BROWSERTOKEN: ${DASHBOARD_BROWSER_TOKEN:-}
+      ASPIRE_DASHBOARD_FORWARDEDHEADERS_ENABLED: "true"
+      # Keep telemetry across restarts. The image runs as uid 1654, which owns /home/app, so
+      # the volume goes there (a new volume mounted at e.g. /data would belong to root).
+      ASPIRE_DASHBOARD_PERSISTENCE_MODE: Resume
+      ASPIRE_DASHBOARD_DATA_DIRECTORY: /home/app
+      # Retention is by count (default 100k each); the oldest entries are dropped first
+      DASHBOARD__TELEMETRYLIMITS__MAXLOGCOUNT: "1000000"
+      DASHBOARD__TELEMETRYLIMITS__MAXTRACECOUNT: "500000"
 
-# ============================================================================
-# Network Definition - Internal bridge network for service communication
-# ============================================================================
-networks:
-  hnmap:
-    # Bridge driver creates an isolated network for service-to-service communication
-    # Services can reach each other by container name (e.g., http://api:8080)
-    driver: bridge
+    volumes:
+      - dashboard_data:/home/app
 
-# ============================================================================
-# Volume Definitions - Persistent storage for Caddy certificates
-# ============================================================================
+    # No ports: Caddy and the apps reach it inside this network
+
 volumes:
   caddy_data:
-    # Stores Let's Encrypt TLS certificates and ACME account data
-    # IMPORTANT: Backup this volume to preserve certificates across rebuilds
   caddy_config:
-    # Stores Caddy runtime configuration and cache
-
+  dashboard_data:

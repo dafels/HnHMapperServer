@@ -232,10 +232,6 @@ public class LargeTileService : ILargeTileService
 
         try
         {
-            _logger.LogInformation(
-                "{Prefix} GENERATE [{Tenant}] map={MapId} z={Zoom} ({X},{Y}) - on-the-fly request",
-                LogPrefix, tenantId, mapId, zoom, x, y);
-
             var sw = Stopwatch.StartNew();
             var generatedBytes = await GenerateLargeTileAsync(tenantId, mapId, zoom, x, y);
             sw.Stop();
@@ -245,7 +241,7 @@ public class LargeTileService : ILargeTileService
                 Interlocked.Increment(ref stats.OnTheFlyGenerated);
                 Interlocked.Add(ref stats.TotalGenerationTimeMs, sw.ElapsedMilliseconds);
 
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "{Prefix} GENERATED [{Tenant}] map={MapId} z={Zoom} ({X},{Y}) in {Ms}ms ({Size:F1}KB)",
                     LogPrefix, tenantId, mapId, zoom, x, y, sw.ElapsedMilliseconds, generatedBytes.Length / 1024.0);
 

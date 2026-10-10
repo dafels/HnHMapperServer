@@ -11,6 +11,23 @@
 # This configuration enables cookie sharing between Web and API services by serving
 # them from the same domain. Caddy automatically provisions HTTPS with Let's Encrypt.
 
+# ============================================================================
+# Optional: Aspire dashboard - only if you enabled it in .env.
+# It needs its own host name (a DNS A record pointing at the server). Make the
+# password hash with:
+#   docker run --rm caddy:2 caddy hash-password --plaintext 'your-password'
+# then uncomment the block and fill in the host name, a user name and the hash.
+# Logging in asks for this password first, then for the dashboard's own token.
+# ============================================================================
+# dashboard.yourdomain.com {
+#   basic_auth {
+#     admin $2a$14$paste-the-hash-here
+#   }
+#   reverse_proxy dashboard:18888 {
+#     flush_interval -1
+#   }
+# }
+
 # Domain configuration with automatic HTTPS
 # Replace 'yourdomain.com' with your actual domain (e.g., mapper.example.com)
 yourdomain.com {

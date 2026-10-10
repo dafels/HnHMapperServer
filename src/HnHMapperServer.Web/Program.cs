@@ -56,7 +56,10 @@ SixLabors.ImageSharp.Configuration.Default.MemoryAllocator =
 builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Configuration(context.Configuration)
     .ReadFrom.Services(services)
-    .Enrich.FromLogContext());
+    .Enrich.FromLogContext(),
+    writeToProviders: true);
+
+builder.Logging.ClearProviders();
 
 // Add Aspire service defaults (telemetry, health checks, service discovery)
 builder.AddServiceDefaults();
@@ -255,11 +258,6 @@ var dataProtectionPath = Path.Combine(gridStorageForDp, "DataProtection-Keys");
 
 Directory.CreateDirectory(dataProtectionPath);
 
-// Diagnostic: log DataProtection path
-builder.Logging.AddConsole().Services.BuildServiceProvider()
-    .GetRequiredService<ILogger<Program>>()
-    .LogInformation("DataProtection: {DP}", dataProtectionPath);
-
 builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionPath))
     .SetApplicationName("HnHMapper");
@@ -435,11 +433,6 @@ if (string.IsNullOrWhiteSpace(apiBaseUrl))
     apiBaseUrl = builder.Environment.IsDevelopment() ? "https://api" : "http://api:8080";
 }
 
-// Diagnostic: log the API base URL resolved for the named client
-builder.Logging.AddConsole().Services.BuildServiceProvider()
-    .GetRequiredService<ILogger<Program>>()
-    .LogInformation("API HttpClient BaseAddress: {ApiBaseUrl}", apiBaseUrl);
-
 // Standard API client WITH resilience (retries, circuit breaker, timeouts)
 // Used for regular API calls that don't involve streaming uploads
 builder.Services.AddHttpClient("API", client =>
@@ -494,10 +487,7 @@ var app = builder.Build();
         resolved = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "map"));
     else if (!Path.IsPathRooted(resolved))
         resolved = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", resolved));
-    var dp = Path.Combine(resolved, "DataProtection-Keys");
-    var apiBaseUrlDiag = app.Configuration["ApiBaseUrl"];
-    if (string.IsNullOrWhiteSpace(apiBaseUrlDiag)) apiBaseUrlDiag = "https://api";
-    app.Logger.LogInformation("GridStorage (raw): {Raw} | GridStorage (resolved): {Resolved} | DataProtection: {DP} | API Base: {Api}", raw ?? "(null)", resolved, dp, apiBaseUrlDiag);
+    app.Logger.LogInformation("GridStorage (raw): {Raw} | GridStorage (resolved): {Resolved} | DataProtection: {DP} | API Base: {Api}", raw ?? "(null)", resolved, dataProtectionPath, apiBaseUrl);
 }
 
 // Configure the HTTP request pipeline.

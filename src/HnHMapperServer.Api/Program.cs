@@ -70,7 +70,9 @@ SixLabors.ImageSharp.Configuration.Default.MemoryAllocator =
 builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Configuration(context.Configuration)
     .ReadFrom.Services(services)
-    .Enrich.FromLogContext());
+    .Enrich.FromLogContext(),
+    writeToProviders: true);
+builder.Logging.ClearProviders();
 
 // Add Aspire service defaults (telemetry, health checks, service discovery)
 builder.AddServiceDefaults();
