@@ -14,6 +14,8 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.11" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
     <PackageReference Include="Moq" Version="4.20.72" />
+    <!-- AddSerilog(..., writeToProviders) for the telemetry pipeline tests; same version Api/Web resolve -->
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
@@ -27,6 +29,22 @@
     <ProjectReference Include="..\HnHMapperServer.Services\HnHMapperServer.Services.csproj" />
     <ProjectReference Include="..\HnHMapperServer.Infrastructure\HnHMapperServer.Infrastructure.csproj" />
     <ProjectReference Include="..\HnHMapperServer.Core\HnHMapperServer.Core.csproj" />
+    <ProjectReference Include="..\HnHMapperServer.ServiceDefaults\HnHMapperServer.ServiceDefaults.csproj" />
+  </ItemGroup>
+
+  <!-- LoggingConfigurationTests: the services' appsettings, merged the way the host merges them, and their
+       Program.cs as text (this project cannot reference Api/Web) to pin the UseSerilog call sites -->
+  <ItemGroup>
+    <None Include="..\HnHMapperServer.Api\appsettings*.json" Link="config\Api\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\HnHMapperServer.Web\appsettings*.json" Link="config\Web\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\HnHMapperServer.Api\Program.cs" Link="config\Api\Program.cs.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\HnHMapperServer.Web\Program.cs" Link="config\Web\Program.cs.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- SseWireContractTests: both halves of the /map/updates heartbeat contract, as text -->
+  <ItemGroup>
+    <None Include="..\HnHMapperServer.Api\Endpoints\MapEndpoints.cs" Link="sse-contract\Api\MapEndpoints.cs.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\HnHMapperServer.Web\wwwroot\js\map-updates.js" Link="sse-contract\Web\map-updates.js.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

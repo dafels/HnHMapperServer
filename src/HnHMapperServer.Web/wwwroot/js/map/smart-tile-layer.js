@@ -11,6 +11,14 @@ for (let z = HnHMinZoom; z <= HnHMaxZoom; z++) {
     SCALE_FACTORS[z] = (1 << (HnHMaxZoom - z)) * TILE_TO_GRID_RATIO;  // Accounts for 4x4 grids per tile
 }
 
+// Revision refreshes: debounce for back-to-back bumps, the cap on remembered failed tiles, and the cap on
+// pending changed cells before a run falls back to refreshing everything (the server lists ≤ 256 per bump).
+const REVISION_REFRESH_DEBOUNCE_MS = 500;
+const REVISION_RETRY_MAX = 256;
+const REVISION_CELLS_MAX = 256;
+// Server (URL) zoom levels: 0 = the 400px zoom-0 cells .. 6 (Leaflet zoom is reversed onto these).
+const MAX_SERVER_ZOOM = HnHMaxZoom - HnHMinZoom;
+
 // Smart Tile Layer with caching and smooth transitions
 export const SmartTileLayer = L.TileLayer.extend({
     cache: {},              // Per-map cache: { mapId: { tileKey: { etag, state } } }
@@ -19,8 +27,9 @@ export const SmartTileLayer = L.TileLayer.extend({
     mapId: 0,
     offsetX: 0,             // X offset for overlay comparison (in grid coordinates, zoom-independent)
     offsetY: 0,             // Y offset for overlay comparison (in grid coordinates, zoom-independent)
-    mapRevisions: {},       // Map ID → revision number for cache busting
-    revisionDebounce: {},   // Map ID → timeout handle for debouncing revision updates
+    mapRevisions: {},       // Map ID → revision number for cache busting. Shared by every instance on purpose
+                            // (server-global data, like `cache`); written only by leaflet-interop.js's
+                            // setMapRevision/seedMapRevisions. Per-layer refresh state: addInitHook below.
     negativeCache: {},      // Temporary negative cache: cacheKey → expiry timestamp (Date.now() + TTL)
     negativeCacheTTL: 30000, // 30 seconds TTL for negative cache (reduced from 2 minutes for faster retry)
     negativeCacheKeys: [],  // Track insertion order for LRU eviction
@@ -146,13 +155,18 @@ export const SmartTileLayer = L.TileLayer.extend({
         zoom = zoom + zoomOffset;
 
         const key = `${x}:${y}:${zoom}`;
+        return this._refreshTile(key, { x, y, map: this.mapId, z }, null);
+    },
+
+    // Re-request the tile node `key` (Leaflet tile key) from server coords `data` ({ x, y, map, z }),
+    // swapping the image only once the new one has loaded. `onFailed` (optional) runs if that load fails.
+    _refreshTile: function (key, data, onFailed) {
         const tile = this._tiles[key];
 
         if (!tile) {
             return false; // Tile node doesn't exist yet; caller should redraw
         }
 
-        const data = { x, y, map: this.mapId, z };
         const cacheKey = `${data.map}:${data.x}:${data.y}:${data.z}`;
         const tileKey = `${data.x}:${data.y}:${data.z}`;
 
@@ -244,98 +258,242 @@ export const SmartTileLayer = L.TileLayer.extend({
             // Reset state
             self.tileStates[cacheKey] = tileState;
             cleanupPreloader();
+            if (onFailed) onFailed();
         };
 
         preloader.src = newUrl;
         return true; // Successfully initiated refresh
     },
 
-    // Update revision for a map and force refresh all tiles for that map (debounced)
-    setMapRevision: function (mapId, revision) {
-        const oldRevision = this.mapRevisions[mapId];
+    // Server tile coords (the URL's x/y/z) of the Leaflet tile node at (lx, ly, lz): the same math as
+    // getTileUrl - HnH zoom via zoomReverse/zoomOffset, plus the overlay's grid offset - but scaled at the
+    // tile's own zoom, since a level kept during a zoom animation is not at the map's current zoom.
+    _serverCoords: function (lx, ly, lz) {
+        const scale = SCALE_FACTORS[lz] || ((1 << (HnHMaxZoom - lz)) * TILE_TO_GRID_RATIO);
+        let z = lz;
+        if (this.options.zoomReverse) {
+            z = this.options.maxZoom - z;
+        }
+        z = z + (this.options.zoomOffset || 0);
+        return {
+            x: lx + Math.round((this.offsetX || 0) / scale),
+            y: ly + Math.round((this.offsetY || 0) / scale),
+            map: this.mapId,
+            z: z
+        };
+    },
 
-        // Clear existing debounce timeout for this map
-        if (this.revisionDebounce[mapId]) {
-            clearTimeout(this.revisionDebounce[mapId]);
+    // The layer is still on a live map and still showing mapId.
+    _isLiveFor: function (mapId) {
+        return !!this._map && this.mapId === mapId && this._map.getContainer().isConnected;
+    },
+
+    // The tile node shows Leaflet's transparent placeholder instead of an image: its first load failed
+    // (404, 503, network - createTile's error path swaps it in) or getTileUrl skipped it while it was
+    // negative-cached. Short of being pruned and re-created, only a revision run requests it again.
+    _isPlaceholder: function (key) {
+        const tile = this._tiles && this._tiles[key];
+        return !!tile && !!tile.el && tile.el.getAttribute('src') === L.Util.emptyImageUrl;
+    },
+
+    // Schedule a refresh after a revision bump of `mapId` (leaflet-interop.js's setMapRevision has already
+    // stored the new revision, so tiles created meanwhile use it). `cells` ([[x, y], ...] server zoom-0
+    // cells) limits it to the tiles covering those cells at every zoom; null refreshes every tile in view.
+    // Debounced, because ZoomQ often bumps several times in a row: the pending cells accumulate, and one
+    // full bump makes the whole run full. The state is per layer (see addInitHook below).
+    scheduleRevisionRefresh: function (mapId, cells) {
+        if (!this._isLiveFor(mapId)) return;
+
+        const p = this._revisionRefresh;
+        if (p.mapId !== mapId) {
+            p.retry.clear();
+            p.cells.clear();
+            p.queue.clear();
+            p.all = false;
+        }
+        p.mapId = mapId;
+
+        if (!Array.isArray(cells)) {
+            p.all = true;
+        } else if (!p.all) {
+            for (const cell of cells) {
+                if (!Array.isArray(cell) || !Number.isInteger(cell[0]) || !Number.isInteger(cell[1])) {
+                    p.all = true; // malformed: refresh everything rather than guess
+                    break;
+                }
+                p.cells.add(`${cell[0]}:${cell[1]}`);
+            }
+            if (p.cells.size > REVISION_CELLS_MAX) {
+                p.all = true;
+            }
+        }
+        if (p.all) {
+            p.cells.clear();
         }
 
-        // Store the new revision immediately (for new tile requests)
-        this.mapRevisions[mapId] = revision;
+        if (p.timer !== null) {
+            clearTimeout(p.timer);
+        }
+        p.timer = setTimeout(() => {
+            p.timer = null;
+            this._runRevisionRefresh();
+        }, REVISION_REFRESH_DEBOUNCE_MS);
+    },
 
-        // If this is the currently displayed map and revision changed, debounce the refresh
-        if (this.mapId === mapId && oldRevision !== revision) {
-            if (!this._map) return;
+    // Server tile keys ("x:y:z") of the given zoom-0 cells and all their ancestors - the tiles a
+    // regeneration of those cells rewrote (z0 = the cell, zN = floor(cell / 2^N); `>>` floors negatives).
+    _affectedServerKeys: function (cellKeys) {
+        const affected = new Set();
+        for (const cellKey of cellKeys) {
+            const parts = cellKey.split(':');
+            const cx = parseInt(parts[0], 10);
+            const cy = parseInt(parts[1], 10);
+            for (let z = 0; z <= MAX_SERVER_ZOOM; z++) {
+                affected.add(`${cx >> z}:${cy >> z}:${z}`);
+            }
+        }
+        return affected;
+    },
 
-            const self = this;
+    _runRevisionRefresh: function () {
+        const p = this._revisionRefresh;
+        const mapId = p.mapId;
 
-            // Debounce tile refresh by 500ms to batch multiple revision updates
-            this.revisionDebounce[mapId] = setTimeout(() => {
-                delete self.revisionDebounce[mapId];
+        // Liveness re-check: while the timer was pending the layer may have been removed (SPA exit,
+        // initializeMap re-entry) or switched maps (changeMap redraws at the new revision anyway).
+        if (!this._isLiveFor(mapId)) {
+            p.retry.clear();
+            p.cells.clear();
+            p.queue.clear();
+            p.all = false;
+            return;
+        }
 
-                // Clear ALL negative cache entries for this map.
-                // A revision change means the server has new tiles — all previous 404s are stale.
-                // clearVisibleNegativeCache() only clears the current zoom/viewport which misses entries.
-                const mapPrefix = mapId + ':';
-                for (const key in self.negativeCache) {
-                    if (key.startsWith(mapPrefix)) {
-                        delete self.negativeCache[key];
-                    }
+        // A hidden tab paints nothing: every bump while hidden collapses into ONE run when the tab is
+        // shown again (it used to queue one requestAnimationFrame burst per bump).
+        if (document.hidden) {
+            if (!p.waitingVisible) {
+                p.waitingVisible = true;
+                const onVisible = () => {
+                    if (document.hidden) return;
+                    document.removeEventListener('visibilitychange', onVisible);
+                    p.waitingVisible = false;
+                    this._runRevisionRefresh();
+                };
+                document.addEventListener('visibilitychange', onVisible);
+            }
+            return;
+        }
+
+        // Consume the pending work: everything, or only the tiles over the changed cells.
+        const affected = p.all ? null : this._affectedServerKeys(p.cells);
+        p.all = false;
+        p.cells.clear();
+
+        const mapPrefix = mapId + ':';
+        const keys = new Set();
+        if (affected === null) {
+            // A full revision change means the server may have new tiles anywhere: every 404 remembered
+            // for this map may be stale. clearVisibleNegativeCache() only clears the current
+            // zoom/viewport, which misses entries.
+            for (const key in this.negativeCache) {
+                if (key.startsWith(mapPrefix)) {
+                    delete this.negativeCache[key];
                 }
-
-                // Gather all visible tiles that need refreshing
-                const keys = Object.keys(self._tiles || {});
-                const tilesToRefresh = [];
-
-                for (let i = 0; i < keys.length; i++) {
-                    const key = keys[i];
-                    const parts = key.split(":");
-                    if (parts.length !== 3) continue;
-                    const x = parseInt(parts[0], 10);
-                    const y = parseInt(parts[1], 10);
-                    const processedZoom = parseInt(parts[2], 10);
-
-                    // Invert zoom transform used to build tile key so refresh() finds the node
-                    let z = processedZoom - (self.options.zoomOffset || 0);
-                    if (self.options.zoomReverse) {
-                        z = self.options.maxZoom - z;
-                    }
-
-                    tilesToRefresh.push({ x, y, z });
+            }
+            // Every tile node in view (all retained levels).
+            for (const key in this._tiles || {}) {
+                keys.add(key);
+            }
+        } else {
+            // Only the changed cells' tiles (also those out of view: a newly mapped area's cached 404
+            // must not hide it when panned to), and only the nodes showing them, at every retained level.
+            for (const serverKey of affected) {
+                delete this.negativeCache[mapPrefix + serverKey];
+            }
+            for (const key in this._tiles || {}) {
+                const parts = key.split(':');
+                if (parts.length !== 3) continue;
+                const data = this._serverCoords(parseInt(parts[0], 10), parseInt(parts[1], 10), parseInt(parts[2], 10));
+                // Plus every placeholder node: full runs used to retry those on every bump, which is
+                // what healed a transient failure (a 503, a network blip). Their negative-cache entries
+                // are kept, so _refreshTile re-requests one only once its entry has expired - a lasting
+                // 404 (unexplored area) costs one request per TTL, not one per bump.
+                if (affected.has(`${data.x}:${data.y}:${data.z}`) || this._isPlaceholder(key)) {
+                    keys.add(key);
                 }
+            }
+        }
 
-                // Batch refresh tiles (4 per frame, reduced from 8 for smoother experience)
-                // With 50ms minimum delay between batches for better visual smoothness
-                const batchSize = 4;
-                let currentIndex = 0;
-                let needsRedraw = false;
+        // Plus the tiles whose refresh failed last time - they hold an old image whatever this bump
+        // changed. Their failure put them in the negative cache, which would skip the retry.
+        for (const key of p.retry) {
+            keys.add(key);
+            const parts = key.split(':');
+            if (parts.length !== 3) continue;
+            const data = this._serverCoords(parseInt(parts[0], 10), parseInt(parts[1], 10), parseInt(parts[2], 10));
+            delete this.negativeCache[`${mapPrefix}${data.x}:${data.y}:${data.z}`];
+        }
+        p.retry.clear();
 
-                function refreshBatch() {
-                    const endIndex = Math.min(currentIndex + batchSize, tilesToRefresh.length);
-                    for (let i = currentIndex; i < endIndex; i++) {
-                        const tile = tilesToRefresh[i];
-                        if (!self.refresh(tile.x, tile.y, tile.z)) {
-                            needsRedraw = true;
-                        }
+        // One shared work queue per layer: a run adds its keys and the single drain loop below works
+        // them off. Runs no longer replace each other - a narrowed run only covers its own cells, so
+        // superseding an earlier run would drop that run's remaining tiles. A key queued twice (before
+        // its turn) is refreshed once, at the newest revision.
+        for (const key of keys) {
+            p.queue.add(key);
+        }
+        if (p.queue.size === 0 || p.draining) return;
+        p.draining = true;
+
+        const self = this;
+
+        // Batch refresh tiles (4 per frame, reduced from 8 for smoother experience)
+        // With 50ms minimum delay between batches for better visual smoothness
+        const batchSize = 4;
+
+        function refreshBatch() {
+            const mapId = p.mapId;
+            if (!self._isLiveFor(mapId)) {
+                p.queue.clear();
+                p.draining = false;
+                return;
+            }
+
+            let done = 0;
+            for (const key of p.queue) {
+                if (done === batchSize) break;
+                p.queue.delete(key);
+                done++;
+
+                // Pruned since (pan/zoom): a re-created node already requests the new revision.
+                if (!self._tiles[key]) continue;
+
+                const parts = key.split(':');
+                if (parts.length !== 3) continue;
+                const data = self._serverCoords(parseInt(parts[0], 10), parseInt(parts[1], 10), parseInt(parts[2], 10));
+                self._refreshTile(key, data, () => {
+                    // A placeholder needs no eager retry: every narrowed run picks it up again once
+                    // its negative-cache entry expires. The retry set would clear that entry on each
+                    // bump and re-request a lasting 404 every time.
+                    if (self._isPlaceholder(key)) return;
+                    if (p.mapId === mapId && p.retry.size < REVISION_RETRY_MAX) {
+                        p.retry.add(key);
                     }
-                    currentIndex = endIndex;
+                });
+            }
 
-                    // Schedule next batch if there are more tiles (with 50ms delay)
-                    if (currentIndex < tilesToRefresh.length) {
-                        setTimeout(() => {
-                            requestAnimationFrame(refreshBatch);
-                        }, 50);
-                    } else if (needsRedraw) {
-                        // Some tiles weren't in _tiles — force Leaflet to recreate them
-                        self.redraw();
-                    }
-                }
-
-                // Start batched refresh
-                if (tilesToRefresh.length > 0) {
+            // Schedule next batch if there are more tiles (with 50ms delay)
+            if (p.queue.size > 0) {
+                setTimeout(() => {
                     requestAnimationFrame(refreshBatch);
-                }
-            }, 500); // 500ms debounce
+                }, 50);
+            } else {
+                p.draining = false;
+            }
         }
+
+        requestAnimationFrame(refreshBatch);
     },
 
     // Clear negative cache entries for visible tiles in current viewport
@@ -542,4 +700,20 @@ export const SmartTileLayer = L.TileLayer.extend({
             }
         }
     }
+});
+
+// Per-instance revision-refresh state. Object literals passed to extend() land on the prototype and are
+// shared by the main and overlay layers - the old prototype `revisionDebounce` was, so the overlay's
+// setMapRevision call cleared the main layer's pending refresh timer and the refresh never ran.
+SmartTileLayer.addInitHook(function () {
+    this._revisionRefresh = {
+        timer: null,            // pending debounce timeout
+        mapId: 0,               // map the pending/last run is for
+        all: false,             // pending: refresh every tile in view
+        cells: new Set(),       // pending: changed server zoom-0 cells "x:y" (unused while `all`)
+        retry: new Set(),       // Leaflet tile keys whose last revision refresh failed
+        queue: new Set(),       // Leaflet tile keys waiting for the drain loop
+        draining: false,        // the drain loop is scheduled
+        waitingVisible: false   // a run is parked until the tab is visible again
+    };
 });

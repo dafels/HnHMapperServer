@@ -20,7 +20,6 @@ using System.Net;
 using System.Security.Claims;
 using Serilog;
 using Microsoft.AspNetCore.Components.Server;
-using Serilog.Events;
 using SixLabors.ImageSharp;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -36,15 +35,19 @@ builder.WebHost.ConfigureKestrel(serverOptions =>
     serverOptions.Limits.MaxRequestBodySize = 1024L * 1024 * 1024; // 1GB
 });
 
-// Configure ImageSharp for better resource management during zoom tile generation
-SixLabors.ImageSharp.Configuration.Default.MaxDegreeOfParallelism = 2;  // Limit parallel image processing to reduce memory spikes
+// ImageSharp settings for tile generation.
+// MaxDegreeOfParallelism caps the threads ONE ImageSharp operation (Resize, DrawImage, encode)
+// uses for its row loop; it does not limit how many tiles are generated concurrently.
+SixLabors.ImageSharp.Configuration.Default.MaxDegreeOfParallelism = 2;
 
-// Cap the image buffer pool. ImageSharp's allocator pools large buffers outside the GC
-// heap, so they are invisible to the GC's heap limit but very visible to the container's
-// memory limit - which is what the kernel OOM-kills on. The tile pyramid works in
-// 400x400 RGBA tiles (~640 KB each) with at most MaxDegreeOfParallelism in flight, so a
-// 32 MB retained pool is generous; the accumulative limit is a backstop against a
-// pathological image.
+// ImageSharp 3.x serves every buffer up to 1 MiB from ArrayPool<byte>.Shared, rounded up to a
+// power of two, and only larger buffers from its own unmanaged pool - the pool that
+// MaximumPoolSizeMegabytes caps. A 400x400 Rgba32 tile frame (640,000 B) is therefore a 1 MiB
+// array on the managed large object heap, kept by the shared pool after use (up to 32 per size
+// per CPU partition, trimmed slowly on gen2 GCs) and bounded by neither setting; a 100x100 base
+// tile (40,000 B -> 64 KiB) stays on the small-object heap. AllocationLimitMegabytes caps a
+// single allocation (one image buffer), a backstop against a pathological image - it is not a
+// running total.
 SixLabors.ImageSharp.Configuration.Default.MemoryAllocator =
     SixLabors.ImageSharp.Memory.MemoryAllocator.Create(new SixLabors.ImageSharp.Memory.MemoryAllocatorOptions
     {
@@ -52,11 +55,14 @@ SixLabors.ImageSharp.Configuration.Default.MemoryAllocator =
         AllocationLimitMegabytes = 256
     });
 
-// Configure Serilog
+// Configure Serilog. Serilog:MinimumLevel is the ONLY level gate for Console, File and OTLP
+// (writeToProviders + ClearProviders make Logging:LogLevel inert) - see CLAUDE.md "Logging levels".
 builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Configuration(context.Configuration)
     .ReadFrom.Services(services)
-    .Enrich.FromLogContext(),
+    // LAST: FromLogContext + the root enricher that masks invite codes, token-revoke paths and client tokens in
+    // every property for all sinks (ServiceDefaults; a test checks this call stays last).
+    .ApplyServiceDefaults(),
     writeToProviders: true);
 
 builder.Logging.ClearProviders();
@@ -64,22 +70,25 @@ builder.Logging.ClearProviders();
 // Add Aspire service defaults (telemetry, health checks, service discovery)
 builder.AddServiceDefaults();
 
+var configuredGridStorage = builder.Configuration["GridStorage"]; // raw from config/env
+var gridStorage = configuredGridStorage;
+if (string.IsNullOrWhiteSpace(gridStorage))
+{
+    // Default to shared solution-level path so Web and API use identical storage
+    gridStorage = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "map"));
+}
+else if (!Path.IsPathRooted(gridStorage))
+{
+    // Resolve relative GridStorage consistently to solution-level path
+    gridStorage = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", gridStorage));
+}
+// Publish the resolved path: every service reads configuration["GridStorage"], and a relative value
+// would otherwise resolve against the working directory instead of the folder the database is in.
+builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?> { ["GridStorage"] = gridStorage });
+
 // Add database context
 builder.Services.AddDbContext<HnHMapperServer.Infrastructure.Data.ApplicationDbContext>(options =>
 {
-    var configuredGridStorage = builder.Configuration["GridStorage"]; // raw from config/env
-    var gridStorage = configuredGridStorage;
-    if (string.IsNullOrWhiteSpace(gridStorage))
-    {
-        // Default to shared solution-level path so Web and API use identical storage
-        gridStorage = System.IO.Path.GetFullPath(System.IO.Path.Combine(builder.Environment.ContentRootPath, "..", "map"));
-    }
-    else if (!System.IO.Path.IsPathRooted(gridStorage))
-    {
-        // Resolve relative GridStorage consistently to solution-level path
-        gridStorage = System.IO.Path.GetFullPath(System.IO.Path.Combine(builder.Environment.ContentRootPath, "..", gridStorage));
-    }
-
     // Ensure the directory exists
     if (!System.IO.Directory.Exists(gridStorage))
     {
@@ -113,6 +122,10 @@ builder.Services.AddScoped<HnHMapperServer.Web.Services.VersionClient>();
 // Cross-circuit cache of the cookbook's flat "All recipes" rows (~50k rows per tenant)
 builder.Services.AddSingleton<HnHMapperServer.Web.Services.CookbookFlatCache>();
 
+// Which game icons ship under wwwroot/gfx, so FoodIcons sends unshipped ones straight to the
+// game's renderer instead of paying a local 404 first. wwwroot is immutable in the image.
+builder.Services.AddSingleton(HnHMapperServer.Services.Services.ShippedIconScanner.Scan(builder.Environment.WebRootPath));
+
 // Register public tile cache services for in-memory tile serving
 builder.Services.AddSingleton<HnHMapperServer.Web.Services.PublicTileCacheService>();
 builder.Services.AddHostedService<HnHMapperServer.Web.Services.PublicTileCacheHostedService>();
@@ -133,13 +146,18 @@ builder.Services.AddScoped<HnHMapperServer.Web.Services.Map.CustomMarkerStateSer
 builder.Services.AddScoped<HnHMapperServer.Web.Services.Map.MapNavigationService>();
 builder.Services.AddScoped<HnHMapperServer.Web.Services.Map.LayerVisibilityService>();
 
-// Add HttpContextAccessor and auth state cache
+// Add HttpContextAccessor and the per-circuit auth state cache
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<HnHMapperServer.Web.Services.AuthenticationStateCache>();
 
-// Add circuit services accessor to capture authentication state when circuit starts
-builder.Services.AddScoped<HnHMapperServer.Web.Services.CircuitServicesAccessor>();
-builder.Services.AddScoped<Microsoft.AspNetCore.Components.Server.Circuits.CircuitHandler, HnHMapperServer.Web.Services.CircuitServicesAccessor>(sp => sp.GetRequiredService<HnHMapperServer.Web.Services.CircuitServicesAccessor>());
+// Circuit services for code outside the circuit's DI scope: AuthenticationDelegatingHandler runs in
+// IHttpClientFactory's handler scope (shared by all users) and reads the sending circuit's auth state
+// through this accessor. Its state is a static AsyncLocal, so a singleton is correct.
+builder.Services.AddSingleton<HnHMapperServer.Web.Services.CircuitServicesAccessor>();
+builder.Services.AddScoped<Microsoft.AspNetCore.Components.Server.Circuits.CircuitHandler, HnHMapperServer.Web.Services.ServicesAccessorCircuitHandler>();
+
+// Captures the circuit's auth cookie and browser origin on every (re)connect
+builder.Services.AddScoped<Microsoft.AspNetCore.Components.Server.Circuits.CircuitHandler, HnHMapperServer.Web.Services.AuthenticationCaptureCircuitHandler>();
 
 // Add reconnection circuit handler to track SignalR connection state
 builder.Services.AddScoped<Microsoft.AspNetCore.Components.Server.Circuits.CircuitHandler, HnHMapperServer.Web.Security.ReconnectionCircuitHandler>();
@@ -180,11 +198,12 @@ builder.Services.Configure<CircuitOptions>(options =>
     // Detailed errors leak internals and keep extra per-circuit state; development only.
     options.DetailedErrors = builder.Environment.IsDevelopment();
 
-    // Increase JS Interop timeout to allow for initial map initialization
-    // Default is 1 minute which is too short for:
-    // - Loading Leaflet library and plugins (now bundled locally, but adds safety margin)
-    // - Initializing map with all layers and event handlers
-    // - Network latency in production environments
+    // Upper bound for every .NET-to-JS call made without its own CancellationToken - e.g.
+    // downloadFileFromStream for the cookbook export, which can legitimately run long. Map
+    // initialization does not depend on it: initializeMap creates Leaflet synchronously (the old
+    // requestAnimationFrame wait, which never ran in a hidden tab, was what hit this limit).
+    // A call or reply lost with a dropped connection surfaces as TaskCanceledException after
+    // this long; Blazor does not replay JS interop after a reconnect.
     options.JSInteropDefaultCallTimeout = TimeSpan.FromMinutes(2);
 
     // Keep disconnected circuits long enough to survive a flaky connection, but bound how
@@ -244,17 +263,7 @@ builder.Services.AddOutputCache(options =>
 });
 
 // Configure shared data protection for cookie sharing with API
-var gridStorageForDp = builder.Configuration["GridStorage"];
-if (string.IsNullOrWhiteSpace(gridStorageForDp))
-{
-    gridStorageForDp = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "map"));
-}
-else if (!Path.IsPathRooted(gridStorageForDp))
-{
-    // Resolve relative GridStorage consistently to solution-level path
-    gridStorageForDp = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", gridStorageForDp));
-}
-var dataProtectionPath = Path.Combine(gridStorageForDp, "DataProtection-Keys");
+var dataProtectionPath = Path.Combine(gridStorage, "DataProtection-Keys");
 
 Directory.CreateDirectory(dataProtectionPath);
 
@@ -481,13 +490,13 @@ var app = builder.Build();
 
 // Diagnostics: echo environment-driven paths and API base
 {
-    var raw = app.Configuration["GridStorage"];
-    var resolved = raw;
-    if (string.IsNullOrWhiteSpace(resolved))
-        resolved = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", "map"));
-    else if (!Path.IsPathRooted(resolved))
-        resolved = Path.GetFullPath(Path.Combine(app.Environment.ContentRootPath, "..", resolved));
-    app.Logger.LogInformation("GridStorage (raw): {Raw} | GridStorage (resolved): {Resolved} | DataProtection: {DP} | API Base: {Api}", raw ?? "(null)", resolved, dataProtectionPath, apiBaseUrl);
+    app.Logger.LogInformation("GridStorage (raw): {Raw} | GridStorage (resolved): {Resolved} | DataProtection: {DP} | API Base: {Api}", configuredGridStorage ?? "(null)", gridStorage, dataProtectionPath, apiBaseUrl);
+
+    var shippedIcons = app.Services.GetRequiredService<HnHMapperServer.Core.Cookbook.ShippedIcons>();
+    if (shippedIcons.IsKnown)
+        app.Logger.LogInformation("Shipped icon manifest: {Count} icons under wwwroot/gfx", shippedIcons.Count);
+    else
+        app.Logger.LogWarning("Shipped icon manifest unavailable (WebRootPath {Path}); food icons stay local-first", app.Environment.WebRootPath);
 }
 
 // Configure the HTTP request pipeline.
@@ -495,22 +504,10 @@ var app = builder.Build();
 // Use forwarded headers early to ensure HTTPS scheme detection works
 app.UseForwardedHeaders();
 
-app.UseSerilogRequestLogging(options =>
-{
-    // Suppress noisy 404 logs for missing tile images under /map/grids
-    options.GetLevel = (httpContext, elapsedMs, ex) =>
-    {
-        var path = httpContext.Request.Path.Value ?? string.Empty;
-        var status = httpContext.Response?.StatusCode ?? 200;
-
-        if (path.StartsWith("/map/grids", StringComparison.OrdinalIgnoreCase) && status == StatusCodes.Status404NotFound)
-            return LogEventLevel.Debug; // below normal min level, effectively hidden
-
-        if (ex != null || status >= 500) return LogEventLevel.Error;
-        if (status >= 400) return LogEventLevel.Warning;
-        return LogEventLevel.Information;
-    };
-});
+// Request log = Serilog's default levels: exception or 5xx -> Error, everything else Information, which the
+// RequestLoggingMiddleware=Warning override filters out. 4xx (empty /map/tiles cells, missing static assets,
+// scanner probes) are client outcomes, counted per route template by the http.server.request.duration metric.
+app.UseSerilogRequestLogging();
 
 if (!app.Environment.IsDevelopment())
 {
@@ -558,14 +555,14 @@ app.UseAntiforgery();
 app.UseOutputCache();
 
 // SSE proxy endpoint - forwards browser EventSource requests to API service
-// This is needed because browsers can't use Aspire service discovery
+// This is needed because browsers can't use Aspire service discovery. In production Caddy routes
+// /map/updates straight to the API (@mapsse), so this is the dev path (Aspire) and the prod fallback.
+// Every connection is routine: lifecycle lines are Debug, auth refusals are client outcomes.
 app.MapGet("/map/updates", async (HttpContext context, IHttpClientFactory httpClientFactory, ILogger<Program> logger) =>
 {
-    logger.LogWarning("[SSE Proxy] Request received from browser");
-    
     if (!context.User.Identity?.IsAuthenticated ?? true)
     {
-        logger.LogError("[SSE Proxy] User not authenticated");
+        logger.LogDebug("[SSE Proxy] User not authenticated");
         return Results.Unauthorized();
     }
 
@@ -574,11 +571,9 @@ app.MapGet("/map/updates", async (HttpContext context, IHttpClientFactory httpCl
         c.Value.Equals(Permission.Map.ToClaimValue(), StringComparison.OrdinalIgnoreCase));
     if (!hasMapAuth)
     {
-        logger.LogError("[SSE Proxy] User lacks Map permission");
+        logger.LogDebug("[SSE Proxy] User lacks Map permission");
         return Results.Unauthorized();
     }
-
-    logger.LogWarning("[SSE Proxy] Auth passed, forwarding to API service...");
 
     try
     {
@@ -586,58 +581,64 @@ app.MapGet("/map/updates", async (HttpContext context, IHttpClientFactory httpCl
         var apiClient = httpClientFactory.CreateClient("API");
         apiClient.Timeout = Timeout.InfiniteTimeSpan;
 
-    // Forward request to API service.
-    //
-    // IMPORTANT:
-    // The browser SSE client may connect using query parameters (e.g. `?since=<token>`) to avoid
-    // re-downloading and re-parsing the entire initial tile cache on reconnect.
-    //
-    // If we drop the query string here, the API always thinks `since=0` and will resend the full
-    // tile cache snapshot (potentially ~300k tiles), which can freeze the browser for tens of seconds.
-    //
-    // Therefore we MUST forward the query string verbatim.
-    var requestUri = "/map/updates" + (context.Request.QueryString.HasValue ? context.Request.QueryString.Value : string.Empty);
-    var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+        // Forward request to API service.
+        //
+        // IMPORTANT:
+        // The browser SSE client connects with `?since=<token>` to avoid re-downloading and re-parsing
+        // the entire initial tile cache on reconnect.
+        //
+        // If we drop the query string here, the API always thinks `since=0` and will resend the full
+        // tile cache snapshot (potentially ~300k tiles), which can freeze the browser for tens of seconds.
+        //
+        // Therefore we MUST forward the query string verbatim.
+        var requestUri = "/map/updates" + (context.Request.QueryString.HasValue ? context.Request.QueryString.Value : string.Empty);
+        var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
         request.Headers.Add("Accept", "text/event-stream");
 
-    logger.LogWarning("[SSE Proxy] Sending request to API: {RequestUri}", requestUri);
+        // ResponseHeadersRead is load-bearing: the standard resilience handler's total timeout
+        // completes at headers, not at end-of-stream, so the long-lived SSE body survives
         var response = await apiClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
-        
-        logger.LogWarning("[SSE Proxy] API response status: {StatusCode}", response.StatusCode);
-        
+
         if (!response.IsSuccessStatusCode)
         {
-            logger.LogError("[SSE Proxy] API returned error: {StatusCode}", response.StatusCode);
+            // The API logs its own failures; for the browser this is just a failed connect it retries
+            logger.LogDebug("[SSE Proxy] API returned {StatusCode}", response.StatusCode);
             return Results.StatusCode((int)response.StatusCode);
         }
 
         // Set SSE headers before writing anything
         context.Response.ContentType = "text/event-stream";
-        context.Response.Headers.CacheControl = "no-cache";
+        context.Response.Headers.CacheControl = "no-cache, no-transform";
         context.Response.Headers.Connection = "keep-alive";
         context.Response.Headers["X-Accel-Buffering"] = "no";
-        
-        logger.LogWarning("[SSE Proxy] Starting to stream response from API to browser");
+
+        logger.LogDebug("[SSE Proxy] Streaming {RequestUri} from the API", requestUri);
 
         // Stream response from API to browser with buffering disabled
         await using var stream = await response.Content.ReadAsStreamAsync(context.RequestAborted);
-        
+
         var buffer = new byte[4096];
         int bytesRead;
-        
+
         while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, context.RequestAborted)) > 0)
         {
             await context.Response.Body.WriteAsync(buffer, 0, bytesRead, context.RequestAborted);
             await context.Response.Body.FlushAsync(context.RequestAborted);
         }
-        
-        logger.LogWarning("[SSE Proxy] Stream ended");
+
+        logger.LogDebug("[SSE Proxy] Stream ended");
+        return Results.Empty;
+    }
+    catch (OperationCanceledException)
+    {
+        // Browser navigated away, closed the tab, or map-updates.js replaced the stream — normal
         return Results.Empty;
     }
     catch (Exception ex)
     {
         logger.LogError(ex, "[SSE Proxy] Exception while proxying SSE");
-        return Results.StatusCode(500);
+        // Once streaming began the status line is gone; the browser just sees the stream end and reconnects
+        return context.Response.HasStarted ? Results.Empty : Results.StatusCode(500);
     }
 }).RequireAuthorization();
 
@@ -697,46 +698,6 @@ app.MapGet("/api/notifications/stream", async (HttpContext context, IHttpClientF
     catch (Exception ex)
     {
         logger.LogError(ex, "[Notification SSE Proxy] Exception while proxying SSE");
-        return Results.StatusCode(500);
-    }
-}).RequireAuthorization();
-
-// Polling proxy endpoint - forwards poll requests to API service (fallback for SSE)
-// This is needed for VPN users where SSE connections fail
-app.MapGet("/map/api/v1/poll", async (HttpContext context, IHttpClientFactory httpClientFactory, [FromQuery] long? since) =>
-{
-    if (!context.User.Identity?.IsAuthenticated ?? true)
-        return Results.Unauthorized();
-
-    var hasMapAuth = context.User.Claims.Any(c =>
-        c.Type == AuthorizationConstants.ClaimTypes.TenantPermission &&
-        c.Value.Equals(Permission.Map.ToClaimValue(), StringComparison.OrdinalIgnoreCase));
-    if (!hasMapAuth)
-        return Results.Unauthorized();
-
-    try
-    {
-        var apiClient = httpClientFactory.CreateClient("API");
-        var requestUri = since.HasValue ? $"/map/api/v1/poll?since={since}" : "/map/api/v1/poll";
-
-        // Forward auth cookie to API
-        if (context.Request.Headers.TryGetValue("Cookie", out var cookie))
-        {
-            apiClient.DefaultRequestHeaders.Add("Cookie", cookie.ToString());
-        }
-
-        var response = await apiClient.GetAsync(requestUri, context.RequestAborted);
-
-        if (!response.IsSuccessStatusCode)
-            return Results.StatusCode((int)response.StatusCode);
-
-        var content = await response.Content.ReadAsStringAsync(context.RequestAborted);
-        return Results.Content(content, "application/json");
-    }
-    catch (Exception ex)
-    {
-        var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
-        logger.LogError(ex, "[Poll Proxy] Exception while proxying poll request");
         return Results.StatusCode(500);
     }
 }).RequireAuthorization();

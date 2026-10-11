@@ -38,7 +38,19 @@ public class TenantRepository : ITenantRepository
 
     public async Task UpdateAsync(TenantEntity tenant)
     {
-        _context.Tenants.Update(tenant);
+        if (_context.Entry(tenant).State == EntityState.Detached)
+        {
+            _context.Tenants.Update(tenant);
+        }
+
+        // Counters owned by atomic UPDATEs elsewhere (StorageQuotaService, TenantActivityService):
+        // never write back the values read when this entity was loaded — Update() marked every
+        // column modified, so a superadmin rename overwrote the uploads' storage deltas and the
+        // activity flush made since the load.
+        var entry = _context.Entry(tenant);
+        entry.Property(t => t.CurrentStorageMB).IsModified = false;
+        entry.Property(t => t.LastActivityAt).IsModified = false;
+
         await _context.SaveChangesAsync();
     }
 

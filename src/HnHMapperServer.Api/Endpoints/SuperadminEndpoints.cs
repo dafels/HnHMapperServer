@@ -129,6 +129,9 @@ public static class SuperadminEndpoints
         // POST /api/superadmin/integrity/tenants/{tenantId}/purge-orphans - Delete a tenant's orphaned map storage
         group.MapPost("/integrity/tenants/{tenantId}/purge-orphans", PurgeOrphanedMapData);
 
+        // POST /api/superadmin/integrity/tenants/{tenantId}/repair-missing-sources - Repoint rows whose source PNG is gone
+        group.MapPost("/integrity/tenants/{tenantId}/repair-missing-sources", RepairMissingTileSources);
+
         // POST /api/superadmin/integrity/rebuild-webp-drift - Rebuild WebP pyramids of ALL drifted maps
         group.MapPost("/integrity/rebuild-webp-drift", RebuildAllDriftedWebpTiles);
 
@@ -1704,37 +1707,36 @@ public static class SuperadminEndpoints
 
     /// <summary>
     /// DELETE /api/superadmin/tenants/{tenantId}/maps/{mapId}
-    /// Deletes a map and all associated data (tiles, markers, custom markers) for a tenant
+    /// Deletes a map and all associated data through the shared <see cref="IMapDeletionService"/>
+    /// teardown (rows, tile files no other live map uses, both per-map directories, quota). It used
+    /// to remove only the Maps row: Tiles and Grids have no foreign key to Maps, so they stayed on
+    /// the dead id and the next gridUpdate re-anchored to it.
     /// </summary>
     private static async Task<IResult> DeleteTenantMap(
         string tenantId,
         int mapId,
         ApplicationDbContext db,
+        IMapDeletionService mapDeletionService,
+        IUpdateNotificationService notificationService,
+        IHttpClientFactory httpClientFactory,
         IAuditService auditService,
         HttpContext context,
         ILogger<Program> logger)
     {
         try
         {
-            var map = await db.Maps
+            var mapExists = await db.Maps
                 .IgnoreQueryFilters()
-                .FirstOrDefaultAsync(m => m.Id == mapId && m.TenantId == tenantId);
+                .AnyAsync(m => m.Id == mapId && m.TenantId == tenantId);
 
-            if (map == null)
+            if (!mapExists)
                 return Results.NotFound(new { error = "Map not found" });
 
-            // Count related entities before deletion
-            var tileCount = await db.Tiles
-                .IgnoreQueryFilters()
-                .CountAsync(t => t.MapId == mapId && t.TenantId == tenantId);
+            var result = await mapDeletionService.DeleteMapAsync(tenantId, mapId);
 
-            var customMarkerCount = await db.CustomMarkers
-                .IgnoreQueryFilters()
-                .CountAsync(cm => cm.MapId == mapId && cm.TenantId == tenantId);
-
-            // Delete map (cascade will handle tiles, markers, custom markers)
-            db.Maps.Remove(map);
-            await db.SaveChangesAsync();
+            // The Web process keeps its own in-memory WebP cache (the service evicted the API's).
+            await InvalidateWebMapTileCacheAsync(httpClientFactory, tenantId, mapId, logger);
+            notificationService.NotifyMapDeleted(mapId);
 
             // Log audit entry
             var username = context.User.Identity?.Name ?? "Unknown";
@@ -1745,20 +1747,27 @@ public static class SuperadminEndpoints
                 Action = "SuperAdminDeletedMap",
                 EntityType = "Map",
                 EntityId = mapId.ToString(),
-                OldValue = $"Map '{map.Name}' with {tileCount} tiles and {customMarkerCount} custom markers",
+                OldValue = $"Map '{result.MapName}' with {result.Grids} grids, {result.Tiles} tiles, " +
+                           $"{result.Markers} markers and {result.CustomMarkers} custom markers; " +
+                           $"{result.FilesDeleted + result.WebpFilesDeleted} files ({result.MegabytesFreed:F1} MB) deleted, " +
+                           $"{result.FilesKeptShared} shared files kept",
                 NewValue = "Map deleted"
             });
 
             logger.LogWarning("SuperAdmin {Username} deleted map {MapId} ({MapName}) for tenant {TenantId}",
-                username, mapId, map.Name, tenantId);
+                username, mapId, result.MapName, tenantId);
 
             return Results.Ok(new
             {
                 message = "Map deleted successfully",
                 mapId,
-                mapName = map.Name,
-                tilesDeleted = tileCount,
-                customMarkersDeleted = customMarkerCount
+                mapName = result.MapName,
+                tilesDeleted = result.Tiles,
+                customMarkersDeleted = result.CustomMarkers,
+                gridsDeleted = result.Grids,
+                filesDeleted = result.FilesDeleted + result.WebpFilesDeleted,
+                megabytesFreed = result.MegabytesFreed,
+                warnings = result.Warnings
             });
         }
         catch (Exception ex)
@@ -2074,6 +2083,153 @@ public static class SuperadminEndpoints
     }
 
     /// <summary>
+    /// POST /api/superadmin/integrity/tenants/{tenantId}/repair-missing-sources
+    /// Repairs one tenant's live zoom-0 rows whose source PNG is gone, non-destructively by
+    /// default: a row whose cell has exactly one owner grid with a pool PNG is repointed to it;
+    /// the owner of a row without one is re-armed so the next client re-uploads it; contested
+    /// cells are skipped. Every repointed cell is marked dirty, but only those with no row still
+    /// missing are regenerated now: a redraw would drop the still-missing rows from the cell's
+    /// WebP, possibly their last copy (the backstop redraws held cells once nothing in them is
+    /// missing). The audit entry with the restore keys (per map and source directory: shift,
+    /// rows, bytes — and, for a forget, every row those keys cannot rebuild) is written BEFORE the
+    /// opt-in <c>forgetUnrecoverable</c> deletes any row, so a forget never loses where the files
+    /// have to be restored to.
+    /// </summary>
+    private static async Task<IResult> RepairMissingTileSources(
+        string tenantId,
+        RepairMissingTileSourcesRequestDto dto,
+        IMapIntegrityService integrityService,
+        ITileService tileService,
+        ILargeTileService largeTileService,
+        HnHMapperServer.Services.Services.ZoomTileQueueService zoomTileQueue,
+        TileCacheService tileCacheService,
+        IHttpClientFactory httpClientFactory,
+        IAuditService auditService,
+        HttpContext context,
+        ILogger<Program> logger)
+    {
+        if (dto == null || !string.Equals(dto.ConfirmTenantId, tenantId, StringComparison.Ordinal))
+        {
+            return Results.BadRequest(new { error = "confirmTenantId must match the tenant being repaired" });
+        }
+
+        var adminUsername = context.User.Identity?.Name ?? "Unknown";
+        var adminUserId = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? adminUsername;
+
+        try
+        {
+            var result = await integrityService.RepairMissingTileSourcesAsync(tenantId);
+
+            // Regenerate exactly the repointed cells that hold no missing row. Not a whole-map
+            // rebuild: that deletes every WebP file of the map first — including the last copy of
+            // areas still dark.
+            foreach (var (mapId, coords) in result.RepointedBaseCoords)
+            {
+                result.CellsEnqueued += await RegenerateWebpCellsAsync(
+                    tenantId, mapId, coords, result.RedrawBaseCoords.GetValueOrDefault(mapId) ?? new(),
+                    tileService, largeTileService, zoomTileQueue, httpClientFactory, logger);
+            }
+
+            if (result.RowsRepointed > 0)
+            {
+                await tileCacheService.InvalidateCacheAsync(tenantId);
+            }
+
+            var forgetting = dto.ForgetUnrecoverable && result.UnrecoverableRowIds.Count > 0;
+            await auditService.LogAsync(new AuditEntry
+            {
+                TenantId = tenantId,
+                UserId = adminUserId,
+                Action = "SuperAdminRepairedMissingTileSources",
+                EntityType = "Tenant",
+                EntityId = tenantId,
+                OldValue = JsonSerializer.Serialize(new
+                {
+                    result.MissingRows,
+                    result.RowsRepointed,
+                    result.GridsRearmed,
+                    result.AmbiguousSkipped,
+                    result.CellsHeldForRestore,
+                    Unrecoverable = result.UnrecoverableRowIds.Count,
+                    result.RestoreKeys,
+                    // Only a forget needs them: kept rows still name their own path.
+                    UnkeyedRows = forgetting ? result.UnkeyedRows : new List<string>()
+                }),
+                NewValue = forgetting
+                    ? $"Repaired by {adminUsername}; forgetting {result.UnrecoverableRowIds.Count} unrecoverable row(s) next"
+                    : $"Repaired by {adminUsername}; {result.UnrecoverableRowIds.Count} unrecoverable row(s) kept for restore"
+            });
+
+            if (forgetting)
+            {
+                result.RowsForgotten = await integrityService.ForgetMissingTileSourceRowsAsync(
+                    tenantId, result.UnrecoverableRowIds);
+            }
+            result.RowsLeftForRestore = result.UnrecoverableRowIds.Count - result.RowsForgotten;
+
+            logger.LogWarning(
+                "SuperAdmin {Username} repaired missing tile sources of tenant {TenantId}: {Missing} missing rows, " +
+                "{Repointed} repointed to the grid pool, {Rearmed} grids re-armed, {Ambiguous} contested skipped, " +
+                "{Forgotten} forgotten, {Left} left for restore",
+                adminUsername, tenantId, result.MissingRows, result.RowsRepointed, result.GridsRearmed,
+                result.AmbiguousSkipped, result.RowsForgotten, result.RowsLeftForRestore);
+
+            return Results.Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error repairing missing tile sources for tenant {TenantId}", tenantId);
+            return Results.Problem("Failed to repair missing tile sources");
+        }
+    }
+
+    /// <summary>
+    /// Regenerates WebP cells without touching the rest of the map's pyramid: durable marks
+    /// (DirtyWebpCells, the 5-minute backstop) for every cell covering <paramref name="markCoords"/>,
+    /// and the fast queue, up to the shared headroom, for the cells covering
+    /// <paramref name="redrawCoords"/>; the queue's processor overwrites the chain, bumps the map
+    /// revision and evicts the Web cache. Both processes' negative caches are cleared for the map
+    /// first, so cells that were dark do not keep answering 404. Returns the cells queued now.
+    /// </summary>
+    private static async Task<int> RegenerateWebpCellsAsync(
+        string tenantId,
+        int mapId,
+        IReadOnlyCollection<HnHMapperServer.Core.Models.Coord> markCoords,
+        IReadOnlyCollection<HnHMapperServer.Core.Models.Coord> redrawCoords,
+        ITileService tileService,
+        ILargeTileService largeTileService,
+        HnHMapperServer.Services.Services.ZoomTileQueueService zoomTileQueue,
+        IHttpClientFactory httpClientFactory,
+        ILogger logger)
+    {
+        largeTileService.InvalidateMapCache(tenantId, mapId);
+        await InvalidateWebMapTileCacheAsync(httpClientFactory, tenantId, mapId, logger);
+
+        await tileService.MarkParentTilesDirtyBatchAsync(tenantId, mapId, markCoords);
+
+        var enqueued = 0;
+        foreach (var cell in redrawCoords.Select(c => (X: (int)Math.Floor(c.X / 4.0), Y: (int)Math.Floor(c.Y / 4.0))).Distinct())
+        {
+            if (zoomTileQueue.PendingCount >= HnHMapperServer.Services.Services.ZoomTileQueueService.BulkEnqueueDepthLimit)
+            {
+                break; // the backstop takes the rest
+            }
+
+            if (zoomTileQueue.EnqueueZoomRegeneration(
+                    new HnHMapperServer.Services.Services.ZoomTileRequest(tenantId, mapId, cell.X * 4, cell.Y * 4)))
+            {
+                enqueued++;
+            }
+        }
+
+        return enqueued;
+    }
+
+    /// <summary>
     /// POST /api/superadmin/tenants/{tenantId}/maps/{mapId}/rebuild-webp-tiles
     /// Deletes the map's whole WebP pyramid and seeds regeneration from current zoom-0 truth.
     /// The repair tool for pyramid/database drift: stale ghost imagery disappears, missing areas
@@ -2143,8 +2299,9 @@ public static class SuperadminEndpoints
 
     /// <summary>
     /// The rebuild itself, shared by the per-map endpoint and rebuild-all-drift: drop the old
-    /// pyramid (files + both processes' caches), seed regeneration (durable dirty rows + fast
-    /// queue up to a shared headroom cap), and bump the map revision so viewers refetch.
+    /// pyramid (files + both processes' caches), seed regeneration (DirtyWebpCells marks for the
+    /// 5-minute backstop + fast queue up to the shared headroom cap), and bump the map revision
+    /// so viewers refetch.
     /// </summary>
     private static async Task<RebuildWebpTilesResultDto> RebuildMapWebpCoreAsync(
         string tenantId,
@@ -2164,8 +2321,9 @@ public static class SuperadminEndpoints
         // 2. Evict the Web process's in-memory cache too.
         await InvalidateWebMapTileCacheAsync(httpClientFactory, tenantId, mapId, logger);
 
-        // 3. Seed regeneration: every distinct 4x4 cell with renderable zoom-0 rows. Dirty
-        //    rows are the durable path (5-minute scan); the queue covers the first cells fast.
+        // 3. Seed regeneration: every distinct 4x4 cell with renderable zoom-0 rows. The
+        //    DirtyWebpCells marks written here are the durable path (5-minute backstop); the queue
+        //    covers the first cells fast.
         var zoom0Coords = await db.Tiles
             .AsNoTracking()
             .IgnoreQueryFilters()
@@ -2185,7 +2343,7 @@ public static class SuperadminEndpoints
         var enqueued = 0;
         foreach (var cell in cells)
         {
-            if (zoomTileQueue.PendingCount >= 3000)
+            if (zoomTileQueue.PendingCount >= HnHMapperServer.Services.Services.ZoomTileQueueService.BulkEnqueueDepthLimit)
             {
                 break; // bounded queue: leave headroom for live uploads; the scan takes the rest
             }
@@ -2213,8 +2371,11 @@ public static class SuperadminEndpoints
     /// <summary>
     /// POST /api/superadmin/integrity/rebuild-webp-drift
     /// The one-click repair: reruns the drift scan server-side and rebuilds the WebP pyramid of
-    /// every map it flags (ghost or stale files). Regeneration is seeded durably per map, so any
+    /// every map it flags with ghost or stale files. Regeneration is seeded durably per map, so any
     /// number of maps completes via the 5-minute backstop even when the fast queue fills up.
+    /// Skipped: maps with missing tile sources (the rebuild's full-pyramid delete would take the
+    /// last WebP copy of their dark areas with it — they are rebuilt one by one after a restore)
+    /// and maps whose only drift is empty files (serving and the batch regenerate those).
     /// </summary>
     private static async Task<IResult> RebuildAllDriftedWebpTiles(
         RebuildAllDriftRequestDto dto,
@@ -2242,9 +2403,24 @@ public static class SuperadminEndpoints
             // The server decides what is drifted — never a client-supplied list.
             var report = await integrityService.ScanAsync();
             var result = new RebuildAllDriftResultDto();
+            var missingSources = report.MissingTileSources
+                .Select(m => (m.TenantId, m.MapId))
+                .ToHashSet();
 
             foreach (var drift in report.WebpDrift)
             {
+                if (missingSources.Contains((drift.TenantId, drift.MapId)))
+                {
+                    result.SkippedMissingSources.Add($"{drift.TenantId}/{drift.MapId} ({drift.MapName})");
+                    continue;
+                }
+
+                if (drift.GhostFiles == 0 && drift.StaleFiles == 0)
+                {
+                    result.SkippedEmptyFilesOnly++;
+                    continue;
+                }
+
                 var mapResult = await RebuildMapWebpCoreAsync(
                     drift.TenantId, drift.MapId, db, largeTileService, tileService, zoomTileQueue,
                     revisionCache, notificationService, httpClientFactory, logger);
@@ -2264,14 +2440,22 @@ public static class SuperadminEndpoints
                 Action = "SuperAdminRebuiltAllDriftedWebpTiles",
                 EntityType = "System",
                 EntityId = "webp-drift",
-                OldValue = JsonSerializer.Serialize(new { result.MapsRebuilt, result.FilesDeleted, result.MegabytesFreed }),
+                OldValue = JsonSerializer.Serialize(new
+                {
+                    result.MapsRebuilt,
+                    result.FilesDeleted,
+                    result.MegabytesFreed,
+                    result.SkippedMissingSources,
+                    result.SkippedEmptyFilesOnly
+                }),
                 NewValue = $"Rebuilt WebP pyramids of {result.MapsRebuilt} drifted map(s) by {adminUsername}: " +
                            string.Join(", ", result.Maps)
             });
 
             logger.LogWarning(
-                "SuperAdmin {Username} rebuilt WebP pyramids of {Count} drifted maps: {Maps}",
-                adminUsername, result.MapsRebuilt, string.Join(", ", result.Maps));
+                "SuperAdmin {Username} rebuilt WebP pyramids of {Count} drifted maps: {Maps}; skipped {SkippedMissing} with missing tile sources ({SkippedMaps}) and {SkippedEmpty} with only empty files",
+                adminUsername, result.MapsRebuilt, string.Join(", ", result.Maps),
+                result.SkippedMissingSources.Count, string.Join(", ", result.SkippedMissingSources), result.SkippedEmptyFilesOnly);
 
             return Results.Ok(result);
         }
@@ -2285,19 +2469,21 @@ public static class SuperadminEndpoints
     /// <summary>
     /// Tells the Web process to drop its in-memory WebP cache for one map (it holds its own
     /// LargeTileService statics). Best-effort — a miss only means up to a few stale in-memory
-    /// hits until natural eviction.
+    /// hits until natural eviction. Returns false when the Web process could not be reached.
     /// </summary>
-    private static async Task InvalidateWebMapTileCacheAsync(
+    internal static async Task<bool> InvalidateWebMapTileCacheAsync(
         IHttpClientFactory httpClientFactory, string tenantId, int mapId, ILogger logger)
     {
         try
         {
             var webClient = httpClientFactory.CreateClient("Web");
             await webClient.PostAsJsonAsync("/internal/tile-cache/invalidate-map", new { tenantId, mapId });
+            return true;
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to invalidate Web tile cache for tenant {TenantId} map {MapId}", tenantId, mapId);
+            return false;
         }
     }
 

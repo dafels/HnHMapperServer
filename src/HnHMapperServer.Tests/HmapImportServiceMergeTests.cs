@@ -32,6 +32,7 @@ public class HmapImportServiceMergeTests : IDisposable
     private readonly string _gridStorage;
     private readonly HmapImportService _importService;
     private readonly IGridRepository _gridRepository;
+    private readonly List<long> _quotaDeltaBytes = new();
 
     private const string TestTenantId = "default-tenant-1";
 
@@ -75,6 +76,9 @@ public class HmapImportServiceMergeTests : IDisposable
 
         var mockNotificationService = new Mock<IUpdateNotificationService>();
         var mockQuotaService = new Mock<IStorageQuotaService>();
+        mockQuotaService.Setup(q => q.IncrementStorageUsageAsync(It.IsAny<string>(), It.IsAny<double>()))
+            .Callback<string, double>((_, mb) => _quotaDeltaBytes.Add((long)Math.Round(mb * 1024 * 1024)))
+            .Returns(Task.CompletedTask);
         var mockMapNameService = new Mock<IMapNameService>();
         mockMapNameService.Setup(x => x.GenerateUniqueIdentifierAsync(It.IsAny<string>()))
             .ReturnsAsync(() => $"import-map-{Guid.NewGuid():N}");
@@ -252,5 +256,49 @@ public class HmapImportServiceMergeTests : IDisposable
         Assert.Equal(1, g7.Map);
         Assert.Equal(new Coord(5, 0), g6.Coord);
         Assert.Equal(new Coord(6, 0), g7.Coord);
+    }
+
+    /// <summary>
+    /// A merge import re-renders zoom parents that are already on disk (the new grids share them
+    /// with the existing area). ZoomTileCache used to charge every written tile at full size;
+    /// it now subtracts the bytes it replaced, so the quota moves by the change on disk.
+    /// </summary>
+    [Fact]
+    public async Task ImportAsync_MergeIntoExistingMap_QuotaDeltaEqualsNonWebpDiskDelta()
+    {
+        using (var first = BuildHmap((1, 0, 0), (2, 1, 0), (3, 2, 0), (4, 3, 0), (5, 4, 0)))
+        {
+            var created = await _importService.ImportAsync(first, TestTenantId, HmapImportMode.Merge, _gridStorage);
+            Assert.True(created.Success, created.ErrorMessage);
+            Assert.Equal(1, created.MapsCreated);
+        }
+
+        var tenantDir = Path.Combine(_gridStorage, "tenants", TestTenantId);
+        var before = NonWebpTenantBytes(tenantDir);
+        Assert.True(before > 0);
+        var zoomFilesBefore = Directory.EnumerateFiles(tenantDir, "*.png", SearchOption.AllDirectories)
+            .Where(f => !f.Contains(Path.DirectorySeparatorChar + "0" + Path.DirectorySeparatorChar))
+            .ToDictionary(f => f, f => File.GetLastWriteTimeUtc(f));
+        _quotaDeltaBytes.Clear();
+        await Task.Delay(20); // distinguishable write times
+
+        using var second = BuildHmap((1, 0, 0), (2, 1, 0), (3, 2, 0), (4, 3, 0), (5, 4, 0), (6, 5, 0), (7, 6, 0));
+        var merged = await _importService.ImportAsync(second, TestTenantId, HmapImportMode.Merge, _gridStorage);
+
+        Assert.True(merged.Success, merged.ErrorMessage);
+        Assert.Equal(2, merged.GridsMerged);
+        // The scenario really re-rendered parents that were already on disk.
+        Assert.Contains(zoomFilesBefore, kv => File.Exists(kv.Key) && File.GetLastWriteTimeUtc(kv.Key) > kv.Value);
+        Assert.Equal(NonWebpTenantBytes(tenantDir) - before, _quotaDeltaBytes.Sum());
+    }
+
+    /// <summary>Bytes under tenants/{t}/ excluding the reconciled-only WebP pyramid and .storage.json.</summary>
+    private static long NonWebpTenantBytes(string tenantDir)
+    {
+        if (!Directory.Exists(tenantDir)) return 0;
+        var large = Path.Combine(tenantDir, "large") + Path.DirectorySeparatorChar;
+        return Directory.EnumerateFiles(tenantDir, "*", SearchOption.AllDirectories)
+            .Where(f => !f.StartsWith(large, StringComparison.Ordinal) && Path.GetFileName(f) != ".storage.json")
+            .Sum(f => new FileInfo(f).Length);
     }
 }

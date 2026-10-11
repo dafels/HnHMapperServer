@@ -53,6 +53,10 @@ internal sealed class ZoomTileCache : IDisposable
     // Total storage size for quota update
     private double _totalStorageMB;
 
+    // Bytes of existing files the flushes overwrote (merge imports re-render parents that are
+    // already on disk): subtracted so the quota moves by the change on disk, not the full size.
+    private long _replacedBytes;
+
     private bool _disposed;
 
     /// <summary>
@@ -164,6 +168,7 @@ internal sealed class ZoomTileCache : IDisposable
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
 
+                    Interlocked.Add(ref _replacedBytes, AtomicFile.LengthOrZero(write.Path));
                     await File.WriteAllBytesAsync(write.Path, write.Data, ct);
                 });
         }
@@ -172,7 +177,8 @@ internal sealed class ZoomTileCache : IDisposable
     }
 
     /// <summary>
-    /// Gets all pending tile metadata and total storage for batch DB write.
+    /// Gets all pending tile metadata and the storage change for batch DB write: the bytes queued
+    /// minus the bytes of the files the flushes replaced (call after the final flush).
     /// Clears the pending lists after extraction.
     /// </summary>
     public (List<TileData> tiles, double totalMB) ExtractPendingMetadata()
@@ -180,7 +186,7 @@ internal sealed class ZoomTileCache : IDisposable
         ThrowIfDisposed();
 
         var tiles = _pendingTileData.ToList();
-        var totalMB = _totalStorageMB;
+        var totalMB = _totalStorageMB - Interlocked.Exchange(ref _replacedBytes, 0) / (1024.0 * 1024.0);
 
         _pendingTileData.Clear();
         _totalStorageMB = 0;

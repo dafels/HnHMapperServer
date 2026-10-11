@@ -7,6 +7,7 @@
 @inject NavigationManager Navigation
 @inject IDialogService DialogService
 @inject ISnackbar Snackbar
+@inject ILogger<EventsPanel> Logger
 @implements IAsyncDisposable
 
 <!-- Header with Create Timer button -->
@@ -256,6 +257,7 @@
     // Cache marker data for icon display and navigation
     private Dictionary<int, FrontendMarker> _markerCache = new();
     private Dictionary<int, CustomMarkerViewDto> _customMarkerCache = new();
+    private readonly HashSet<int> _missingCustomMarkerIds = new();
 
     // Periodic timer for real-time updates
     private System.Threading.Timer? _updateTimer;
@@ -298,7 +300,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error loading timer history: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error loading timer history");
         }
         finally
         {
@@ -515,7 +517,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error completing timer: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error completing timer");
             Snackbar.Add("Failed to complete timer", Severity.Error);
         }
     }
@@ -538,7 +540,7 @@
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error deleting timer: {ex.Message}");
+                Logger.Log(UiLog.FailureLevel(ex), ex, "Error deleting timer");
                 Snackbar.Add("Failed to delete timer", Severity.Error);
             }
         }
@@ -585,24 +587,16 @@
                 // For now, we'll try to fetch individual custom markers by ID
                 foreach (var customMarkerId in customMarkerIds)
                 {
-                    try
-                    {
-                        var customMarker = await httpClient.GetFromJsonAsync<CustomMarkerViewDto>($"/map/api/v1/custom-markers/{customMarkerId}");
-                        if (customMarker != null)
-                        {
-                            _customMarkerCache[customMarker.Id] = customMarker;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error loading custom marker {customMarkerId}: {ex.Message}");
-                    }
+                    if (_missingCustomMarkerIds.Contains(customMarkerId))
+                        continue;
+
+                    await LoadCustomMarkerAsync(httpClient, customMarkerId);
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error loading marker data: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error loading marker data for timers");
         }
     }
 
@@ -644,28 +638,43 @@
             {
                 foreach (var customMarkerId in customMarkerIds)
                 {
-                    // Skip if already cached
-                    if (_customMarkerCache.ContainsKey(customMarkerId))
+                    // Skip if already cached or known to be deleted
+                    if (_customMarkerCache.ContainsKey(customMarkerId) || _missingCustomMarkerIds.Contains(customMarkerId))
                         continue;
 
-                    try
-                    {
-                        var customMarker = await httpClient.GetFromJsonAsync<CustomMarkerViewDto>($"/map/api/v1/custom-markers/{customMarkerId}");
-                        if (customMarker != null)
-                        {
-                            _customMarkerCache[customMarker.Id] = customMarker;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error loading custom marker {customMarkerId}: {ex.Message}");
-                    }
+                    await LoadCustomMarkerAsync(httpClient, customMarkerId);
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error loading marker data for history: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error loading marker data for timer history");
+        }
+    }
+
+    /// <summary>
+    /// Fetch one custom marker into the cache. A 404 is routine, not a failure: TimerHistory has no
+    /// foreign key to CustomMarkers, so a deleted marker's id stays in the history. Such ids are
+    /// logged at Debug and remembered, so the panel stops refetching them.
+    /// </summary>
+    private async Task LoadCustomMarkerAsync(HttpClient httpClient, int customMarkerId)
+    {
+        try
+        {
+            var customMarker = await httpClient.GetFromJsonAsync<CustomMarkerViewDto>($"/map/api/v1/custom-markers/{customMarkerId}");
+            if (customMarker != null)
+            {
+                _customMarkerCache[customMarker.Id] = customMarker;
+            }
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            _missingCustomMarkerIds.Add(customMarkerId);
+            Logger.LogDebug("Custom marker {CustomMarkerId} no longer exists", customMarkerId);
+        }
+        catch (Exception ex)
+        {
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error loading custom marker {CustomMarkerId}", customMarkerId);
         }
     }
 

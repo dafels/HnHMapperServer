@@ -1,4 +1,5 @@
 using HnHMapperServer.Core.DTOs;
+using HnHMapperServer.Core.Models;
 using HnHMapperServer.Infrastructure.Data;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
@@ -23,6 +24,12 @@ namespace HnHMapperServer.Services.Services;
 /// later merge copies the rows, File path unchanged, to the target map) — such directories are
 /// kept and reported. Pool PNGs are kept if any tile row references them or a grid row with that
 /// id exists (an upload can write the PNG before its tile row commits).
+///
+/// The opposite failure is reported too: live zoom-0 rows whose source PNG is gone (merges
+/// used to delete imported maps' directories). Those rows are the restore key — exact
+/// path and size — so the scan only reports them. The repair (RepairMissingTileSourcesAsync)
+/// only repoints a row to a pool PNG of its cell's single owner grid and re-arms grids; rows are
+/// deleted only by the explicit, audited forget, after their restore keys were recorded.
 /// </summary>
 public class MapIntegrityService : IMapIntegrityService
 {
@@ -142,9 +149,10 @@ public class MapIntegrityService : IMapIntegrityService
         _logger.LogInformation(
             "Map integrity scan: {Tenants} tenants, {Grids} grids, {ContestedMaps} maps with contested cells, " +
             "{Placeholders} placeholder rows, {OrphanTenants} tenants with orphaned storage, " +
-            "{DriftMaps} maps with WebP pyramid drift",
+            "{DriftMaps} maps with WebP pyramid drift, {MissingSourceMaps} maps with missing tile source files",
             report.TenantsScanned, report.TotalGrids, report.ContestedMaps.Count,
-            report.PlaceholderRows.Count, report.OrphanStorage.Count, report.WebpDrift.Count);
+            report.PlaceholderRows.Count, report.OrphanStorage.Count, report.WebpDrift.Count,
+            report.MissingTileSources.Count);
 
         return report;
     }
@@ -164,8 +172,11 @@ public class MapIntegrityService : IMapIntegrityService
     /// zoom-0 rows (the pyramid's ground truth). A zoom-z file at (X,Y) covers base coords
     /// [X·4·2^z, (X+1)·4·2^z): no rows in the footprint → ghost (renders deleted/moved terrain);
     /// file mtime older than the newest row in the footprint → stale (missing content added
-    /// since). Cells with rows but no zoom-0 file are only informational — on-the-fly generation
-    /// heals those the moment someone looks.
+    /// since); shorter than a WebP header → empty (residue of an interrupted write). Cells with
+    /// rows but no zoom-0 file are only informational — generation heals those on view, but only
+    /// where the cell's source PNGs exist. From the same per-tenant rows it also collects
+    /// <see cref="MissingTileSourcesDto"/>: rows whose source PNG is gone, which no generation
+    /// or rebuild can heal.
     /// </summary>
     private async Task ScanWebpDriftAsync(MapIntegrityReportDto report, CancellationToken ct)
     {
@@ -184,14 +195,32 @@ public class MapIntegrityService : IMapIntegrityService
             // One query per tenant: all zoom-0 rows, grouped per map in memory.
             var rows = await _db.Tiles.IgnoreQueryFilters()
                 .Where(t => t.TenantId == tenantGroup.Key && t.Zoom == 0 && t.File != "")
-                .Select(t => new { t.MapId, t.CoordX, t.CoordY, t.Cache })
+                .Select(t => new ZoomZeroRow(t.MapId, t.CoordX, t.CoordY, t.Cache, t.File))
                 .ToListAsync(ct);
             var rowsByMap = rows.GroupBy(r => r.MapId).ToDictionary(g => g.Key, g => g.ToList());
+
+            // Source-file checks for this tenant: one directory listing per directory, not a
+            // stat per row. Grid owners load only if some row is missing.
+            var sourceFiles = new SourceFileIndex(gridStorage);
+            var liveMapIds = tenantGroup.Select(m => m.Id).ToHashSet();
+            Dictionary<(int Map, int X, int Y), List<string>>? gridOwners = null;
 
             foreach (var map in tenantGroup)
             {
                 var largeDir = Path.Combine(gridStorage, "tenants", map.TenantId, "large", map.Id.ToString());
                 var mapRows = rowsByMap.GetValueOrDefault(map.Id);
+
+                if (mapRows is { Count: > 0 })
+                {
+                    var missingRows = mapRows.Where(r => !sourceFiles.Exists(r.File)).ToList();
+                    if (missingRows.Count > 0)
+                    {
+                        gridOwners ??= await LoadGridOwnersAsync(map.TenantId, ct);
+                        report.MissingTileSources.Add(BuildMissingTileSources(
+                            map.TenantId, tenantNames.GetValueOrDefault(map.TenantId, map.TenantId),
+                            map.Id, map.Name, mapRows, missingRows, liveMapIds, gridOwners, sourceFiles));
+                    }
+                }
 
                 if ((mapRows == null || mapRows.Count == 0) && !Directory.Exists(largeDir))
                     continue;
@@ -240,6 +269,17 @@ public class MapIntegrityService : IMapIntegrityService
                         if (!TryParseTileName(file.Name, out var x, out var y))
                             continue;
 
+                        // Zero-length/short file (FileInfo.Length comes with the enumeration, no
+                        // extra IO). Not entered in fileTimes: it must not drive the derivation
+                        // rule, and a zoom-0 one counts as a missing cell — which it is.
+                        if (file.Length < WebpTileFile.HeaderLength)
+                        {
+                            drift.FilesChecked++;
+                            drift.CorruptFiles++;
+                            AddDriftSample(drift, z, x, y, "empty");
+                            continue;
+                        }
+
                         drift.FilesChecked++;
                         fileTimes[z][(x, y)] = file.LastWriteTimeUtc;
 
@@ -268,7 +308,7 @@ public class MapIntegrityService : IMapIntegrityService
 
                 drift.MissingZoom0Cells = levels[0].Keys.Count(c => !fileTimes[0].ContainsKey(c));
 
-                if (drift.GhostFiles > 0 || drift.StaleFiles > 0)
+                if (drift.GhostFiles > 0 || drift.StaleFiles > 0 || drift.CorruptFiles > 0)
                 {
                     report.WebpDrift.Add(drift);
                 }
@@ -276,9 +316,226 @@ public class MapIntegrityService : IMapIntegrityService
         }
 
         report.WebpDrift = report.WebpDrift
-            .OrderByDescending(d => d.GhostFiles + d.StaleFiles)
+            .OrderByDescending(d => d.GhostFiles + d.StaleFiles + d.CorruptFiles)
+            .ToList();
+        report.MissingTileSources = report.MissingTileSources
+            .OrderByDescending(m => m.DarkCells)
+            .ThenByDescending(m => m.MissingRows)
             .ToList();
     }
+
+    /// <summary>Zoom-0 tile row as the pyramid scans read it.</summary>
+    private sealed record ZoomZeroRow(int MapId, int CoordX, int CoordY, long Cache, string File);
+
+    /// <summary>
+    /// Answers "does the file this row names exist?" exactly as tile generation resolves it
+    /// (<c>Path.Combine(GridStorage, File)</c>), from one listing per directory: a tenant's pool
+    /// holds ~100k PNGs, and a stat per row would make the scan seconds slower. A name absent from
+    /// the listing is confirmed with a stat (written after the listing, or a case-only mismatch on
+    /// a case-insensitive file system), so a miss is never a false alarm.
+    /// </summary>
+    private sealed class SourceFileIndex(string gridStorage)
+    {
+        private readonly Dictionary<string, HashSet<string>?> _listings = new(StringComparer.Ordinal);
+
+        public bool Exists(string relativeFile)
+        {
+            var fullPath = Path.Combine(gridStorage, relativeFile);
+            var dir = Path.GetDirectoryName(fullPath);
+            var name = Path.GetFileName(fullPath);
+            if (string.IsNullOrEmpty(dir) || name.Length == 0)
+            {
+                return File.Exists(fullPath);
+            }
+
+            if (!_listings.TryGetValue(dir, out var names))
+            {
+                names = Directory.Exists(dir)
+                    ? Directory.EnumerateFiles(dir).Select(f => Path.GetFileName(f)!).ToHashSet(StringComparer.Ordinal)
+                    : null;
+                _listings[dir] = names;
+            }
+
+            return (names != null && names.Contains(name)) || File.Exists(fullPath);
+        }
+    }
+
+    /// <summary>Grid ids per (map, cell) of one tenant — the owners a missing row could be repointed to.</summary>
+    private async Task<Dictionary<(int Map, int X, int Y), List<string>>> LoadGridOwnersAsync(
+        string tenantId, CancellationToken ct)
+    {
+        var grids = await _db.Grids.IgnoreQueryFilters()
+            .Where(g => g.TenantId == tenantId)
+            .Select(g => new { g.Id, g.Map, g.CoordX, g.CoordY })
+            .ToListAsync(ct);
+
+        var owners = new Dictionary<(int Map, int X, int Y), List<string>>();
+        foreach (var grid in grids)
+        {
+            var key = (grid.Map, grid.CoordX, grid.CoordY);
+            if (!owners.TryGetValue(key, out var ids))
+            {
+                owners[key] = ids = new List<string>();
+            }
+            ids.Add(grid.Id);
+        }
+        return owners;
+    }
+
+    /// <summary>What the repair can do for one missing row (the scan predicts with the same rule).</summary>
+    private enum MissingRowFix
+    {
+        /// <summary>Single owner grid with a pool PNG: point the row at it.</summary>
+        Repoint,
+
+        /// <summary>Single owner grid without a pool PNG: make it requestable so a client re-uploads it.</summary>
+        Rearm,
+
+        /// <summary>No owner grid, or one whose id is not a plain file name: only a restore helps.</summary>
+        NoGrid,
+
+        /// <summary>Several owner grids (contested cell): whose pool PNG would be the right one?</summary>
+        Contested
+    }
+
+    private static (MissingRowFix Fix, string? OwnerId, string? PoolFile) ClassifyMissingRow(
+        string tenantId, int mapId, int x, int y,
+        Dictionary<(int Map, int X, int Y), List<string>> gridOwners, SourceFileIndex sourceFiles)
+    {
+        if (!gridOwners.TryGetValue((mapId, x, y), out var owners))
+        {
+            return (MissingRowFix.NoGrid, null, null);
+        }
+
+        if (owners.Count > 1)
+        {
+            return (MissingRowFix.Contested, null, null);
+        }
+
+        // Built only from a safe id, so the path is canonical and stays in the tenant's pool.
+        var poolFile = TenantFilePathService.PoolRelativePath(tenantId, owners[0]);
+        if (poolFile == null)
+        {
+            return (MissingRowFix.NoGrid, null, null);
+        }
+
+        return sourceFiles.Exists(poolFile)
+            ? (MissingRowFix.Repoint, owners[0], poolFile)
+            : (MissingRowFix.Rearm, owners[0], null);
+    }
+
+    /// <summary>WebP zoom-0 cell (4x4 base grids) of a row, floor-divided.</summary>
+    private static (int MapId, int X, int Y) CellOf(int mapId, int x, int y) => (mapId, FloorDiv(x, 4), FloorDiv(y, 4));
+
+    /// <summary>
+    /// Describes one live map's rows whose source PNG is missing: how many, which 4x4 cells are
+    /// completely or partly dark, what the repair could do per row (repoint to the single owner
+    /// grid's pool PNG, re-arm the owner, nothing without an owner, skip a contested cell), which
+    /// cells it would leave undrawn, and where the files used to live — per directory, with the
+    /// merge shift (row coord minus the coord in the per-map file name), which identifies where
+    /// to restore them from.
+    /// </summary>
+    private static MissingTileSourcesDto BuildMissingTileSources(
+        string tenantId, string tenantName, int mapId, string mapName,
+        List<ZoomZeroRow> mapRows, List<ZoomZeroRow> missingRows, HashSet<int> liveMapIds,
+        Dictionary<(int Map, int X, int Y), List<string>> gridOwners, SourceFileIndex sourceFiles)
+    {
+        var entry = new MissingTileSourcesDto
+        {
+            TenantId = tenantId,
+            TenantName = tenantName,
+            MapId = mapId,
+            MapName = mapName,
+            MissingRows = missingRows.Count
+        };
+
+        // Dark = every row of the 4x4 cell is missing; partly dark = some (still drawn, without them).
+        var rowsPerCell = mapRows.GroupBy(r => CellOf(mapId, r.CoordX, r.CoordY)).ToDictionary(g => g.Key, g => g.Count());
+        foreach (var cell in missingRows.GroupBy(r => CellOf(mapId, r.CoordX, r.CoordY)))
+        {
+            if (cell.Count() == rowsPerCell[cell.Key])
+                entry.DarkCells++;
+            else
+                entry.PartlyDarkCells++;
+        }
+
+        var repointCells = new HashSet<(int, int, int)>();
+        var stillMissingCells = new HashSet<(int, int, int)>();
+        var byDirectory = new Dictionary<string, (int Rows, (int X, int Y)? Shift, bool Mixed)>(StringComparer.Ordinal);
+        foreach (var row in missingRows)
+        {
+            var cell = CellOf(mapId, row.CoordX, row.CoordY);
+            switch (ClassifyMissingRow(tenantId, mapId, row.CoordX, row.CoordY, gridOwners, sourceFiles).Fix)
+            {
+                case MissingRowFix.Repoint:
+                    entry.RecoverableFromPool++;
+                    repointCells.Add(cell);
+                    break;
+                case MissingRowFix.Contested:
+                    entry.AmbiguousCells++;
+                    stillMissingCells.Add(cell);
+                    break;
+                case MissingRowFix.NoGrid:
+                    entry.RowsWithoutGrid++;
+                    stillMissingCells.Add(cell);
+                    break;
+                case MissingRowFix.Rearm:
+                    stillMissingCells.Add(cell);
+                    break;
+            }
+
+            var (directory, shift) = DescribeSourceDirectory(row, mapId, liveMapIds);
+            byDirectory[directory] = byDirectory.TryGetValue(directory, out var current)
+                ? (current.Rows + 1, current.Shift, current.Mixed || !Nullable.Equals(current.Shift, shift))
+                : (1, shift, false);
+
+            if (entry.SampleFiles.Count < DriftSampleCap)
+            {
+                entry.SampleFiles.Add(row.File);
+            }
+        }
+
+        entry.RepairHeldCells = repointCells.Count(stillMissingCells.Contains);
+
+        entry.ByDirectory = byDirectory
+            .OrderByDescending(kv => kv.Value.Rows)
+            .Select(kv =>
+            {
+                var shift = kv.Value.Mixed
+                    ? " shift=mixed"
+                    : kv.Value.Shift is { } s ? $" shift=({s.X},{s.Y})" : string.Empty;
+                return $"{kv.Key}{shift}: {kv.Value.Rows} rows";
+            })
+            .ToList();
+
+        return entry;
+    }
+
+    /// <summary>
+    /// The directory a missing row's file lived in. For a per-map zoom-0 file
+    /// (tenants/{t}/{mapId}/0/{x}_{y}.png, what .hmap/public-map imports write) also the shift
+    /// between the row's cell and the cell in the file name, and whether that map is gone.
+    /// </summary>
+    private static (string Directory, (int X, int Y)? Shift) DescribeSourceDirectory(
+        ZoomZeroRow row, int mapId, HashSet<int> liveMapIds)
+    {
+        var segments = NormalizePath(row.File).Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 5 && segments[0] == "tenants" && segments[3] == "0"
+            && int.TryParse(segments[2], out var dirMapId)
+            && segments[4].EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+            && TryParseTileName(segments[4][..^4], out var fileX, out var fileY))
+        {
+            var directory = $"tenants/{segments[1]}/{dirMapId}/0";
+            if (dirMapId != mapId && !liveMapIds.Contains(dirMapId))
+            {
+                directory += " (dead map)";
+            }
+            return (directory, (row.CoordX - fileX, row.CoordY - fileY));
+        }
+
+        return (segments.Length > 1 ? string.Join('/', segments[..^1]) : "(storage root)", null);
+    }
+
 
     /// <summary>
     /// True when any of the four child files at zoom-1 coords (2x+dx, 2y+dy) was written after
@@ -523,6 +780,206 @@ public class MapIntegrityService : IMapIntegrityService
             result.StorageAfterMB);
 
         return result;
+    }
+
+    public async Task<MissingTileSourcesRepairResultDto> RepairMissingTileSourcesAsync(
+        string tenantId, CancellationToken ct = default)
+    {
+        var tenantExists = await _db.Tenants.IgnoreQueryFilters().AnyAsync(t => t.Id == tenantId, ct);
+        if (!tenantExists)
+        {
+            throw new ArgumentException($"Tenant {tenantId} not found");
+        }
+
+        var gridStorage = _configuration["GridStorage"] ?? "map";
+        var result = new MissingTileSourcesRepairResultDto { TenantId = tenantId };
+
+        // Re-derived here, never taken from the client: the same rows the scan reports.
+        var liveMapIds = (await _db.Maps.IgnoreQueryFilters()
+                .Where(m => m.TenantId == tenantId)
+                .Select(m => m.Id)
+                .ToListAsync(ct))
+            .ToHashSet();
+        var liveIdList = liveMapIds.ToList();
+        var rows = await _db.Tiles.IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(t => t.TenantId == tenantId && t.Zoom == 0 && t.File != "" && liveIdList.Contains(t.MapId))
+            .Select(t => new { t.Id, t.MapId, t.CoordX, t.CoordY, t.File, t.FileSizeBytes, t.Cache })
+            .ToListAsync(ct);
+
+        var sourceFiles = new SourceFileIndex(gridStorage);
+        var missing = rows.Where(r => !sourceFiles.Exists(r.File)).ToList();
+        result.MissingRows = missing.Count;
+        if (missing.Count == 0)
+        {
+            return result;
+        }
+
+        // Restore keys first, from the rows exactly as they are before anything changes.
+        var sources = missing
+            .Select(r => (Row: r, Source: DescribeSourceDirectory(
+                new ZoomZeroRow(r.MapId, r.CoordX, r.CoordY, r.Cache, r.File), r.MapId, liveMapIds)))
+            .ToList();
+        var mixedDirectories = new HashSet<(int MapId, string Directory)>();
+        result.RestoreKeys = sources
+            .GroupBy(x => (x.Row.MapId, x.Source.Directory))
+            .OrderBy(g => g.Key.MapId).ThenBy(g => g.Key.Directory, StringComparer.Ordinal)
+            .Select(g =>
+            {
+                var shifts = g.Select(x => x.Source.Shift).Distinct().ToList();
+                if (shifts.Count > 1)
+                {
+                    mixedDirectories.Add(g.Key);
+                }
+                var shift = shifts.Count > 1
+                    ? " shift=mixed"
+                    : shifts[0] is { } s ? $" shift=({s.X},{s.Y})" : string.Empty;
+                return $"map {g.Key.MapId}: {g.Key.Directory}{shift} rows={g.Count()} bytes={g.Sum(x => (long)x.Row.FileSizeBytes)}";
+            })
+            .ToList();
+
+        var owners = await LoadGridOwnersAsync(tenantId, ct);
+        var fixes = sources
+            .Select(x => (x.Row, x.Source, Fix: ClassifyMissingRow(tenantId, x.Row.MapId, x.Row.CoordX, x.Row.CoordY, owners, sourceFiles)))
+            .ToList();
+
+        // Cells that keep a missing row after the repair. Regeneration is per 4x4 cell and the
+        // zoom-0 compose skips missing sources, so redrawing such a cell would drop those rows
+        // from its WebP — possibly the last copy of them. Their repointed rows are only marked.
+        var heldCells = fixes
+            .Where(f => f.Fix.Fix != MissingRowFix.Repoint)
+            .Select(f => CellOf(f.Row.MapId, f.Row.CoordX, f.Row.CoordY))
+            .ToHashSet();
+
+        var repoints = new List<(int Id, string File, int Size)>();
+        var rearm = new HashSet<string>(StringComparer.Ordinal);
+        var heldRepointedCells = new HashSet<(int, int, int)>();
+        foreach (var (row, source, (fix, ownerId, poolFile)) in fixes)
+        {
+            switch (fix)
+            {
+                case MissingRowFix.Contested:
+                    result.AmbiguousSkipped++; // whose pool PNG would be the right one?
+                    continue;
+
+                case MissingRowFix.Repoint:
+                    repoints.Add((row.Id, poolFile!, (int)new FileInfo(Path.Combine(gridStorage, poolFile!)).Length));
+                    AddCoord(result.RepointedBaseCoords, row.MapId, row.CoordX, row.CoordY);
+                    var cell = CellOf(row.MapId, row.CoordX, row.CoordY);
+                    if (heldCells.Contains(cell))
+                        heldRepointedCells.Add(cell);
+                    else
+                        AddCoord(result.RedrawBaseCoords, row.MapId, row.CoordX, row.CoordY);
+                    continue;
+
+                case MissingRowFix.Rearm:
+                    rearm.Add(ownerId!);
+                    break;
+
+                case MissingRowFix.NoGrid:
+                    result.RowsWithoutGrid++; // nothing to re-request
+                    break;
+            }
+
+            result.UnrecoverableRowIds.Add(row.Id);
+
+            // A single-shift per-map directory rebuilds from its key; a pool PNG from its owner
+            // grid. Anything else would lose its coordinate-to-file mapping in a forget.
+            var keyed = source.Shift != null
+                ? !mixedDirectories.Contains((row.MapId, source.Directory))
+                : ownerId != null && string.Equals(Path.GetFileNameWithoutExtension(row.File), ownerId, StringComparison.Ordinal);
+            if (!keyed)
+            {
+                result.UnkeyedRows.Add($"map {row.MapId} ({row.CoordX},{row.CoordY}) {row.File} bytes={row.FileSizeBytes}");
+            }
+        }
+        result.CellsHeldForRestore = heldRepointedCells.Count;
+
+        var now = DateTime.UtcNow;
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var requestableAt = now.AddMinutes(-1);
+        await using (var transaction = await _db.Database.BeginTransactionAsync(ct))
+        {
+            foreach (var (id, file, size) in repoints)
+            {
+                result.RowsRepointed += await _db.Tiles.IgnoreQueryFilters()
+                    .Where(t => t.TenantId == tenantId && t.Id == id)
+                    .ExecuteUpdateAsync(u => u
+                        .SetProperty(t => t.File, file)
+                        .SetProperty(t => t.FileSizeBytes, size)
+                        .SetProperty(t => t.Cache, nowMs), ct);
+            }
+
+            // Requestable again: the next client that sees the grid re-uploads it into the pool
+            // (GridUpload's no-updates guard lets a re-upload through when the row's file is gone).
+            foreach (var chunk in Chunk(rearm.ToList()))
+            {
+                result.GridsRearmed += await _db.Grids.IgnoreQueryFilters()
+                    .Where(g => g.TenantId == tenantId && chunk.Contains(g.Id) && g.NextUpdate > requestableAt)
+                    .ExecuteUpdateAsync(u => u.SetProperty(g => g.NextUpdate, requestableAt), ct);
+            }
+
+            await transaction.CommitAsync(ct);
+        }
+
+        // ExecuteUpdate bypasses the change tracker, which may still hold the old values.
+        _db.ChangeTracker.Clear();
+
+        result.RepointedMapIds = result.RepointedBaseCoords.Keys.OrderBy(id => id).ToList();
+        result.RowsLeftForRestore = result.UnrecoverableRowIds.Count;
+
+        _logger.LogWarning(
+            "Repaired missing tile sources of tenant {TenantId}: {Missing} missing rows, {Repointed} repointed to the grid pool " +
+            "on {Maps} map(s) ({Held} cell(s) held back from redraw), {Rearmed} grids re-armed, {Ambiguous} contested skipped, " +
+            "{Unrecoverable} unrecoverable ({WithoutGrid} without a grid)",
+            tenantId, result.MissingRows, result.RowsRepointed, result.RepointedMapIds.Count, result.CellsHeldForRestore,
+            result.GridsRearmed, result.AmbiguousSkipped, result.UnrecoverableRowIds.Count, result.RowsWithoutGrid);
+
+        return result;
+    }
+
+    private static void AddCoord(Dictionary<int, List<Coord>> coordsByMap, int mapId, int x, int y)
+    {
+        if (!coordsByMap.TryGetValue(mapId, out var coords))
+        {
+            coordsByMap[mapId] = coords = new List<Coord>();
+        }
+        coords.Add(new Coord(x, y));
+    }
+
+    public async Task<int> ForgetMissingTileSourceRowsAsync(
+        string tenantId, IReadOnlyCollection<int> tileRowIds, CancellationToken ct = default)
+    {
+        var gridStorage = _configuration["GridStorage"] ?? "map";
+        var forgotten = 0;
+
+        foreach (var chunk in Chunk(tileRowIds.Distinct().ToList()))
+        {
+            var rows = await _db.Tiles.IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(t => t.TenantId == tenantId && t.Zoom == 0 && chunk.Contains(t.Id))
+                .Select(t => new { t.Id, t.File })
+                .ToListAsync(ct);
+
+            // A file restored since the repair read the rows makes its row renderable again.
+            var stillMissing = rows
+                .Where(r => r.File != "" && !File.Exists(Path.Combine(gridStorage, r.File)))
+                .Select(r => r.Id)
+                .ToList();
+            if (stillMissing.Count == 0)
+            {
+                continue;
+            }
+
+            forgotten += await _db.Tiles.IgnoreQueryFilters()
+                .Where(t => t.TenantId == tenantId && stillMissing.Contains(t.Id))
+                .ExecuteDeleteAsync(ct);
+        }
+
+        _db.ChangeTracker.Clear();
+
+        _logger.LogWarning("Forgot {Count} unrecoverable zoom-0 tile row(s) of tenant {TenantId}", forgotten, tenantId);
+        return forgotten;
     }
 
     /// <summary>

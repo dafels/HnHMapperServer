@@ -32,8 +32,7 @@ VOLUME ["/map"]
 # Expose port
 EXPOSE 8080
 
-# Set environment variables
-ENV ASPNETCORE_URLS=http://+:8080
+# Set environment variables (port 8080 comes from the base image's ASPNETCORE_HTTP_PORTS; no ASPNETCORE_URLS)
 ENV GridStorage=/map
 
 # Run the application

@@ -1,5 +1,10 @@
+using HnHMapperServer.Core.DTOs;
+using HnHMapperServer.Core.Models;
 using HnHMapperServer.Infrastructure.Data;
+using HnHMapperServer.Infrastructure.Repositories;
+using HnHMapperServer.Services.Interfaces;
 using HnHMapperServer.Services.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -393,5 +398,320 @@ public class MapIntegrityServiceTests : IDisposable
         Assert.True(File.Exists(deadDirFile), "a dead map's directory referenced by live rows must survive");
         Assert.Equal(0, result.DirectoriesDeleted);
         Assert.Contains(result.Warnings, w => w.Contains("live tile rows still reference"));
+    }
+
+    [Fact]
+    public async Task ScanAsync_WebpDrift_FlagsEmptyFiles()
+    {
+        // Zero-length residue of an interrupted pre-atomic write: served as a broken image and
+        // composed into its parents as a hole. Its source exists, so it is drift, not a missing source.
+        SeedMap(800, TenantA, "Truncated");
+        SeedTileRow(TenantA, 800, 0, 0, 0, $"tenants/{TenantA}/grids/t.png");
+        WriteFile("tenants", TenantA, "grids", "t.png");
+        var empty = WriteWebp(800, 0, 0, 0);
+        File.WriteAllBytes(empty, Array.Empty<byte>());
+
+        var report = await _service.ScanAsync();
+
+        var drift = Assert.Single(report.WebpDrift);
+        Assert.Equal(800, drift.MapId);
+        Assert.Equal(1, drift.CorruptFiles);
+        Assert.Equal(0, drift.GhostFiles);
+        Assert.Equal(0, drift.StaleFiles);
+        Assert.Equal(1, drift.FilesChecked);
+        Assert.Equal(1, drift.MissingZoom0Cells); // an empty file is no tile
+        Assert.Contains(drift.SampleDriftTiles, s => s.Contains("empty"));
+        Assert.Empty(report.MissingTileSources);
+        Assert.False(report.IsClean);
+    }
+
+    // ---------- missing tile sources ----------
+
+    [Fact]
+    public async Task ScanAsync_ReportsMissingTileSources()
+    {
+        // Live map 1. A: present pool PNG. B + C: moved by a merge (shift (28,-14)) out of dead
+        // map 99's per-map directory, files gone — B's grid has a pool PNG, C's has none. D: a wipe
+        // tombstone. E: missing, in a contested cell (two owner grids).
+        SeedMap(1, TenantA, "Merged");
+        SeedGrid("gA", 1, TenantA, 0, 0);
+        SeedTileRow(TenantA, 1, 0, 0, 0, $"tenants/{TenantA}/grids/gA.png");
+        WriteFile("tenants", TenantA, "grids", "gA.png");
+
+        SeedGrid("gB", 1, TenantA, 4, 0);
+        SeedTileRow(TenantA, 1, 4, 0, 0, $"tenants/{TenantA}/99/0/-24_14.png");
+        WriteFile("tenants", TenantA, "grids", "gB.png");
+        SeedGrid("gC", 1, TenantA, 5, 0);
+        SeedTileRow(TenantA, 1, 5, 0, 0, $"tenants/{TenantA}/99/0/-23_14.png");
+
+        SeedTileRow(TenantA, 1, 8, 0, 0, "");
+
+        SeedGrid("gE1", 1, TenantA, 12, 0);
+        SeedGrid("gE2", 1, TenantA, 12, 0);
+        SeedTileRow(TenantA, 1, 12, 0, 0, $"tenants/{TenantA}/grids/gE1.png");
+
+        // Dead map 98: a missing row there is orphan storage, not a missing source.
+        SeedTileRow(TenantA, 98, 0, 0, 0, $"tenants/{TenantA}/grids/nowhere.png");
+
+        var report = await _service.ScanAsync();
+
+        var missing = Assert.Single(report.MissingTileSources);
+        Assert.Equal(1, missing.MapId);
+        Assert.Equal("Tenant Alpha", missing.TenantName);
+        Assert.Equal(3, missing.MissingRows);              // B, C, E — not A, not the tombstone
+        Assert.Equal(2, missing.DarkCells);                // cell (1,0) = B+C, cell (3,0) = E
+        Assert.Equal(1, missing.RecoverableFromPool);      // B
+        Assert.Equal(1, missing.AmbiguousCells);           // E
+        Assert.Contains($"tenants/{TenantA}/99/0 (dead map) shift=(28,-14): 2 rows", missing.ByDirectory);
+        Assert.Contains($"tenants/{TenantA}/grids: 1 rows", missing.ByDirectory);
+        Assert.Equal(3, missing.SampleFiles.Count);
+        Assert.False(report.IsClean);
+    }
+
+    [Fact]
+    public async Task ScanAsync_AllSourcesPresent_ReportsNoMissingSources()
+    {
+        SeedMap(1, TenantA, "Healthy");
+        SeedGrid("g1", 1, TenantA, 0, 0);
+        SeedTileRow(TenantA, 1, 0, 0, 0, $"tenants/{TenantA}/grids/g1.png");
+        WriteFile("tenants", TenantA, "grids", "g1.png");
+        SeedTileRow(TenantA, 1, 1, 0, 0, $"tenants/{TenantA}/1/0/1_0.png"); // own per-map import file
+        WriteFile("tenants", TenantA, "1", "0", "1_0.png");
+
+        var report = await _service.ScanAsync();
+
+        Assert.Empty(report.MissingTileSources);
+    }
+
+    // ---------- missing tile sources: repair ----------
+
+    /// <summary>
+    /// Live map 1 with four missing rows: B (single owner gB, pool PNG exists — recoverable),
+    /// C (single owner gC, no pool PNG, not requestable for 30 min), E (contested cell gE1/gE2),
+    /// F (no owner grid at all). B and C moved out of dead map 99's per-map directory, shift (28,-14).
+    /// </summary>
+    private void SeedRepairZoo()
+    {
+        SeedMap(1, TenantA, "Merged");
+        SeedGrid("gB", 1, TenantA, 4, 0);
+        SeedTileRow(TenantA, 1, 4, 0, 0, $"tenants/{TenantA}/99/0/-24_14.png");
+        WriteFile("tenants", TenantA, "grids", "gB.png");
+
+        SeedGrid("gC", 1, TenantA, 5, 0);
+        SeedTileRow(TenantA, 1, 5, 0, 0, $"tenants/{TenantA}/99/0/-23_14.png");
+        _db.Grids.IgnoreQueryFilters().Where(g => g.Id == "gC")
+            .ExecuteUpdate(u => u.SetProperty(g => g.NextUpdate, DateTime.UtcNow.AddMinutes(30)));
+
+        SeedGrid("gE1", 1, TenantA, 12, 0);
+        SeedGrid("gE2", 1, TenantA, 12, 0);
+        SeedTileRow(TenantA, 1, 12, 0, 0, $"tenants/{TenantA}/grids/gE1.png");
+
+        SeedTileRow(TenantA, 1, 20, 0, 0, $"tenants/{TenantA}/grids/nowhere-f.png");
+    }
+
+    private Task<TileDataEntity> Zoom0RowAsync(int x) =>
+        _db.Tiles.IgnoreQueryFilters().AsNoTracking().SingleAsync(t => t.MapId == 1 && t.Zoom == 0 && t.CoordX == x);
+
+    [Fact]
+    public async Task RepairMissingTileSources_IsNonDestructive()
+    {
+        SeedRepairZoo();
+
+        var result = await _service.RepairMissingTileSourcesAsync(TenantA);
+
+        Assert.Equal(4, result.MissingRows);
+        Assert.Equal(1, result.RowsRepointed);
+        Assert.Equal(1, result.GridsRearmed);
+        Assert.Equal(1, result.AmbiguousSkipped);
+        Assert.Equal(2, result.RowsLeftForRestore);
+        Assert.Equal(0, result.RowsForgotten);
+        Assert.Equal(new List<int> { 1 }, result.RepointedMapIds);
+        Assert.Equal(new List<Coord> { new(4, 0) }, result.RepointedBaseCoords[1]);
+        Assert.Equal(2, result.UnrecoverableRowIds.Count);
+        // Restore keys describe the rows as they were, before the repoint.
+        Assert.Contains($"map 1: tenants/{TenantA}/99/0 (dead map) shift=(28,-14) rows=2 bytes=20", result.RestoreKeys);
+
+        var b = await Zoom0RowAsync(4);
+        Assert.Equal(Path.Combine("tenants", TenantA, "grids", "gB.png"), b.File);
+        Assert.Equal(100, b.FileSizeBytes);
+        Assert.Equal($"tenants/{TenantA}/99/0/-23_14.png", (await Zoom0RowAsync(5)).File); // restore key kept
+        Assert.Equal($"tenants/{TenantA}/grids/gE1.png", (await Zoom0RowAsync(12)).File);
+        Assert.Equal(4, await _db.Tiles.IgnoreQueryFilters().CountAsync(t => t.MapId == 1));
+
+        var gC = await _db.Grids.IgnoreQueryFilters().AsNoTracking().SingleAsync(g => g.Id == "gC");
+        Assert.True(gC.NextUpdate <= DateTime.UtcNow, "the owner of an unrecoverable row is re-requested");
+
+        // B shares its WebP cell (1,0) with C, which stays missing: B is marked, not redrawn — a
+        // redraw would drop C from the cell's WebP, possibly the last copy of it.
+        Assert.Empty(result.RedrawBaseCoords);
+        Assert.Equal(1, result.CellsHeldForRestore);
+        Assert.Equal(1, result.RowsWithoutGrid); // F
+        // C's key rebuilds it (single shift); F's pool name belongs to no grid, so a forget would
+        // lose where it sat unless the audit lists it.
+        var unkeyed = Assert.Single(result.UnkeyedRows);
+        Assert.Contains("(20,0)", unkeyed);
+        Assert.Contains("nowhere-f.png", unkeyed);
+
+        var rescan = Assert.Single((await _service.ScanAsync()).MissingTileSources);
+        Assert.Equal(3, rescan.MissingRows); // C, E, F
+        Assert.Equal(0, rescan.RecoverableFromPool);
+    }
+
+    [Fact]
+    public async Task ScanAsync_MissingTileSources_PredictsWhatTheRepairCanDo()
+    {
+        SeedRepairZoo();
+        // A present row next to F: cell (5,0) is partly dark, not dark.
+        SeedTileRow(TenantA, 1, 21, 0, 0, Path.Combine("tenants", TenantA, "grids", "here.png"));
+        WriteFile("tenants", TenantA, "grids", "here.png");
+
+        var entry = Assert.Single((await _service.ScanAsync()).MissingTileSources);
+
+        Assert.Equal(4, entry.MissingRows);
+        Assert.Equal(2, entry.DarkCells);        // (1,0): B+C, (3,0): E
+        Assert.Equal(1, entry.PartlyDarkCells);  // (5,0): F missing, the new row present
+        Assert.Equal(1, entry.RecoverableFromPool);
+        Assert.Equal(1, entry.AmbiguousCells);
+        Assert.Equal(1, entry.RowsWithoutGrid);
+        Assert.Equal(1, entry.RepairHeldCells);  // (1,0): B repointable, C not
+
+        var result = await _service.RepairMissingTileSourcesAsync(TenantA);
+        Assert.Equal(entry.RepairHeldCells, result.CellsHeldForRestore);
+        Assert.Equal(entry.RowsWithoutGrid, result.RowsWithoutGrid);
+    }
+
+    [Fact]
+    public async Task RepairMissingTileSources_RedrawsOnlyCellsWithNothingStillMissing()
+    {
+        SeedMap(1, TenantA, "Merged");
+        // Cell (1,0): B alone -> redraw.
+        SeedGrid("gB", 1, TenantA, 4, 0);
+        SeedTileRow(TenantA, 1, 4, 0, 0, $"tenants/{TenantA}/99/0/-24_14.png");
+        WriteFile("tenants", TenantA, "grids", "gB.png");
+        // Cell (2,0): D next to a present row -> redraw.
+        SeedGrid("gD", 1, TenantA, 8, 0);
+        SeedTileRow(TenantA, 1, 8, 0, 0, $"tenants/{TenantA}/99/0/-20_14.png");
+        WriteFile("tenants", TenantA, "grids", "gD.png");
+        SeedTileRow(TenantA, 1, 9, 0, 0, Path.Combine("tenants", TenantA, "grids", "present.png"));
+        WriteFile("tenants", TenantA, "grids", "present.png");
+        // Cell (4,0): G next to a row without a grid -> marked only.
+        SeedGrid("gG", 1, TenantA, 16, 0);
+        SeedTileRow(TenantA, 1, 16, 0, 0, $"tenants/{TenantA}/99/0/-12_14.png");
+        WriteFile("tenants", TenantA, "grids", "gG.png");
+        SeedTileRow(TenantA, 1, 17, 0, 0, $"tenants/{TenantA}/99/0/-11_14.png");
+
+        var result = await _service.RepairMissingTileSourcesAsync(TenantA);
+
+        Assert.Equal(3, result.RowsRepointed);
+        Assert.Equal(new[] { new Coord(4, 0), new Coord(8, 0), new Coord(16, 0) },
+            result.RepointedBaseCoords[1].OrderBy(c => c.X));
+        Assert.Equal(new[] { new Coord(4, 0), new Coord(8, 0) },
+            result.RedrawBaseCoords[1].OrderBy(c => c.X));
+        Assert.Equal(1, result.CellsHeldForRestore);
+        Assert.Empty(result.UnkeyedRows); // (17,0) sits in a single-shift directory: its key rebuilds it
+    }
+
+    [Fact]
+    public async Task RepairMissingTileSources_PathLikeOwnerId_IsNeverRepointedOrRearmed()
+    {
+        // A legacy grid id that is a path: its "pool PNG" tenants/t/grids/../77/0/1_1.png is really
+        // another map's imported file. Repointing to it would draw that map's terrain here.
+        SeedMap(1, TenantA, "Merged");
+        SeedGrid("../77/0/1_1", 1, TenantA, 4, 0);
+        SeedTileRow(TenantA, 1, 4, 0, 0, $"tenants/{TenantA}/99/0/-24_14.png");
+        WriteFile("tenants", TenantA, "77", "0", "1_1.png");
+        _db.Grids.IgnoreQueryFilters().Where(g => g.Id == "../77/0/1_1")
+            .ExecuteUpdate(u => u.SetProperty(g => g.NextUpdate, DateTime.UtcNow.AddMinutes(30)));
+
+        var entry = Assert.Single((await _service.ScanAsync()).MissingTileSources);
+        Assert.Equal(0, entry.RecoverableFromPool);
+        Assert.Equal(1, entry.RowsWithoutGrid);
+
+        var result = await _service.RepairMissingTileSourcesAsync(TenantA);
+
+        Assert.Equal(0, result.RowsRepointed);
+        Assert.Equal(0, result.GridsRearmed);
+        Assert.Equal(1, result.RowsWithoutGrid);
+        Assert.Equal($"tenants/{TenantA}/99/0/-24_14.png", (await Zoom0RowAsync(4)).File);
+    }
+
+    [Fact]
+    public async Task ForgetMissingTileSourceRows_DeletesOnlyUnrecoverableRowsStillMissing()
+    {
+        SeedRepairZoo();
+        var result = await _service.RepairMissingTileSourcesAsync(TenantA);
+
+        // F's file turns up between the repair and the forget (restored from a backup).
+        WriteFile("tenants", TenantA, "grids", "nowhere-f.png");
+
+        var forgotten = await _service.ForgetMissingTileSourceRowsAsync(TenantA, result.UnrecoverableRowIds);
+
+        Assert.Equal(1, forgotten); // C only
+        Assert.False(await _db.Tiles.IgnoreQueryFilters().AnyAsync(t => t.MapId == 1 && t.CoordX == 5));
+        Assert.True(await _db.Tiles.IgnoreQueryFilters().AnyAsync(t => t.MapId == 1 && t.CoordX == 20)); // F
+        Assert.True(await _db.Tiles.IgnoreQueryFilters().AnyAsync(t => t.MapId == 1 && t.CoordX == 4));  // B, repointed
+        Assert.True(await _db.Tiles.IgnoreQueryFilters().AnyAsync(t => t.MapId == 1 && t.CoordX == 12)); // E, contested
+        Assert.True(await _db.Grids.IgnoreQueryFilters().AnyAsync(g => g.Id == "gC"), "grids are never forgotten");
+    }
+
+    [Fact]
+    public async Task RepairMissingTileSources_UnknownTenant_Throws()
+    {
+        await Assert.ThrowsAsync<ArgumentException>(() => _service.RepairMissingTileSourcesAsync("no-such-tenant"));
+    }
+
+    [Fact]
+    public async Task RepairMissingTileSources_MakesTheGridRequestableAgain()
+    {
+        SeedRepairZoo();
+
+        // A GridService over the same database, in TenantA's request context.
+        var httpContext = new DefaultHttpContext();
+        httpContext.Items["TenantId"] = TenantA;
+        var accessor = new Mock<IHttpContextAccessor>();
+        accessor.Setup(x => x.HttpContext).Returns(httpContext);
+        using var tenantDb = new ApplicationDbContext(
+            new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(_connection).Options, accessor.Object);
+        var tenantContext = new Mock<HnHMapperServer.Core.Interfaces.ITenantContextAccessor>();
+        tenantContext.Setup(x => x.GetCurrentTenantId()).Returns(TenantA);
+        tenantContext.Setup(x => x.GetRequiredTenantId()).Returns(TenantA);
+        var gridRepository = new GridRepository(tenantDb, tenantContext.Object);
+        var tileService = new TileService(
+            new TileRepository(tenantDb, tenantContext.Object), gridRepository,
+            Mock.Of<IUpdateNotificationService>(), Mock.Of<IStorageQuotaService>(),
+            Mock.Of<ILogger<TileService>>(), tenantDb);
+        var gridService = new GridService(
+            gridRepository,
+            new MapRepository(tenantDb, tenantContext.Object),
+            tileService,
+            new ConfigRepository(tenantDb, tenantContext.Object),
+            Mock.Of<IUpdateNotificationService>(),
+            Mock.Of<IMapNameService>(),
+            Mock.Of<IPendingMarkerService>(),
+            tenantContext.Object,
+            new ZoomTileQueueService(Mock.Of<ILogger<ZoomTileQueueService>>()),
+            new TenantFilePathService(),
+            new MergeRejectionCache(),
+            new TileCacheService(Mock.Of<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), Mock.Of<ILogger<TileCacheService>>()),
+            Mock.Of<ILogger<GridService>>());
+
+        // gB at matrix (0,0) and gC at (1,0) agree on offset (4,0).
+        GridUpdateDto Matrix() => new()
+        {
+            Grids = new List<List<string>>
+            {
+                new() { "gB", "0", "0" },
+                new() { "gC", "0", "0" },
+                new() { "0", "0", "0" }
+            }
+        };
+
+        var before = await gridService.ProcessGridUpdateAsync(Matrix(), _gridStorage);
+        Assert.DoesNotContain("gC", before.GridRequests);
+
+        await _service.RepairMissingTileSourcesAsync(TenantA);
+
+        var after = await gridService.ProcessGridUpdateAsync(Matrix(), _gridStorage);
+        Assert.Contains("gC", after.GridRequests);
     }
 }

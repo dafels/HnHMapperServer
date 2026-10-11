@@ -1,3 +1,4 @@
+using HnHMapperServer.Core.Models;
 using HnHMapperServer.Infrastructure.Data;
 using HnHMapperServer.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
@@ -7,7 +8,8 @@ using System.Text.Json;
 namespace HnHMapperServer.Services.Services;
 
 /// <summary>
-/// Service for managing tenant storage quotas with atomic updates
+/// Service for managing tenant storage quotas: atomic delta UPDATEs plus the authoritative
+/// filesystem reconciliation (see <see cref="IStorageQuotaService"/> for the contract).
 /// </summary>
 public class StorageQuotaService : IStorageQuotaService
 {
@@ -21,13 +23,17 @@ public class StorageQuotaService : IStorageQuotaService
     }
 
     /// <summary>
-    /// Checks if a tenant has enough quota for an upload
+    /// Checks if a tenant has enough quota for an upload. Reads the row (AsNoTracking): a tenant
+    /// entity tracked earlier in the request (token validation) is a stale snapshot.
     /// </summary>
     public async Task<bool> CheckQuotaAsync(string tenantId, double sizeMB)
     {
         var tenant = await _db.Tenants
             .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(t => t.Id == tenantId);
+            .AsNoTracking()
+            .Where(t => t.Id == tenantId)
+            .Select(t => new { t.IsActive, t.CurrentStorageMB, t.StorageQuotaMB })
+            .FirstOrDefaultAsync();
 
         if (tenant == null)
         {
@@ -54,56 +60,42 @@ public class StorageQuotaService : IStorageQuotaService
     }
 
     /// <summary>
-    /// Increments tenant storage usage (atomic operation)
+    /// Adds a (possibly negative) delta to the tenant's usage in one UPDATE, clamped at 0. Never a
+    /// read-modify-write of a tracked TenantEntity: the request scope (token validation), a
+    /// background job's all-tenant list or a superadmin edit may hold a stale snapshot, and saving
+    /// snapshot + delta silently dropped every concurrent writer's delta. Like every ExecuteUpdate
+    /// it does not refresh a tracked copy, and it does not save the caller's pending changes —
+    /// every caller flushes its own before charging.
     /// </summary>
     public async Task IncrementStorageUsageAsync(string tenantId, double sizeMB)
     {
-        var tenant = await _db.Tenants
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(t => t.Id == tenantId);
+        if (sizeMB == 0)
+        {
+            return;
+        }
 
-        if (tenant == null)
+        var rows = await _db.Tenants
+            .IgnoreQueryFilters()
+            .Where(t => t.Id == tenantId)
+            .ExecuteUpdateAsync(s => s.SetProperty(
+                t => t.CurrentStorageMB,
+                t => t.CurrentStorageMB + sizeMB > 0 ? t.CurrentStorageMB + sizeMB : 0.0));
+
+        if (rows == 0)
         {
             throw new InvalidOperationException($"Tenant {tenantId} not found");
         }
 
-        tenant.CurrentStorageMB += sizeMB;
-
-        // Prevent negative storage (should never happen, but safety check)
-        tenant.CurrentStorageMB = Math.Max(0, tenant.CurrentStorageMB);
-
-        await _db.SaveChangesAsync();
-
         _logger.LogDebug(
-            "IncrementStorage: Tenant {TenantId} usage incremented by {SizeMB}MB. New total: {Total}MB",
-            tenantId, sizeMB, tenant.CurrentStorageMB);
+            "IncrementStorage: Tenant {TenantId} usage changed by {SizeMB}MB",
+            tenantId, sizeMB);
     }
 
     /// <summary>
-    /// Decrements tenant storage usage (atomic operation)
+    /// <see cref="IncrementStorageUsageAsync"/> with the sign flipped (same single atomic UPDATE).
     /// </summary>
-    public async Task DecrementStorageUsageAsync(string tenantId, double sizeMB)
-    {
-        var tenant = await _db.Tenants
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(t => t.Id == tenantId);
-
-        if (tenant == null)
-        {
-            throw new InvalidOperationException($"Tenant {tenantId} not found");
-        }
-
-        tenant.CurrentStorageMB -= sizeMB;
-
-        // Prevent negative storage
-        tenant.CurrentStorageMB = Math.Max(0, tenant.CurrentStorageMB);
-
-        await _db.SaveChangesAsync();
-
-        _logger.LogDebug(
-            "DecrementStorage: Tenant {TenantId} usage decremented by {SizeMB}MB. New total: {Total}MB",
-            tenantId, sizeMB, tenant.CurrentStorageMB);
-    }
+    public Task DecrementStorageUsageAsync(string tenantId, double sizeMB)
+        => IncrementStorageUsageAsync(tenantId, -sizeMB);
 
     /// <summary>
     /// Gets the current storage usage for a tenant
@@ -132,15 +124,30 @@ public class StorageQuotaService : IStorageQuotaService
     }
 
     /// <summary>
-    /// Recalculates storage usage from filesystem and updates database
+    /// Recalculates storage usage from filesystem and updates database. The admin teardowns
+    /// (wipe, purge, map delete, integrity purge) call this right after deleting data, so the
+    /// drift it measures is mostly their own deletion: it is logged, never warned about.
     /// </summary>
     public async Task<double> RecalculateStorageUsageAsync(string tenantId, string gridStorage)
-    {
-        var tenant = await _db.Tenants
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(t => t.Id == tenantId);
+        => (await ReconcileStorageUsageAsync(tenantId, gridStorage)).CurrentMB;
 
-        if (tenant == null)
+    /// <summary>
+    /// The authoritative reset of CurrentStorageMB to what is on disk under tenants/{t}/ (every
+    /// file: grid pool, per-map legacy pyramids and imported zoom-0 PNGs, the WebP pyramid,
+    /// .storage.json, leftover temp files). The previous value is read fresh from the row, not
+    /// from a tracked entity, so the reported drift is real. Increments landing between that read
+    /// and the UPDATE (one scan) are overwritten; the next run corrects them.
+    /// </summary>
+    public async Task<StorageReconciliation> ReconcileStorageUsageAsync(string tenantId, string gridStorage)
+    {
+        var before = await _db.Tenants
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(t => t.Id == tenantId)
+            .Select(t => new { t.CurrentStorageMB, t.StorageQuotaMB })
+            .FirstOrDefaultAsync();
+
+        if (before == null)
         {
             throw new InvalidOperationException($"Tenant {tenantId} not found");
         }
@@ -150,68 +157,42 @@ public class StorageQuotaService : IStorageQuotaService
         var (fileCount, totalSizeBytes) = CalculateDirectorySizeAndCount(tenantDir);
         var totalSizeMB = totalSizeBytes / 1024.0 / 1024.0;
 
-        _logger.LogInformation(
-            "RecalculateStorage: Tenant {TenantId} - Files: {FileCount}, Size: {SizeMB:F2}MB",
-            tenantId, fileCount, totalSizeMB);
-
-        // Update database
-        var oldUsage = tenant.CurrentStorageMB;
-        tenant.CurrentStorageMB = totalSizeMB;
-        await _db.SaveChangesAsync();
+        await _db.Tenants
+            .IgnoreQueryFilters()
+            .Where(t => t.Id == tenantId)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.CurrentStorageMB, totalSizeMB));
+        SyncTrackedUsage(tenantId, totalSizeMB);
 
         // Write .storage.json file
         await WriteStorageMetadataAsync(tenantDir, tenantId, totalSizeBytes, totalSizeMB, fileCount);
 
-        // Log discrepancy if significant
-        var diffMB = Math.Abs(oldUsage - totalSizeMB);
-        if (diffMB > 1.0)
-        {
-            _logger.LogWarning(
-                "RecalculateStorage: Tenant {TenantId} discrepancy detected. " +
-                "DB: {OldMB:F2}MB, Filesystem: {NewMB:F2}MB, Diff: {DiffMB:F2}MB",
-                tenantId, oldUsage, totalSizeMB, diffMB);
-        }
+        var reconciliation = new StorageReconciliation(before.CurrentStorageMB, totalSizeMB, before.StorageQuotaMB, fileCount);
+        _logger.LogInformation(
+            "RecalculateStorage: Tenant {TenantId} - Files: {FileCount}, Size: {SizeMB:F2}MB, Tracked: {TrackedMB:F2}MB, Drift: {DriftMB:F2}MB",
+            tenantId, fileCount, totalSizeMB, reconciliation.PreviousMB, reconciliation.DriftMB);
 
-        return totalSizeMB;
+        return reconciliation;
     }
 
     /// <summary>
-    /// Updates storage usage from pre-calculated values (avoids duplicate filesystem scan)
+    /// ExecuteUpdate bypasses the change tracker: a tenant entity this scope already tracks would
+    /// keep the old value (and a later SaveChanges of that entity used to write it back). Both the
+    /// current and the original value are set and the property is not marked modified, so the
+    /// entry stays Unchanged unless the caller changed other columns.
     /// </summary>
-    public async Task UpdateStorageFromCalculationAsync(string tenantId, string gridStorage, long totalSizeBytes, int fileCount)
+    private void SyncTrackedUsage(string tenantId, double currentMB)
     {
-        var tenant = await _db.Tenants
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(t => t.Id == tenantId);
-
-        if (tenant == null)
+        // Snapshot first: changing a property value fires tracker events that modify the
+        // collection Entries() enumerates.
+        var entries = _db.ChangeTracker.Entries<TenantEntity>()
+            .Where(e => e.Entity.Id == tenantId)
+            .ToList();
+        foreach (var entry in entries)
         {
-            throw new InvalidOperationException($"Tenant {tenantId} not found");
-        }
-
-        var totalSizeMB = totalSizeBytes / 1024.0 / 1024.0;
-
-        _logger.LogInformation(
-            "RecalculateStorage: Tenant {TenantId} - Files: {FileCount}, Size: {SizeMB:F2}MB",
-            tenantId, fileCount, totalSizeMB);
-
-        // Update database
-        var oldUsage = tenant.CurrentStorageMB;
-        tenant.CurrentStorageMB = totalSizeMB;
-        await _db.SaveChangesAsync();
-
-        // Write .storage.json file
-        var tenantDir = Path.Combine(gridStorage, "tenants", tenantId);
-        await WriteStorageMetadataAsync(tenantDir, tenantId, totalSizeBytes, totalSizeMB, fileCount);
-
-        // Log discrepancy if significant
-        var diffMB = Math.Abs(oldUsage - totalSizeMB);
-        if (diffMB > 1.0)
-        {
-            _logger.LogWarning(
-                "RecalculateStorage: Tenant {TenantId} discrepancy detected. " +
-                "DB: {OldMB:F2}MB, Filesystem: {NewMB:F2}MB, Diff: {DiffMB:F2}MB",
-                tenantId, oldUsage, totalSizeMB, diffMB);
+            var property = entry.Property(t => t.CurrentStorageMB);
+            property.OriginalValue = currentMB;
+            property.CurrentValue = currentMB;
+            property.IsModified = false;
         }
     }
 

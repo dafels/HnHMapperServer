@@ -35,6 +35,8 @@ public class GridServiceMapMergeTests : IDisposable
     private readonly IConfigRepository _configRepository;
     private readonly Mock<IUpdateNotificationService> _mockNotificationService;
     private readonly ZoomTileQueueService _zoomTileQueue;
+    private readonly SnapshotCountingTileCache _tileCache = new();
+    private readonly List<long> _quotaDeltaBytes = new();
 
     private const string TestTenantId = "default-tenant-1";
 
@@ -87,6 +89,9 @@ public class GridServiceMapMergeTests : IDisposable
         _mockNotificationService = new Mock<IUpdateNotificationService>();
         var mockNotificationService = _mockNotificationService;
         var mockQuotaService = new Mock<IStorageQuotaService>();
+        mockQuotaService.Setup(q => q.IncrementStorageUsageAsync(It.IsAny<string>(), It.IsAny<double>()))
+            .Callback<string, double>((_, mb) => _quotaDeltaBytes.Add((long)Math.Round(mb * 1024 * 1024)))
+            .Returns(Task.CompletedTask);
         var mockMapNameService = new Mock<IMapNameService>();
         mockMapNameService.Setup(x => x.GenerateUniqueIdentifierAsync(It.IsAny<string>()))
             .ReturnsAsync(() => $"test-map-{Guid.NewGuid():N}");
@@ -112,6 +117,9 @@ public class GridServiceMapMergeTests : IDisposable
             mockPendingMarkerService.Object,
             mockTenantContext.Object,
             _zoomTileQueue,
+            new TenantFilePathService(),
+            new MergeRejectionCache(),
+            _tileCache,
             gridLogger.Object);
 
         // Seed default configuration
@@ -252,7 +260,7 @@ public class GridServiceMapMergeTests : IDisposable
         }
 
         // 8. REGRESSION: the retired source map must leave no tile rows behind. Merges used to
-        // orphan the source map's whole tile set (10k+ rows per merge observed in prod).
+        // orphan the source map's whole tile set.
         var orphanedSourceRows = await _dbContext.Tiles
             .IgnoreQueryFilters()
             .Where(t => t.MapId == 2)
@@ -391,6 +399,100 @@ public class GridServiceMapMergeTests : IDisposable
     }
 
     [Fact]
+    public async Task MergeMapsAsync_DropsThePageLoadTileSnapshot_PlainUpdateKeepsIt()
+    {
+        // The merge deletes the source's Tiles rows and saves the target's. A page load (since=0)
+        // must not get the token list from before it; the ZoomQ batch that used to drop the
+        // snapshot writes WebP files only, so the merge has to.
+        await _mapRepository.SaveMapAsync(new MapInfo { Id = 1, Name = "Target", Hidden = false, Priority = 0 });
+        await _mapRepository.SaveMapAsync(new MapInfo { Id = 2, Name = "Source", Hidden = false, Priority = 0 });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "t1", Map = 1, Coord = new Coord(0, 0), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "t2", Map = 1, Coord = new Coord(0, 1), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "s1", Map = 2, Coord = new Coord(50, 50), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "s2", Map = 2, Coord = new Coord(50, 51), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+
+        await _tileCache.GetTilesSinceAsync(TestTenantId, 0);
+        Assert.Equal(1, _tileCache.Loads);
+
+        // A gridUpdate within one map writes no Tiles rows: the snapshot stays.
+        await _gridService.ProcessGridUpdateAsync(new GridUpdateDto
+        {
+            Grids = new List<List<string>> { new List<string> { "t1", "t2" } }
+        }, _testGridStorage);
+        await _tileCache.GetTilesSinceAsync(TestTenantId, 0);
+        Assert.Equal(1, _tileCache.Loads);
+
+        // Two agreeing witnesses per map -> map 2 merges into map 1.
+        await _gridService.ProcessGridUpdateAsync(new GridUpdateDto
+        {
+            Grids = new List<List<string>>
+            {
+                new List<string> { "t1", "t2", "x3" },
+                new List<string> { "s1", "s2", "x6" },
+                new List<string> { "x7", "x8", "x9" }
+            }
+        }, _testGridStorage);
+        Assert.Null(await _mapRepository.GetMapAsync(2));
+
+        await _tileCache.GetTilesSinceAsync(TestTenantId, 0);
+        Assert.Equal(2, _tileCache.Loads);
+    }
+
+    /// <summary>Counts page-load snapshot loads; serves an empty list instead of reading the database.</summary>
+    private sealed class SnapshotCountingTileCache : TileCacheService
+    {
+        private int _loads;
+
+        public SnapshotCountingTileCache()
+            : base(Mock.Of<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), Mock.Of<ILogger<TileCacheService>>())
+        {
+        }
+
+        public int Loads => Volatile.Read(ref _loads);
+
+        protected override Task<IReadOnlyList<TileCacheDto>> LoadSnapshotTilesAsync(string tenantId)
+        {
+            Interlocked.Increment(ref _loads);
+            return Task.FromResult<IReadOnlyList<TileCacheDto>>(Array.Empty<TileCacheDto>());
+        }
+    }
+
+    [Fact]
+    public async Task MergeMapsAsync_QueueAtBulkHeadroom_EnqueuesNothing()
+    {
+        // A merge is a bulk producer: its cells on top of a queue the backstop already filled
+        // would push the bounded channel past capacity, and DropOldest would evict queued work.
+        // What it does not enqueue is covered by the DirtyWebpCells marks its tile saves wrote.
+        for (var i = 0; i < ZoomTileQueueService.BulkEnqueueDepthLimit; i++)
+        {
+            _zoomTileQueue.EnqueueZoomRegeneration(new ZoomTileRequest("filler", 99, i, 0));
+        }
+
+        await _mapRepository.SaveMapAsync(new MapInfo { Id = 1, Name = "Target", Hidden = false, Priority = 0 });
+        await _mapRepository.SaveMapAsync(new MapInfo { Id = 2, Name = "Source", Hidden = false, Priority = 0 });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "t1", Map = 1, Coord = new Coord(0, 0), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "t2", Map = 1, Coord = new Coord(0, 1), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "s1", Map = 2, Coord = new Coord(50, 50), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "s2", Map = 2, Coord = new Coord(50, 51), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        var s1Tile = await CreateTestTileAsync("s1", 0, 0, 255);
+        await _tileService.SaveTileAsync(2, new Coord(50, 50), 0, s1Tile, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), TestTenantId, 0);
+
+        await _gridService.ProcessGridUpdateAsync(new GridUpdateDto
+        {
+            Grids = new List<List<string>>
+            {
+                new List<string> { "t1", "t2", "x3" },
+                new List<string> { "s1", "s2", "x6" },
+                new List<string> { "x7", "x8", "x9" }
+            }
+        }, _testGridStorage);
+
+        Assert.Equal(1, (await _gridRepository.GetGridAsync("s1"))!.Map); // merged
+        Assert.Equal(ZoomTileQueueService.BulkEnqueueDepthLimit, _zoomTileQueue.PendingCount);
+        Assert.Equal(0, _zoomTileQueue.DroppedCount);
+    }
+
+    [Fact]
     public async Task ProcessGridUpdateAsync_NewMap_NotifiesMapUpdatedWithTenantId()
     {
         // Act: all-unknown grids -> new-map branch
@@ -414,5 +516,78 @@ public class GridServiceMapMergeTests : IDisposable
         _mockNotificationService.Verify(x => x.NotifyMapMerge(
             It.IsAny<int>(), It.IsAny<int>(), It.IsAny<Coord>(), It.IsAny<string>()), Times.Never);
     }
-}
 
+    /// <summary>
+    /// Storage accounting of a merge: the quota moves by exactly the change on disk outside the
+    /// reconciled-only WebP pyramid — re-homed imported PNGs charged, the retired per-map directory
+    /// (imported zoom-0 + legacy pyramid) credited, the target's legacy zoom rebuilds charged by
+    /// size change, the source's large/ tree neither. Before, the directory delete was never
+    /// credited and every rebuilt parent was charged at full size.
+    /// </summary>
+    [Fact]
+    public async Task MergeMapsAsync_NetQuotaDeltaEqualsNonWebpDiskDelta()
+    {
+        await _mapRepository.SaveMapAsync(new MapInfo { Id = 1, Name = "Map1", Hidden = false, Priority = 0 });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "grid1a", Map = 1, Coord = new Coord(0, 0), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "grid1b", Map = 1, Coord = new Coord(0, 1), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        var tile1aPath = await CreateTestTileAsync("grid1a", 255, 0, 0);
+        await _tileService.SaveTileAsync(1, new Coord(0, 0), 0, tile1aPath, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), TestTenantId, 0);
+
+        // Map 2 was imported: its zoom-0 PNGs live in its own directory, next to a legacy zoom
+        // pyramid and a WebP pyramid.
+        await _mapRepository.SaveMapAsync(new MapInfo { Id = 2, Name = "Map2", Hidden = false, Priority = 0 });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "grid2a", Map = 2, Coord = new Coord(100, 100), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        await _gridRepository.SaveGridAsync(new GridData { Id = "grid2b", Map = 2, Coord = new Coord(100, 101), NextUpdate = DateTime.UtcNow.AddMinutes(-1) });
+        var tenantDir = Path.Combine(_testGridStorage, "tenants", TestTenantId);
+        foreach (var (x, y) in new[] { (100, 100), (100, 101) })
+        {
+            var relative = Path.Combine("tenants", TestTenantId, "2", "0", $"{x}_{y}.png");
+            var full = Path.Combine(_testGridStorage, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            using (var img = new Image<Rgba32>(100, 100))
+            {
+                img.Mutate(ctx => ctx.BackgroundColor(new Rgba32(0, 255, 0)));
+                await img.SaveAsPngAsync(full);
+            }
+            await _tileService.SaveTileAsync(2, new Coord(x, y), 0, relative,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), TestTenantId, (int)new FileInfo(full).Length);
+        }
+        WriteBytes(Path.Combine(tenantDir, "2", "1", "50_50.png"), 1234);
+        WriteBytes(Path.Combine(tenantDir, "large", "2", "0", "25_25.webp"), 4321);
+        var before = NonWebpTenantBytes(tenantDir);
+        _quotaDeltaBytes.Clear();
+
+        var result = await _gridService.ProcessGridUpdateAsync(new GridUpdateDto
+        {
+            Grids = new List<List<string>>
+            {
+                new List<string> { "new1", "new2", "new3" },
+                new List<string> { "new4", "grid1a", "grid1b" },
+                new List<string> { "new7", "grid2a", "grid2b" }
+            }
+        }, _testGridStorage);
+
+        Assert.NotNull(result);
+        Assert.Null(await _mapRepository.GetMapAsync(2)); // merged away
+        Assert.False(Directory.Exists(Path.Combine(tenantDir, "2")));
+        Assert.False(Directory.Exists(Path.Combine(tenantDir, "large", "2")));
+        Assert.True(File.Exists(Path.Combine(tenantDir, "grids", "grid2a.png"))); // re-homed
+
+        Assert.Equal(NonWebpTenantBytes(tenantDir) - before, _quotaDeltaBytes.Sum());
+    }
+
+    private static void WriteBytes(string path, int count)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, new byte[count]);
+    }
+
+    private static long NonWebpTenantBytes(string tenantDir)
+    {
+        if (!Directory.Exists(tenantDir)) return 0;
+        var large = Path.Combine(tenantDir, "large") + Path.DirectorySeparatorChar;
+        return Directory.EnumerateFiles(tenantDir, "*", SearchOption.AllDirectories)
+            .Where(f => !f.StartsWith(large, StringComparison.Ordinal))
+            .Sum(f => new FileInfo(f).Length);
+    }
+}

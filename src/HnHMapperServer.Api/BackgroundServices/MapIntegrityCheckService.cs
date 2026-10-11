@@ -4,9 +4,10 @@ namespace HnHMapperServer.Api.BackgroundServices;
 
 /// <summary>
 /// Proactive integrity monitoring: runs the cross-tenant map integrity scan on an interval and
-/// logs a WARNING summary whenever something is wrong (contested cells, placeholder rows, or
-/// orphaned storage), so problems surface in the log/observability stack without anyone opening
-/// the Map Integrity tab. Detection only — repair stays a human decision in the superadmin panel.
+/// logs a WARNING summary whenever something is wrong (contested cells, placeholder rows, orphaned
+/// storage, WebP pyramid drift, or tile rows whose source files are gone), so problems surface in
+/// the log/observability stack without anyone opening the Map Integrity tab. Detection only —
+/// repair stays a human decision in the superadmin panel.
 /// </summary>
 public class MapIntegrityCheckService : BackgroundService
 {
@@ -61,12 +62,14 @@ public class MapIntegrityCheckService : BackgroundService
                         .Sum(o => (o.DeadMapDirectoryBytes + o.UnreferencedGridFileBytes)) / 1024.0 / 1024.0;
                     var worstContested = report.ContestedMaps.FirstOrDefault();
                     var worstDrift = report.WebpDrift.FirstOrDefault();
+                    var worstMissing = report.MissingTileSources.FirstOrDefault();
 
                     _logger.LogWarning(
                         "{Prefix} ISSUES FOUND: {ContestedMaps} map(s) with contested cells{WorstContested}, " +
                         "{Placeholders} placeholder row(s), {OrphanTenants} tenant(s) with orphaned storage " +
-                        "(~{ReclaimMB:F0} MB reclaimable), {DriftMaps} map(s) with WebP pyramid drift{WorstDrift}. " +
-                        "Repair via SuperAdmin -> Map Integrity.",
+                        "(~{ReclaimMB:F0} MB reclaimable), {DriftMaps} map(s) with WebP pyramid drift{WorstDrift}, " +
+                        "{MissingSourceMaps} map(s) with missing tile source files ({MissingSourceRows} rows, " +
+                        "{DarkCells} dark cells){WorstMissing}. Repair via SuperAdmin -> Map Integrity.",
                         LogPrefix,
                         report.ContestedMaps.Count,
                         worstContested != null
@@ -77,7 +80,13 @@ public class MapIntegrityCheckService : BackgroundService
                         reclaimableMB,
                         report.WebpDrift.Count,
                         worstDrift != null
-                            ? $" (worst: map {worstDrift.MapId} '{worstDrift.MapName}' with {worstDrift.GhostFiles} ghost / {worstDrift.StaleFiles} stale)"
+                            ? $" (worst: map {worstDrift.MapId} '{worstDrift.MapName}' with {worstDrift.GhostFiles} ghost / {worstDrift.StaleFiles} stale / {worstDrift.CorruptFiles} empty)"
+                            : string.Empty,
+                        report.MissingTileSources.Count,
+                        report.MissingTileSources.Sum(m => m.MissingRows),
+                        report.MissingTileSources.Sum(m => m.DarkCells),
+                        worstMissing != null
+                            ? $" (worst: map {worstMissing.MapId} '{worstMissing.MapName}' with {worstMissing.DarkCells} dark cells)"
                             : string.Empty);
                 }
             }

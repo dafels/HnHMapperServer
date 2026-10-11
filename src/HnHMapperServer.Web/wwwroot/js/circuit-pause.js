@@ -23,6 +23,10 @@
 //      stale ResizeObserver). The resumed circuit re-renders from scratch (fresh
 //      firstRender), so it re-creates every listener it needs; the old ones are garbage
 //      by definition the moment the pause succeeds.
+//      The map's live-update stream (map-updates.js) is the same class of orphan: Map's
+//      DisposeAsync cannot reach it either, so it would keep an SSE connection open on the
+//      API and feed events into the dead reference. It is suspended too; the resumed Map
+//      component re-initialises it (a fresh stream with ?since= and a new snapshot).
 (function () {
     'use strict';
 
@@ -50,12 +54,13 @@
             && typeof window.Blazor.resumeCircuit === 'function';
     }
 
-    // Drops MudBlazor's JS-side listeners whose DotNetObjectReferences died with the
-    // paused circuit (see point 3 above). Only registries whose entries the resumed
-    // circuit provably re-creates are purged: MudTabs re-runs Observe() on its fresh
-    // firstRender, and the viewport service re-registers its window-resize listener the
-    // same way. Everything is best-effort - these are MudBlazor globals (stable public
-    // interop names, but not our code), and a purge failure must never break the pause.
+    // Drops MudBlazor's JS-side listeners (and the map's update stream) whose
+    // DotNetObjectReferences died with the paused circuit (see point 3 above). Only
+    // registries whose entries the resumed circuit provably re-creates are purged: MudTabs
+    // re-runs Observe() on its fresh firstRender, the viewport service re-registers its
+    // window-resize listener the same way, and Map re-initialises the update stream.
+    // Everything is best-effort - the MudBlazor globals are stable public interop names but
+    // not our code - and a purge failure must never break the pause.
     function purgeDeadDotNetListeners() {
         try {
             // window.mudResizeObserver: per-observer ResizeObservers (MudTabs' scroll
@@ -83,6 +88,17 @@
             }
         } catch (e) {
             log('resize listener purge threw: ' + e);
+        }
+        try {
+            // window.mapUpdates.suspend: registered by map-updates.js (only loaded on /map);
+            // closes the stream, stops its watchdog/reconnect timers, drops its dotnetRef.
+            var mu = window.mapUpdates;
+            if (mu && typeof mu.suspend === 'function') {
+                mu.suspend();
+                log('suspended map updates');
+            }
+        } catch (e) {
+            log('map updates suspend threw: ' + e);
         }
     }
 
@@ -140,6 +156,14 @@
             resumeNow();
         }
     });
+
+    // visibilitychange fires only on a change, so a page that is LOADED hidden (a background tab opened
+    // with Ctrl+click, a minimised window, or a tab Blazor reloads by itself after a deploy) never armed
+    // the timer and kept its circuit until the tab was closed. Arm it now; the 'visible' branch above
+    // clears it, and pauseNow re-checks visibility and Blazor's readiness when it fires.
+    if (document.visibilityState === 'hidden' && pauseTimer === null) {
+        pauseTimer = window.setTimeout(pauseNow, HIDDEN_DELAY_MS);
+    }
 
     // A tab that is closing does not need its circuit kept warm for a minute.
     window.addEventListener('pagehide', function () {

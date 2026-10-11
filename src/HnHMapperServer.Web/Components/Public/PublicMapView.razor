@@ -2,6 +2,7 @@
 @using System.Net.Http.Json
 @inject IJSRuntime JS
 @inject IHttpClientFactory HttpClientFactory
+@inject ReconnectionState Connection
 @inject ILogger<PublicMapView> Logger
 @inject IDialogService DialogService
 @implements IAsyncDisposable
@@ -135,6 +136,11 @@
             initialized = true;
             Logger.LogInformation("Public map initialized successfully for slug: {Slug} at zoom {Zoom}", Slug, initialZoom);
         }
+        catch (Exception ex) when (disposed || ex is JSDisconnectedException)
+        {
+            // The component or the circuit went away mid-initialization: nothing to report
+            Logger.LogDebug(ex, "Public map initialization interrupted for {Slug}", Slug);
+        }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Failed to initialize public map for slug: {Slug}", Slug);
@@ -182,17 +188,20 @@
         if (disposed) return;
         disposed = true;
 
+        // Never throws (an exception escaping DisposeAsync ends the circuit). During circuit teardown
+        // ReconnectionState is already false and the JS calls could only fail, so they are skipped.
         try
         {
-            if (jsModule != null)
+            if (jsModule != null && Connection.IsConnected)
             {
                 await jsModule.InvokeVoidAsync("dispose");
                 await jsModule.DisposeAsync();
             }
         }
-        catch (JSDisconnectedException)
+        catch (Exception ex) when (ex is JSDisconnectedException or TaskCanceledException or ObjectDisposedException or JSException)
         {
-            // Circuit disconnected, ignore
+            // Expected interop failures (the socket dropped after the check, a call lost across a reconnect)
+            Logger.LogDebug("Public map disposal: JS teardown skipped ({ExceptionType})", ex.GetType().Name);
         }
         catch (Exception ex)
         {

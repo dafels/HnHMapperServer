@@ -44,7 +44,7 @@ public class TimerCheckService : BackgroundService
             var sw = Stopwatch.StartNew();
             try
             {
-                _logger.LogInformation("Timer check job started");
+                _logger.LogDebug("Timer check job started");
 
                 using var scope = _scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -113,7 +113,7 @@ public class TimerCheckService : BackgroundService
                 }
                 else
                 {
-                    _logger.LogInformation("Timer check job completed in {ElapsedMs}ms (no timers processed)", sw.ElapsedMilliseconds);
+                    _logger.LogDebug("Timer check job completed in {ElapsedMs}ms (no timers processed)", sw.ElapsedMilliseconds);
                 }
 
                 await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);

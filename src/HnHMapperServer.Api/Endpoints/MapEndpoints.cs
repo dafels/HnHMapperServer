@@ -24,6 +24,10 @@ namespace HnHMapperServer.Api.Endpoints;
 /// </summary>
 public static class MapEndpoints
 {
+    // /map/updates streams end after this long (±20% jitter) so the browser reconnects through a fresh
+    // authorization; see WatchGridUpdates
+    private static readonly TimeSpan StreamMaxLifetime = TimeSpan.FromMinutes(15);
+
     public static void MapMapEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/map/api")
@@ -272,8 +276,8 @@ public static class MapEndpoints
                     .Select(p => p.Permission.ToClaimValue())
                     .ToArray();
                 tenantRole = tenantUser.Role.ToClaimValue();
-                logger.LogInformation("User {Username} in tenant {TenantId} has {Count} permissions: {Permissions}",
-                    username, tenantId, permissions.Length, string.Join(", ", permissions));
+                logger.LogDebug("User {UserId} in tenant {TenantId} has {Count} permissions: {Permissions}",
+                    userId, tenantId, permissions.Length, string.Join(", ", permissions));
             }
         }
 
@@ -458,7 +462,8 @@ public static class MapEndpoints
         bool hasPointerAuth = HasPermission(context.User, Permission.Pointer);
 
         context.Response.ContentType = "text/event-stream; charset=utf-8";
-        context.Response.Headers.Append("Cache-Control", "no-cache, no-store, must-revalidate");
+        // no-transform: intermediaries must not compress/re-chunk the stream (that buffers it)
+        context.Response.Headers.Append("Cache-Control", "no-cache, no-transform");
         context.Response.Headers.Append("X-Accel-Buffering", "no");  // nginx
         context.Response.Headers.Append("X-Content-Type-Options", "nosniff");
         context.Response.Headers.Append("Connection", "keep-alive");
@@ -467,7 +472,7 @@ public static class MapEndpoints
 
         // Disable Kestrel's MinResponseDataRate to prevent SSE connection timeout
         // Without this, Kestrel will abort connections that don't send ~240 bytes/second
-        // SSE heartbeat sends only 15 bytes every 15 seconds, which would cause disconnection
+        // An idle stream sends only the 27-byte heartbeat every 5 seconds, which would cause disconnection
         var minResponseDataRateFeature = context.Features.Get<IHttpMinResponseDataRateFeature>();
         if (minResponseDataRateFeature != null)
         {
@@ -507,16 +512,50 @@ public static class MapEndpoints
             sinceCache = parsedSince;
         }
 
-        // Send initial tile cache (from tenant-specific in-memory cache - prevents blocking database query)
-        // SECURITY: Tile cache is now tenant-scoped to prevent cross-tenant data leakage
-        var tenantTiles = await tileCacheService.GetAllTilesAsync(tenantId);
+        // Subscribe to updates. `using var` is load-bearing: disposal is the only
+        // thing that unregisters a subscription — an undisposed one stays in the
+        // service forever, buffering every future event after this connection dies.
+        // Subscribed BEFORE the snapshot reads below (tiles, revisions, characters): an event published
+        // between a read and its subscription would otherwise be lost for the stream's whole lifetime
+        // (a cleanup deletion leaves a ghost character, a revision bump leaves viewers on the old ?v=).
+        // Events landing in both are harmless: the snapshot replaces, revisions dedupe in JS, character
+        // deltas upsert and the per-tick coalescing keeps their order. The channels are bounded
+        // (DropOldest), so a slow snapshot phase cannot buffer without limit.
+        using var tileUpdatesSub = updateNotificationService.SubscribeToTileUpdates();
+        using var mergeUpdatesSub = updateNotificationService.SubscribeToMergeUpdates();
+        using var mapUpdatesSub = updateNotificationService.SubscribeToMapUpdates();
+        using var mapDeletesSub = updateNotificationService.SubscribeToMapDeletes();
+        using var mapRevisionsSub = updateNotificationService.SubscribeToMapRevisions();
+        using var customMarkerCreatedSub = updateNotificationService.SubscribeToCustomMarkerCreated();
+        using var customMarkerUpdatedSub = updateNotificationService.SubscribeToCustomMarkerUpdated();
+        using var customMarkerDeletedSub = updateNotificationService.SubscribeToCustomMarkerDeleted();
+        using var pingCreatedSub = updateNotificationService.SubscribeToPingCreated();
+        using var pingDeletedSub = updateNotificationService.SubscribeToPingDeleted();
+        using var roadCreatedSub = updateNotificationService.SubscribeToRoadCreated();
+        using var roadUpdatedSub = updateNotificationService.SubscribeToRoadUpdated();
+        using var roadDeletedSub = updateNotificationService.SubscribeToRoadDeleted();
+        using var overlayUpdatedSub = updateNotificationService.SubscribeToOverlayUpdated();
+        using var notificationCreatedSub = updateNotificationService.SubscribeToNotificationCreated();
+        using var notificationUpdatedSub = updateNotificationService.SubscribeToNotificationUpdated();
+        using var notificationReadSub = updateNotificationService.SubscribeToNotificationRead();
+        using var notificationDismissedSub = updateNotificationService.SubscribeToNotificationDismissed();
+        using var timerCreatedSub = updateNotificationService.SubscribeToTimerCreated();
+        using var timerUpdatedSub = updateNotificationService.SubscribeToTimerUpdated();
+        using var timerCompletedSub = updateNotificationService.SubscribeToTimerCompleted();
+        using var timerDeletedSub = updateNotificationService.SubscribeToTimerDeleted();
+        using var markerCreatedSub = updateNotificationService.SubscribeToMarkerCreated();
+        using var markerUpdatedSub = updateNotificationService.SubscribeToMarkerUpdated();
+        using var markerDeletedSub = updateNotificationService.SubscribeToMarkerDeleted();
+        using var characterDeltasSub = hasPointerAuth ? updateNotificationService.SubscribeToCharacterDelta() : null;
 
-        // If the client provided a `since` marker, only send tiles updated after that marker.
-        // This dramatically reduces the initial payload on reconnects.
+        // Send the tile tokens: with `since`, only rows changed after it (an indexed DB delta - the
+        // common case, every reconnect); without, the tenant's whole list from TileCacheService's
+        // page-load snapshot. Both are tenant-scoped (explicit TenantId) to prevent cross-tenant leakage.
+        var tenantTiles = await tileCacheService.GetTilesSinceAsync(tenantId, sinceCache);
+
         if (sinceCache > 0)
         {
-            tenantTiles = tenantTiles.Where(t => t.Cache > sinceCache).ToList();
-            logger.LogInformation("SSE: Client requested tiles since {SinceCache} for tenant {TenantId} - sending {Count} changed tiles",
+            logger.LogDebug("SSE: Client requested tiles since {SinceCache} for tenant {TenantId} - sending {Count} changed tiles",
                 sinceCache, tenantId, tenantTiles.Count);
         }
 
@@ -543,15 +582,8 @@ public static class MapEndpoints
             var chunk = new List<TileCacheDto>(initialTileChunkSize);
             foreach (var t in tenantTiles)
             {
-                chunk.Add(new TileCacheDto
-                {
-                    M = t.MapId,
-                    X = t.Coord.X,
-                    Y = t.Coord.Y,
-                    Z = t.Zoom,
-                    // IMPORTANT: Cache is Unix milliseconds (long). Do not truncate to int.
-                    T = t.Cache
-                });
+                // Shared with other readers when it comes from the snapshot: added, never mutated
+                chunk.Add(t);
 
                 if (chunk.Count >= initialTileChunkSize)
                 {
@@ -598,53 +630,17 @@ public static class MapEndpoints
             // Use tenant ID already extracted above
             var allCharacters = characterService.GetAllCharacters(tenantId);
             logger.LogDebug("SSE: Sending character snapshot for tenant {TenantId} with {Count} characters", tenantId, allCharacters.Count);
-            if (allCharacters.Count > 0)
-            {
-                var first = allCharacters[0];
-                logger.LogWarning("SSE: First character - Id={Id}, Name={Name}, Map={Map}, Pos=({X},{Y}), Type={Type}",
-                    first.Id, first.Name, first.Map, first.Position.X, first.Position.Y, first.Type);
-            }
             // Send characters in the same format as CharacterModel (nested Position)
             // to match what the frontend expects
             var snapshotJson = JsonSerializer.Serialize(allCharacters);
-            logger.LogWarning("SSE: Snapshot JSON length: {Length}", snapshotJson.Length);
+            logger.LogDebug("SSE: Snapshot JSON length: {Length}", snapshotJson.Length);
             await context.Response.WriteAsync($"event: charactersSnapshot\ndata: {snapshotJson}\n\n");
             await context.Response.Body.FlushAsync();
         }
         else
         {
-            logger.LogWarning("SSE: User lacks Pointer auth, not sending character snapshot");
+            logger.LogDebug("SSE: User lacks Pointer auth, not sending character snapshot");
         }
-
-        // Subscribe to updates. `using var` is load-bearing: disposal is the only
-        // thing that unregisters a subscription — an undisposed one stays in the
-        // service forever, buffering every future event after this connection dies.
-        using var tileUpdatesSub = updateNotificationService.SubscribeToTileUpdates();
-        using var mergeUpdatesSub = updateNotificationService.SubscribeToMergeUpdates();
-        using var mapUpdatesSub = updateNotificationService.SubscribeToMapUpdates();
-        using var mapDeletesSub = updateNotificationService.SubscribeToMapDeletes();
-        using var mapRevisionsSub = updateNotificationService.SubscribeToMapRevisions();
-        using var customMarkerCreatedSub = updateNotificationService.SubscribeToCustomMarkerCreated();
-        using var customMarkerUpdatedSub = updateNotificationService.SubscribeToCustomMarkerUpdated();
-        using var customMarkerDeletedSub = updateNotificationService.SubscribeToCustomMarkerDeleted();
-        using var pingCreatedSub = updateNotificationService.SubscribeToPingCreated();
-        using var pingDeletedSub = updateNotificationService.SubscribeToPingDeleted();
-        using var roadCreatedSub = updateNotificationService.SubscribeToRoadCreated();
-        using var roadUpdatedSub = updateNotificationService.SubscribeToRoadUpdated();
-        using var roadDeletedSub = updateNotificationService.SubscribeToRoadDeleted();
-        using var overlayUpdatedSub = updateNotificationService.SubscribeToOverlayUpdated();
-        using var notificationCreatedSub = updateNotificationService.SubscribeToNotificationCreated();
-        using var notificationUpdatedSub = updateNotificationService.SubscribeToNotificationUpdated();
-        using var notificationReadSub = updateNotificationService.SubscribeToNotificationRead();
-        using var notificationDismissedSub = updateNotificationService.SubscribeToNotificationDismissed();
-        using var timerCreatedSub = updateNotificationService.SubscribeToTimerCreated();
-        using var timerUpdatedSub = updateNotificationService.SubscribeToTimerUpdated();
-        using var timerCompletedSub = updateNotificationService.SubscribeToTimerCompleted();
-        using var timerDeletedSub = updateNotificationService.SubscribeToTimerDeleted();
-        using var markerCreatedSub = updateNotificationService.SubscribeToMarkerCreated();
-        using var markerUpdatedSub = updateNotificationService.SubscribeToMarkerUpdated();
-        using var markerDeletedSub = updateNotificationService.SubscribeToMarkerDeleted();
-        using var characterDeltasSub = hasPointerAuth ? updateNotificationService.SubscribeToCharacterDelta() : null;
 
         var tileUpdates = tileUpdatesSub.Reader;
         var mergeUpdates = mergeUpdatesSub.Reader;
@@ -685,15 +681,30 @@ public static class MapEndpoints
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
 
-        logger.LogWarning("SSE: About to enter main event loop");
-
         try
         {
+            // First heartbeat: flushes the headers when the snapshot phase wrote nothing (fires the browser's
+            // onopen) and tells the client the live loop is running. Inside the try so an early client abort
+            // lands in the disconnect catch below; not before the snapshot, which would commit the 200 before
+            // a snapshot failure could still be answered with an error status.
+            await context.Response.WriteAsync(SseFrames.Heartbeat, cts.Token);
+            await context.Response.Body.FlushAsync(cts.Token);
+
             using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500)); // 500ms for character updates
-            var idleTicks = 0; // number of ticks without any outgoing data
+            var ticksSinceHeartbeat = 0; // heartbeat every 10 ticks (5 s), whatever else was sent
             int ticksSinceLastTileBatch = 0; // track ticks since last tile batch (tiles batched every 10s = 20 ticks)
 
-            logger.LogWarning("SSE: Entering while loop, cancellation requested: {Cancelled}", cts.Token.IsCancellationRequested);
+            // Bounded lifetime (~15 min ±20%). Authorization (TenantMapAccess, Pointer, tenant) is evaluated only
+            // at connect, and map-updates.js keeps a healthy stream open indefinitely, so a revoked Map/Pointer
+            // permission would never reach an open /map. Ending the stream makes the client reconnect (~1 s,
+            // backoff reset: the stream was healthy) through a fresh authorization against the API principal,
+            // which is rebuilt from the DB every 10 s, and resyncs the connect-only state (characters snapshot,
+            // revision replay; tiles via ?since=). Jittered so tabs opened together don't rotate together.
+            // Left by `break`, never by cancelling cts: that would land in the Error catch below.
+            var streamEndsAt = Environment.TickCount64
+                + (long)(StreamMaxLifetime.TotalMilliseconds * (0.8 + Random.Shared.NextDouble() * 0.4));
+
+            logger.LogDebug("SSE: entering event loop for tenant {TenantId}", tenantId);
 
             while (!cts.Token.IsCancellationRequested)
             {
@@ -792,8 +803,9 @@ public static class MapEndpoints
                 {
                     if (tenantMapIds.Contains(revision.MapId))
                     {
-                        var revisionDto = new { MapId = revision.MapId, Revision = revision.Revision };
-                        var revisionJson = JsonSerializer.Serialize(revisionDto, jsonOptions);
+                        // {"mapId","revision"} as before; ZoomQ bumps add "cells" (the regenerated
+                        // zoom-0 cells, null-omitted), so viewers refresh only those tiles
+                        var revisionJson = JsonSerializer.Serialize(revision, jsonOptions);
                         await context.Response.WriteAsync($"event: mapRevision\ndata: {revisionJson}\n\n");
                         await context.Response.Body.FlushAsync();
                     }
@@ -1084,8 +1096,6 @@ public static class MapEndpoints
                     }
                 }
 
-                bool sentData = false;
-
                 // Send character deltas every 500ms if there are any
                 if (characterDeltaBatch.Count > 0 || characterDeletions.Count > 0)
                 {
@@ -1104,11 +1114,12 @@ public static class MapEndpoints
                     
                     characterDeltaBatch.Clear();
                     characterDeletions.Clear();
-                    sentData = true;
                 }
 
-                // Send batched tile updates every 10 seconds (20 x 500ms ticks)
-                if (ticksSinceLastTileBatch >= 20)
+                var streamExpired = Environment.TickCount64 >= streamEndsAt;
+
+                // Send batched tile updates every 10 seconds (20 x 500ms ticks), and before the stream ends
+                if (ticksSinceLastTileBatch >= 20 || streamExpired)
                 {
                     if (tileBatch.Count > 0)
                     {
@@ -1116,41 +1127,42 @@ public static class MapEndpoints
                         await context.Response.WriteAsync($"data: {batchJson}\n\n");
                         await context.Response.Body.FlushAsync();
                         tileBatch.Clear();
-                        sentData = true;
                     }
                     ticksSinceLastTileBatch = 0;
                 }
 
-                if (sentData)
+                // Named heartbeat every ~5 s (10 x 500ms ticks), unconditionally. It is map-updates.js's proof
+                // that the stream is alive (its watchdog reconnects after 20 s of silence), and 5 s also keeps
+                // VPN/proxy idle timers (often 10 s) from cutting the stream. Never an SSE comment: EventSource
+                // does not surface comments to JS (see SseFrames).
+                if (++ticksSinceHeartbeat >= 10)
                 {
-                    idleTicks = 0; // we sent data, reset idle counter
+                    ticksSinceHeartbeat = 0;
+                    await context.Response.WriteAsync(SseFrames.Heartbeat, cts.Token);
+                    await context.Response.Body.FlushAsync(cts.Token);
                 }
-                else
+
+                if (streamExpired)
                 {
-                    // Heartbeat: keep the SSE connection alive even when there are no updates
-                    // Send a comment event every ~5 seconds (10 x 500ms ticks)
-                    // Reduced from 15s to 5s because VPNs/proxies often timeout idle connections at 10s
-                    idleTicks++;
-                    if (idleTicks % 10 == 0)
-                    {
-                        await context.Response.WriteAsync(": keep-alive\n\n");
-                        await context.Response.Body.FlushAsync();
-                    }
+                    logger.LogDebug("SSE: stream reached its maximum lifetime for tenant {TenantId}, closing for a reconnect", tenantId);
+                    break;
                 }
             }
 
-            logger.LogWarning("SSE: Exited while loop normally");
+            logger.LogDebug("SSE: Exited while loop normally");
         }
-        catch (OperationCanceledException ex)
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
-            logger.LogWarning("SSE: Cancelled - {Message}", ex.Message);
+            // cts is linked only to RequestAborted, so this is every normal browser disconnect.
+            // Any other cancellation falls through to the Error branch below.
+            logger.LogDebug("SSE: client disconnected");
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Unhandled exception in SSE stream /map/updates");
         }
 
-        logger.LogWarning("SSE: WatchGridUpdates method exiting");
+        logger.LogDebug("SSE: WatchGridUpdates method exiting");
     }
 
     private static async Task<IResult> ServeGridTile(

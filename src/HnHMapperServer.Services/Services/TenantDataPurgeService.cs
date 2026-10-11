@@ -117,6 +117,9 @@ public class TenantDataPurgeService : ITenantDataPurgeService
         result.DirtyZoomTiles = await _db.DirtyZoomTiles.IgnoreQueryFilters()
             .Where(d => d.TenantId == tenantId).ExecuteDeleteAsync(ct);
 
+        result.DirtyWebpCells = await _db.DirtyWebpCells
+            .Where(d => d.TenantId == tenantId).ExecuteDeleteAsync(ct);
+
         result.CustomMarkers = await _db.CustomMarkers.IgnoreQueryFilters()
             .Where(cm => cm.TenantId == tenantId).ExecuteDeleteAsync(ct);
 

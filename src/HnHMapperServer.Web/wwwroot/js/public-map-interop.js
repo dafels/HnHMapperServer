@@ -210,88 +210,81 @@ export async function initializePublicMap(mapElement, slug, centerX, centerY, in
     currentSlug = slug;
     tileVersion = version;  // Store version for cache busting
 
-    // Ensure DOM element is ready
-    await new Promise(resolve => {
-        requestAnimationFrame(() => {
-            try {
-                // Create map with smooth interactions enabled
-                mapInstance = L.map(mapElement, {
-                    minZoom: HnHMinZoom,
-                    maxZoom: HnHMaxZoom,
-                    crs: HnHCRS,
-                    attributionControl: false,
-                    zoomAnimation: true,
-                    fadeAnimation: true,        // Smooth tile fade-in
-                    zoomAnimationThreshold: 4   // Disable animation for large zoom jumps
-                });
+    // Create the map synchronously. Blazor calls this after render, so the element exists; the old
+    // requestAnimationFrame wait never ran in a hidden tab (browsers pause rAF there), which left the
+    // interop call pending until the 2-minute timeout - and its catch resolved on error, so a real failure
+    // was reported to .NET as success. A throw now rejects this call and reaches .NET as a JSException.
 
-                // Create tile layer with optimized settings for smooth experience
-                tileLayer = new PublicTileLayer('', {
-                    tileSize: TileSize,
-                    maxZoom: HnHMaxZoom,
-                    minZoom: HnHMinZoom,
-                    zoomReverse: true,
-                    updateWhenZooming: true,    // Load tiles during zoom for smoother experience
-                    updateWhenIdle: false,      // Don't wait for idle - load immediately
-                    keepBuffer: 10,             // Keep many tiles in memory for smooth panning
-                    updateInterval: 50,         // Fast tile updates for responsiveness
-                    zoomAnimationThreshold: 4   // Disable animation for large zooms
-                });
-
-                tileLayer.slug = slug;
-                tileLayer.addTo(mapInstance);
-
-                // Create marker layer for thingwalls (not added to map initially - hidden by default)
-                markerLayer = L.layerGroup();
-                markersVisible = false;
-                // Note: markerLayer is NOT added to map here - use setMarkersVisible() to show
-
-                // Calculate center position in pixels and convert to LatLng
-                // centerX/centerY are in original grid coordinates (100x100 units)
-                // Convert to pixel position: grid coord * BaseTileSize (100) gives absolute pixels
-                // The tile layer uses TileSize (400) for its grid, so we use absolute pixels directly
-                const centerPixelX = (centerX + 0.5) * BaseTileSize;
-                const centerPixelY = (centerY + 0.5) * BaseTileSize;
-                const centerLatLng = mapInstance.unproject([centerPixelX, centerPixelY], HnHMaxZoom);
-
-                // Set view to calculated center with appropriate zoom
-                mapInstance.setView(centerLatLng, initialZoom);
-
-                // Add dragend handler to update URL when user pans the map
-                mapInstance.on('dragend', () => {
-                    updateUrlWithPosition();
-                });
-
-                // Add zoomend handler with debounce to update URL when user zooms
-                mapInstance.on('zoomend', () => {
-                    clearTimeout(zoomDebounceTimer);
-                    zoomDebounceTimer = setTimeout(() => {
-                        updateUrlWithPosition();
-                    }, 300);
-
-                    // Also trigger preload for new zoom level
-                    clearTimeout(preloadDebounceTimer);
-                    preloadDebounceTimer = setTimeout(startBackgroundPreload, 1000);
-                });
-
-                // Add dragend handler to preload tiles after panning
-                mapInstance.on('dragend', () => {
-                    clearTimeout(preloadDebounceTimer);
-                    preloadDebounceTimer = setTimeout(startBackgroundPreload, 500);
-                });
-
-                console.log('[PublicMap] Initialized at center:', centerLatLng, 'zoom:', initialZoom);
-
-                // Start background preloading after a short delay to let the map render first
-                setTimeout(startBackgroundPreload, 500);
-
-                resolve();
-            } catch (ex) {
-                console.error('[PublicMap] Failed to initialize:', ex);
-                resolve();
-            }
-        });
+    // Create map with smooth interactions enabled
+    mapInstance = L.map(mapElement, {
+        minZoom: HnHMinZoom,
+        maxZoom: HnHMaxZoom,
+        crs: HnHCRS,
+        attributionControl: false,
+        zoomAnimation: true,
+        fadeAnimation: true,        // Smooth tile fade-in
+        zoomAnimationThreshold: 4   // Disable animation for large zoom jumps
     });
+
+    // Create tile layer with optimized settings for smooth experience
+    tileLayer = new PublicTileLayer('', {
+        tileSize: TileSize,
+        maxZoom: HnHMaxZoom,
+        minZoom: HnHMinZoom,
+        zoomReverse: true,
+        updateWhenZooming: true,    // Load tiles during zoom for smoother experience
+        updateWhenIdle: false,      // Don't wait for idle - load immediately
+        keepBuffer: 10,             // Keep many tiles in memory for smooth panning
+        updateInterval: 50,         // Fast tile updates for responsiveness
+        zoomAnimationThreshold: 4   // Disable animation for large zooms
+    });
+
+    tileLayer.slug = slug;
+    tileLayer.addTo(mapInstance);
+
+    // Create marker layer for thingwalls (not added to map initially - hidden by default)
+    markerLayer = L.layerGroup();
+    markersVisible = false;
+    // Note: markerLayer is NOT added to map here - use setMarkersVisible() to show
+
+    // Calculate center position in pixels and convert to LatLng
+    // centerX/centerY are in original grid coordinates (100x100 units)
+    // Convert to pixel position: grid coord * BaseTileSize (100) gives absolute pixels
+    // The tile layer uses TileSize (400) for its grid, so we use absolute pixels directly
+    const centerPixelX = (centerX + 0.5) * BaseTileSize;
+    const centerPixelY = (centerY + 0.5) * BaseTileSize;
+    const centerLatLng = mapInstance.unproject([centerPixelX, centerPixelY], HnHMaxZoom);
+
+    // Set view to calculated center with appropriate zoom
+    mapInstance.setView(centerLatLng, initialZoom);
+
+    // Add dragend handler to update URL when user pans the map
+    mapInstance.on('dragend', () => {
+        updateUrlWithPosition();
+    });
+
+    // Add zoomend handler with debounce to update URL when user zooms
+    mapInstance.on('zoomend', () => {
+        clearTimeout(zoomDebounceTimer);
+        zoomDebounceTimer = setTimeout(() => {
+            updateUrlWithPosition();
+        }, 300);
+
+        // Also trigger preload for new zoom level
+        clearTimeout(preloadDebounceTimer);
+        preloadDebounceTimer = setTimeout(startBackgroundPreload, 1000);
+    });
+
+    // Add dragend handler to preload tiles after panning
+    mapInstance.on('dragend', () => {
+        clearTimeout(preloadDebounceTimer);
+        preloadDebounceTimer = setTimeout(startBackgroundPreload, 500);
+    });
+
+    console.log('[PublicMap] Initialized at center:', centerLatLng, 'zoom:', initialZoom);
+
+    // Start background preloading after a short delay to let the map render first
+    setTimeout(startBackgroundPreload, 500);
 }
 
 /**

@@ -32,12 +32,35 @@ public class TenantFilePathService : ITenantFilePathService
     }
 
     /// <summary>
-    /// Gets the relative path for database storage
+    /// Gets the relative path for database storage. Throws for a grid id that is not a plain
+    /// file name (<see cref="IsSafeGridId"/>).
     /// </summary>
     public string GetGridRelativePath(string tenantId, string gridId)
     {
-        return Path.Combine("tenants", tenantId, "grids", $"{gridId}.png");
+        return PoolRelativePath(tenantId, gridId)
+            ?? throw new UnauthorizedAccessException($"Grid id is not a plain file name: '{gridId}'");
     }
+
+    /// <summary>
+    /// Grid ids come from game clients and become pool file names. A safe one is a single path
+    /// segment: no separators, no "..", no drive colon, nothing the file system rejects.
+    /// <see cref="ValidatePath"/> alone is not enough — "../5/0/1_1" stays inside the tenant
+    /// directory while naming another map's file.
+    /// </summary>
+    public static bool IsSafeGridId(string? gridId) =>
+        !string.IsNullOrWhiteSpace(gridId)
+        && gridId.IndexOfAny(UnsafeGridIdChars) < 0
+        && !gridId.Contains("..", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The pool path tenants/{t}/grids/{gridId}.png (relative to GridStorage), or null for an
+    /// unsafe grid id — for callers that must skip such ids rather than fail.
+    /// </summary>
+    public static string? PoolRelativePath(string tenantId, string gridId) =>
+        IsSafeGridId(gridId) ? Path.Combine("tenants", tenantId, "grids", $"{gridId}.png") : null;
+
+    private static readonly char[] UnsafeGridIdChars =
+        Path.GetInvalidFileNameChars().Concat(new[] { '/', '\\', ':' }).Distinct().ToArray();
 
     /// <summary>
     /// Gets the relative tile path for database storage

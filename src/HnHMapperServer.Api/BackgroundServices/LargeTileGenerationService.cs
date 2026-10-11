@@ -1,8 +1,8 @@
 using System.Diagnostics;
-using HnHMapperServer.Infrastructure.Data;
+using HnHMapperServer.Api.Endpoints;
+using HnHMapperServer.Api.Services;
 using HnHMapperServer.Services.Interfaces;
 using HnHMapperServer.Services.Services;
-using Microsoft.EntityFrameworkCore;
 
 namespace HnHMapperServer.Api.BackgroundServices;
 
@@ -10,32 +10,33 @@ namespace HnHMapperServer.Api.BackgroundServices;
 /// Background service that pre-generates 400x400 WebP tiles.
 ///
 /// Phase 1 (startup): Full scan of all tenants to catch first-deploy and crash recovery.
-/// Phase 2 (ongoing): Dirty-driven scan every 5 minutes — only checks maps with DirtyZoomTile entries.
+/// Phase 2 (ongoing): every 5 minutes, gap-fill the maps with pending dirty marks and run the
+/// durable WebP backstop (<see cref="WebpDirtyCellBackstop"/>) over DirtyWebpCells.
 /// </summary>
 public class LargeTileGenerationService : BackgroundService
 {
     private const string LogPrefix = "[LargeTile]";
     private const int DirtyScanIntervalMinutes = 5;
 
-    /// <summary>
-    /// Per-cycle ceiling on the zoom queue depth this scan may fill it to. Leaves headroom in the
-    /// bounded (4096, DropOldest) channel so a big backlog can never flush out upload-driven
-    /// requests; whatever doesn't fit is retried next cycle (the dirty rows persist).
-    /// </summary>
-    private const int MaxQueueDepthForBackfill = 3000;
-
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly ZoomTileQueueService _zoomTileQueue;
+    private readonly MapRevisionCache _revisionCache;
+    private readonly IUpdateNotificationService _updateNotificationService;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<LargeTileGenerationService> _logger;
     private int _cycleCount = 0;
+    private bool _legacyMarksSeeded;
 
     public LargeTileGenerationService(
         IServiceScopeFactory scopeFactory,
-        ZoomTileQueueService zoomTileQueue,
+        MapRevisionCache revisionCache,
+        IUpdateNotificationService updateNotificationService,
+        IHttpClientFactory httpClientFactory,
         ILogger<LargeTileGenerationService> logger)
     {
         _scopeFactory = scopeFactory;
-        _zoomTileQueue = zoomTileQueue;
+        _revisionCache = revisionCache;
+        _updateNotificationService = updateNotificationService;
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
@@ -47,6 +48,13 @@ public class LargeTileGenerationService : BackgroundService
             "{Prefix} SERVICE-INIT starting in {Delay}s",
             LogPrefix, (int)startupDelay.TotalSeconds);
         await Task.Delay(startupDelay, stoppingToken);
+
+        // Before anything else (the legacy rebuild consumes zoom-1 rows after its 1-hour delay).
+        using (var seedScope = _scopeFactory.CreateScope())
+        {
+            await EnsureLegacyMarksSeededAsync(
+                seedScope.ServiceProvider.GetRequiredService<WebpDirtyCellBackstop>(), stoppingToken);
+        }
 
         // === Phase 1: Startup full scan (runs once) ===
         await RunStartupScanAsync(stoppingToken);
@@ -79,6 +87,52 @@ public class LargeTileGenerationService : BackgroundService
     }
 
     /// <summary>
+    /// Once per process start: carries the WebP work still pending in the legacy zoom-1 dirty rows
+    /// over to DirtyWebpCells (nothing is lost at deploy). Idempotent; retried each dirty-scan
+    /// cycle until it succeeds once.
+    /// </summary>
+    private async Task EnsureLegacyMarksSeededAsync(WebpDirtyCellBackstop backstop, CancellationToken ct)
+    {
+        if (_legacyMarksSeeded)
+        {
+            return;
+        }
+
+        try
+        {
+            await backstop.SeedFromLegacyDirtyRowsAsync(ct);
+            _legacyMarksSeeded = true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "{Prefix} BACKFILL seeding from legacy dirty rows failed; retrying next cycle", LogPrefix);
+        }
+    }
+
+    /// <summary>
+    /// Makes the batch's writes visible beyond this process, as ZoomQ does for its own: the Web
+    /// process drops its cached tiles of each map (it holds its own LargeTileService statics, and
+    /// the gap-fill rewrites EXISTING parents), then the map revision is bumped so browsers stop
+    /// using tiles they hold under the old immutable URL. The batch already evicted this process's
+    /// cache per tile written. An unreachable Web process (still starting) is not retried per map.
+    /// </summary>
+    private async Task PublishWrittenMapsAsync(string tenantId, HashSet<int> writtenMapIds)
+    {
+        foreach (var mapId in writtenMapIds)
+        {
+            if (!await SuperadminEndpoints.InvalidateWebMapTileCacheAsync(_httpClientFactory, tenantId, mapId, _logger))
+            {
+                break;
+            }
+        }
+
+        foreach (var mapId in writtenMapIds)
+        {
+            _updateNotificationService.NotifyMapRevision(mapId, _revisionCache.Increment(mapId));
+        }
+    }
+
+    /// <summary>
     /// Phase 1: Full scan of all tenants. Catches first deploy, crash recovery, queue overflow from previous run.
     /// </summary>
     private async Task RunStartupScanAsync(CancellationToken ct)
@@ -103,8 +157,10 @@ public class LargeTileGenerationService : BackgroundService
 
                 try
                 {
-                    var generated = await largeTileService.GenerateMissingTilesAsync(tenant.Id, ct);
+                    var writtenMapIds = new HashSet<int>();
+                    var generated = await largeTileService.GenerateMissingTilesAsync(tenant.Id, ct, writtenMapIds);
                     totalGenerated += generated;
+                    await PublishWrittenMapsAsync(tenant.Id, writtenMapIds);
                 }
                 catch (Exception ex)
                 {
@@ -128,8 +184,11 @@ public class LargeTileGenerationService : BackgroundService
     }
 
     /// <summary>
-    /// Phase 2: Only scan maps that have DirtyZoomTile entries (recent uploads).
-    /// O(dirty maps) instead of O(all maps with all tiles).
+    /// Phase 2, per active tenant: gap-fill the maps with pending marks (legacy DirtyZoomTiles or
+    /// DirtyWebpCells), then run the WebP backstop over the tenant's settled DirtyWebpCells marks.
+    /// Each step has its own try/catch, and the backstop never sits behind the gap-fill's fast
+    /// skip: the legacy rebuild deletes DirtyZoomTiles rows on its own schedule, so their absence
+    /// says nothing about pending WebP work.
     /// </summary>
     private async Task RunDirtyScanAsync(CancellationToken ct)
     {
@@ -139,6 +198,9 @@ public class LargeTileGenerationService : BackgroundService
         var largeTileService = scope.ServiceProvider.GetRequiredService<ILargeTileService>();
         var tileService = scope.ServiceProvider.GetRequiredService<ITileService>();
         var tenantService = scope.ServiceProvider.GetRequiredService<ITenantService>();
+        var backstop = scope.ServiceProvider.GetRequiredService<WebpDirtyCellBackstop>();
+
+        await EnsureLegacyMarksSeededAsync(backstop, ct);
 
         var tenants = await tenantService.GetAllTenantsAsync();
         var activeTenants = tenants.Where(t => t.IsActive).ToList();
@@ -151,35 +213,40 @@ public class LargeTileGenerationService : BackgroundService
         {
             if (ct.IsCancellationRequested) break;
 
-            // Fast skip: no dirty tiles means no recent uploads to catch up on
-            if (!await tileService.HasDirtyZoomTilesAsync(tenant.Id))
-            {
-                tenantsSkipped++;
-                continue;
-            }
-
             try
             {
-                var dirtyMapIds = await tileService.GetDirtyMapIdsAsync(tenant.Id);
+                var dirtyMapIds = await tileService.HasDirtyZoomTilesAsync(tenant.Id)
+                    ? await tileService.GetDirtyMapIdsAsync(tenant.Id)
+                    : new HashSet<int>();
+                dirtyMapIds.UnionWith(await backstop.GetMarkedMapIdsAsync(tenant.Id, ct));
+
                 if (dirtyMapIds.Count == 0)
                 {
                     tenantsSkipped++;
-                    continue;
                 }
-
-                tenantsScanned++;
-                var generated = await largeTileService.GenerateMissingTilesForMapsAsync(
-                    tenant.Id, dirtyMapIds, ct);
-                totalGenerated += generated;
-
-                // Gap-fill above only creates MISSING files. Cells whose files exist but predate
-                // their dirty marks (merges, imports, dropped queue work, restarts) stay stale
-                // forever without this: re-enqueue them for force-regeneration.
-                await EnqueueStaleWebpCellsAsync(scope, tenant.Id, ct);
+                else
+                {
+                    tenantsScanned++;
+                    var writtenMapIds = new HashSet<int>();
+                    totalGenerated += await largeTileService.GenerateMissingTilesForMapsAsync(
+                        tenant.Id, dirtyMapIds, ct, writtenMapIds);
+                    await PublishWrittenMapsAsync(tenant.Id, writtenMapIds);
+                }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogWarning(ex, "{Prefix} DIRTY-SCAN [{Tenant}] failed", LogPrefix, tenant.Id);
+                _logger.LogWarning(ex, "{Prefix} DIRTY-SCAN [{Tenant}] gap-fill failed", LogPrefix, tenant.Id);
+            }
+
+            // Gap-fill only creates MISSING files; the backstop re-enqueues cells whose existing
+            // files predate their marks (merges, imports, wipes, dropped queue work, restarts).
+            try
+            {
+                await backstop.RunAsync(tenant.Id, DateTime.UtcNow, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "{Prefix} BACKFILL [{Tenant}] failed", LogPrefix, tenant.Id);
             }
         }
 
@@ -194,100 +261,13 @@ public class LargeTileGenerationService : BackgroundService
         else if (_cycleCount % 12 == 0) // Log heartbeat every hour (12 x 5min)
         {
             _logger.LogInformation(
-                "{Prefix} DIRTY-SCAN #{Cycle}: no work (all {Count} tenants clean) in {Ms}ms",
-                LogPrefix, _cycleCount, activeTenants.Count, sw.ElapsedMilliseconds);
+                "{Prefix} DIRTY-SCAN #{Cycle}: no new tiles ({Scanned} of {Count} tenants had marks) in {Ms}ms",
+                LogPrefix, _cycleCount, tenantsScanned, activeTenants.Count, sw.ElapsedMilliseconds);
 
             if (largeTileService is LargeTileService lts)
             {
                 lts.LogStatsSummary();
             }
-        }
-    }
-
-    /// <summary>
-    /// Durable WebP regeneration backstop. The upload path's in-memory queue is bounded
-    /// (DropOldest) and lost on restart; DirtyZoomTiles rows are not. This derives the WebP
-    /// zoom-0 cells covering each tenant's dirty rows and re-enqueues every cell whose z0 file
-    /// is older than its newest dirty mark (stale content) or missing while zoom-0 rows exist.
-    /// Freshly regenerated cells pass the mtime check on later cycles, so nothing loops; the
-    /// rows themselves are consumed by ZoomTileRebuildService (legacy pyramid) as before.
-    /// </summary>
-    private async Task EnqueueStaleWebpCellsAsync(IServiceScope scope, string tenantId, CancellationToken ct)
-    {
-        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        var largeTileService = scope.ServiceProvider.GetRequiredService<ILargeTileService>();
-
-        var zoom1Rows = await db.DirtyZoomTiles
-            .AsNoTracking()
-            .IgnoreQueryFilters()
-            .Where(d => d.TenantId == tenantId && d.Zoom == 1)
-            .Select(d => new { d.MapId, d.CoordX, d.CoordY, d.CreatedAt })
-            .ToListAsync(ct);
-
-        if (zoom1Rows.Count == 0)
-        {
-            return;
-        }
-
-        var cells = WebpDirtyCellPlanner.DeriveCells(
-            zoom1Rows.Select(r => (r.MapId, r.CoordX, r.CoordY, r.CreatedAt)));
-
-        var enqueued = 0;
-        var skippedFresh = 0;
-        var skippedEmpty = 0;
-
-        foreach (var cell in cells)
-        {
-            if (ct.IsCancellationRequested) break;
-
-            if (_zoomTileQueue.PendingCount >= MaxQueueDepthForBackfill)
-            {
-                _logger.LogInformation(
-                    "{Prefix} BACKFILL [{Tenant}] queue at capacity, deferring {Remaining} cells to next cycle",
-                    LogPrefix, tenantId, cells.Count - enqueued - skippedFresh - skippedEmpty);
-                break;
-            }
-
-            var z0Path = largeTileService.GetLargeTilePath(tenantId, cell.MapId, 0, cell.CellX, cell.CellY);
-
-            if (File.Exists(z0Path))
-            {
-                if (File.GetLastWriteTimeUtc(z0Path) >= cell.NewestMark)
-                {
-                    skippedFresh++;
-                    continue; // already regenerated after the newest mark
-                }
-            }
-            else
-            {
-                // No file: only worth enqueueing if the cell actually has renderable zoom-0 rows
-                // (regeneration would otherwise be a no-op every cycle until the rows are consumed).
-                var minX = cell.CellX * 4;
-                var minY = cell.CellY * 4;
-                var hasRows = await db.Tiles
-                    .AsNoTracking()
-                    .IgnoreQueryFilters()
-                    .AnyAsync(t => t.TenantId == tenantId && t.MapId == cell.MapId && t.Zoom == 0
-                        && t.CoordX >= minX && t.CoordX <= minX + 3
-                        && t.CoordY >= minY && t.CoordY <= minY + 3
-                        && t.File != "", ct);
-                if (!hasRows)
-                {
-                    skippedEmpty++;
-                    continue;
-                }
-            }
-
-            _zoomTileQueue.EnqueueZoomRegeneration(
-                new ZoomTileRequest(tenantId, cell.MapId, cell.CellX * 4, cell.CellY * 4));
-            enqueued++;
-        }
-
-        if (enqueued > 0)
-        {
-            _logger.LogInformation(
-                "{Prefix} BACKFILL [{Tenant}] enqueued {Enqueued} stale webp cells ({Fresh} fresh, {Empty} empty, {Total} candidates)",
-                LogPrefix, tenantId, enqueued, skippedFresh, skippedEmpty, cells.Count);
         }
     }
 }

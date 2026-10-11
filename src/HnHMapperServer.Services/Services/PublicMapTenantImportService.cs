@@ -210,9 +210,9 @@ public class PublicMapTenantImportService : IPublicMapTenantImportService
                 .ToHashSetAsync(cancellationToken);
 
             // Cells of the target map already owned by a grid row. The import must never plant a
-            // DIFFERENT grid id on an owned cell — that is the two-grids-one-cell corruption the
-            // 2026-08 incident was made of. TryAdd, not ToDictionary: a previously corrupted DB
-            // can hold several grids on one cell, and any owner blocks the cell.
+            // DIFFERENT grid id on an owned cell — that is the two-grids-one-cell corruption.
+            // TryAdd, not ToDictionary: a previously corrupted DB can hold several grids on one
+            // cell, and any owner blocks the cell.
             var occupiedCellOwnerRows = await _db.Grids
                 .IgnoreQueryFilters()
                 .Where(g => g.TenantId == targetTenantId && g.Map == finalMapId)
@@ -393,8 +393,8 @@ public class PublicMapTenantImportService : IPublicMapTenantImportService
             Report(progress, stopwatch, 4, "Generating zoom levels", 1, 1, "Done", 95);
 
             // Direct _db.Tiles writes bypass TileService, so nothing marked the zoom parents
-            // dirty — the WebP scan needs those rows to force-refresh existing stale tiles
-            // covering the imported area (gap-fill alone skips any file that already exists).
+            // dirty — the WebP backstop needs the cell marks to force-refresh existing stale
+            // tiles covering the imported area (gap-fill alone skips any file that already exists).
             if (writtenZoom0Coords.Count > 0)
             {
                 await _tileService.MarkParentTilesDirtyBatchAsync(

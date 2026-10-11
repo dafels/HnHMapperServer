@@ -74,7 +74,8 @@ public class TileService : ITileService
     }
 
     /// <summary>
-    /// Marks all parent zoom tiles (1-6) as dirty when a base tile is uploaded.
+    /// Marks all parent zoom tiles (1-6) as dirty when a base tile is uploaded, plus the WebP
+    /// cell covering it (see <see cref="MarkWebpCellsDirtyAsync"/>).
     /// Uses INSERT OR IGNORE to avoid duplicates efficiently.
     /// </summary>
     private async Task MarkParentTilesDirtyAsync(int mapId, Coord baseCoord, string tenantId)
@@ -120,6 +121,94 @@ public class TileService : ITileService
                 }
             }
         }
+
+        await MarkWebpCellsDirtyAsync(tenantId, mapId, new[] { baseCoord });
+    }
+
+    /// <summary>
+    /// The WebP pyramid's own durable queue: one DirtyWebpCells row per 4x4 zoom-0 cell, whose
+    /// MarkedAt is bumped on every re-mark, consumed only by the WebP backstop once the cell's
+    /// chain on disk is newer than the mark. It deliberately does not share DirtyZoomTiles, which
+    /// the legacy PNG rebuild deletes on its own schedule (a backstop reading it saw 0-100% of the
+    /// marks depending on timer phase), and whose CreatedAt never moves forward (data written after
+    /// a regeneration looked fresh). Callers mark after their tile rows are saved, so a mark is
+    /// never older than the data it covers. Own SaveChanges, separate from DirtyZoomTiles, so a
+    /// failure on one never drops the other.
+    /// </summary>
+    private async Task MarkWebpCellsDirtyAsync(string tenantId, int mapId, IEnumerable<Coord> baseCoords)
+    {
+        // Sorted so each chunk's bounding-box read stays compact.
+        var cells = baseCoords
+            .Select(c => WebpDirtyCellPlanner.CellOf(c.X, c.Y))
+            .Distinct()
+            .OrderBy(c => c.X)
+            .ThenBy(c => c.Y)
+            .ToList();
+
+        var now = DateTime.UtcNow;
+        const int chunkSize = 500;
+        for (int i = 0; i < cells.Count; i += chunkSize)
+        {
+            var chunk = cells.GetRange(i, Math.Min(chunkSize, cells.Count - i));
+
+            // Two attempts: a concurrent writer may insert the same cell first (unique index), or
+            // the backstop may delete a row between our read and our update (0 rows affected); a
+            // fresh read resolves both. A second failure (e.g. the map was deleted: FK) is dropped.
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                try
+                {
+                    await UpsertWebpCellsAsync(tenantId, mapId, chunk, now);
+                    break;
+                }
+                catch (DbUpdateException ex)
+                {
+                    _dbContext.ChangeTracker.Clear();
+                    if (attempt == 1)
+                    {
+                        _logger.LogDebug(ex, "Could not mark {Count} WebP cells dirty for tenant {TenantId} map {MapId}",
+                            chunk.Count, tenantId, mapId);
+                    }
+                }
+            }
+        }
+    }
+
+    private async Task UpsertWebpCellsAsync(string tenantId, int mapId, List<(int X, int Y)> cells, DateTime now)
+    {
+        int minX = cells.Min(c => c.X), maxX = cells.Max(c => c.X);
+        int minY = cells.Min(c => c.Y), maxY = cells.Max(c => c.Y);
+
+        var existing = (await _dbContext.DirtyWebpCells
+                .Where(d => d.TenantId == tenantId && d.MapId == mapId
+                    && d.CellX >= minX && d.CellX <= maxX
+                    && d.CellY >= minY && d.CellY <= maxY)
+                .ToListAsync())
+            .ToDictionary(d => (d.CellX, d.CellY));
+
+        foreach (var cell in cells)
+        {
+            if (existing.TryGetValue(cell, out var row))
+            {
+                if (row.MarkedAt < now)
+                {
+                    row.MarkedAt = now;
+                }
+            }
+            else
+            {
+                _dbContext.DirtyWebpCells.Add(new DirtyWebpCellEntity
+                {
+                    TenantId = tenantId,
+                    MapId = mapId,
+                    CellX = cell.X,
+                    CellY = cell.Y,
+                    MarkedAt = now
+                });
+            }
+        }
+
+        await _dbContext.SaveChangesAsync();
     }
 
     public async Task<TileData?> GetTileAsync(int mapId, Coord coord, int zoom)
@@ -133,9 +222,36 @@ public class TileService : ITileService
     }
 
     /// <summary>
+    /// Explicit tenantId + IgnoreQueryFilters like the integrity service's reference set
+    /// (MapIntegrityService.LoadReferencedFilesAsync), so a merge, the scan and the orphan purge
+    /// agree on which per-map directories are still in use. Stored paths carry the separator of
+    /// the OS that wrote them, so both forms are matched.
+    /// </summary>
+    public async Task<bool> AnyLiveTileReferencesDirectoryAsync(string tenantId, string relativeDirectory, int excludeMapId)
+    {
+        var slashPrefix = relativeDirectory.Replace('\\', '/').TrimEnd('/') + "/";
+        var backslashPrefix = slashPrefix.Replace('/', '\\');
+
+        var liveMapIds = _dbContext.Maps
+            .IgnoreQueryFilters()
+            .Where(m => m.TenantId == tenantId && m.Id != excludeMapId)
+            .Select(m => m.Id);
+
+        return await _dbContext.Tiles
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .AnyAsync(t => t.TenantId == tenantId
+                && t.File != ""
+                && liveMapIds.Contains(t.MapId)
+                && (t.File.StartsWith(slashPrefix) || t.File.StartsWith(backslashPrefix)));
+    }
+
+    /// <summary>
     /// Marks the zoom 1-6 parents of many base coords dirty in one pass. Unlike the per-tile
     /// path this dedupes parents in memory and diffs against existing rows first, so bulk
-    /// writers (imports, merges, rebuilds) don't pay 6 exists-queries per tile.
+    /// writers (imports, merges, rebuilds) don't pay 6 exists-queries per tile. Also marks the
+    /// WebP cells covering them (bumping existing marks), which is what makes a multi-flush import
+    /// re-dirty a cell the backstop regenerated between two flushes.
     /// Explicit tenantId + IgnoreQueryFilters: bulk callers run outside the row's tenant context
     /// (superadmin requests, background services).
     /// </summary>
@@ -195,6 +311,114 @@ public class TileService : ITileService
         {
             _logger.LogDebug("Marked {Count} parent zoom tiles dirty for tenant {TenantId} map {MapId} ({BaseCount} base coords)",
                 toAdd.Count, tenantId, mapId, baseCoords.Count);
+        }
+
+        await MarkWebpCellsDirtyAsync(tenantId, mapId, baseCoords);
+    }
+
+    /// <summary>
+    /// Tenant-scoped (the caller's ambient tenant, like <see cref="GetTileAsync"/>).
+    /// </summary>
+    public async Task<bool> HasRenderableTileAsync(int mapId, Coord coord, string gridStorage)
+    {
+        var tile = await GetTileAsync(mapId, coord, 0);
+        return tile != null
+            && !string.IsNullOrEmpty(tile.File)
+            && File.Exists(Path.Combine(gridStorage, tile.File));
+    }
+
+    /// <summary>
+    /// Writes a zoom-0 grid PNG or a legacy zoom PNG in place of whatever is at
+    /// <paramref name="fullPath"/> and charges the quota with the size CHANGE: grid refreshes
+    /// (every 30 min per walked grid) and zoom rebuilds overwrite the same file, and charging
+    /// the full size each time is what drifted CurrentStorageMB above disk. The write is
+    /// temp file + rename (AtomicFile), so a failure leaves the previous file intact — the old
+    /// GridUpload deleted the only copy of a tile after a failed write.
+    /// </summary>
+    /// <returns>Bytes charged (new size minus the replaced file's size).</returns>
+    public async Task<long> ReplaceTileFileAsync(string tenantId, string fullPath, byte[] bytes)
+    {
+        var previous = AtomicFile.LengthOrZero(fullPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        await AtomicFile.WriteAllBytesAsync(fullPath, bytes);
+
+        var delta = bytes.LongLength - previous;
+        if (delta != 0)
+        {
+            await _quotaService.IncrementStorageUsageAsync(tenantId, delta / 1024.0 / 1024.0);
+        }
+
+        return delta;
+    }
+
+    /// <summary>
+    /// Best-effort removal of a retired (merged-away) map's tile directories, charging the quota
+    /// with the net change on disk in one update. The WebP pyramid (tenants/{t}/large/{mapId}/)
+    /// always goes and is never credited: the pyramid is reconciled-only, and the merge
+    /// regenerates the target's cells uncharged. The per-map directory (tenants/{t}/{mapId}/:
+    /// legacy zoom 1-6 pyramid plus any imported zoom-0 PNGs) goes only when no LIVE-map row still
+    /// references a file inside it — the integrity purge's rule, so merge, scan and purge agree —
+    /// and its bytes are credited once the delete succeeds (a failed delete credits nothing; the
+    /// reconciliation corrects a partial one). Grid PNGs in the shared grids/ dir are untouched.
+    /// </summary>
+    /// <param name="rehomedBytes">Bytes the caller copied out of the per-map directory into the
+    /// grid pool just before (the merge re-home): charged in the same update.</param>
+    /// <returns>Bytes charged (rehomed minus freed).</returns>
+    public async Task<long> DeleteRetiredMapDirectoriesAsync(string tenantId, int mapId, string gridStorage, long rehomedBytes)
+    {
+        TryDeleteDirectory(Path.Combine(gridStorage, "tenants", tenantId, "large", mapId.ToString()), out _);
+
+        long freed = 0;
+        var perMapDir = Path.Combine(gridStorage, "tenants", tenantId, mapId.ToString());
+        if (Directory.Exists(perMapDir))
+        {
+            // The retired map's row may still exist (merge deletes it after this call), so it
+            // is excluded explicitly; its own rows were already dropped.
+            if (await AnyLiveTileReferencesDirectoryAsync(
+                    tenantId, Path.Combine("tenants", tenantId, mapId.ToString()), excludeMapId: mapId))
+            {
+                _logger.LogWarning(
+                    "Kept directory of merged map {SourceMapId} (tenant {TenantId}): live tile rows still reference files inside it",
+                    mapId, tenantId);
+            }
+            else if (TryDeleteDirectory(perMapDir, out var bytes))
+            {
+                freed = bytes;
+            }
+        }
+
+        var delta = rehomedBytes - freed;
+        if (delta != 0)
+        {
+            await _quotaService.IncrementStorageUsageAsync(tenantId, delta / 1024.0 / 1024.0);
+        }
+
+        return delta;
+    }
+
+    /// <summary>Deletes a directory tree; <paramref name="bytes"/> = what it held when it was deleted.</summary>
+    private bool TryDeleteDirectory(string dir, out long bytes)
+    {
+        bytes = 0;
+        try
+        {
+            if (!Directory.Exists(dir))
+                return false;
+
+            long total = 0;
+            foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+            {
+                total += AtomicFile.LengthOrZero(file);
+            }
+
+            Directory.Delete(dir, recursive: true);
+            bytes = total;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete retired map directory {Dir}", dir);
+            return false;
         }
     }
 
@@ -279,20 +503,19 @@ public class TileService : ITileService
             _logger.LogDebug("Zoom tile Map={MapId} Zoom={Zoom} Coord={Coord} has only {Count}/4 sub-tiles loaded", mapId, zoom, coord, loadedSubTiles);
         }
 
-        // Save the combined tile to tenant-specific directory
+        // Save the combined tile to tenant-specific directory. Rebuilds overwrite the same file,
+        // so only the size change is charged (ReplaceTileFileAsync).
         var outputDir = Path.Combine(gridStorage, "tenants", tenantId, mapId.ToString(), zoom.ToString());
-        Directory.CreateDirectory(outputDir);
-
         var outputFile = Path.Combine(outputDir, $"{coord.Name()}.png");
-        await img.SaveAsPngAsync(outputFile, FastPngEncoder);
 
-        // Calculate file size
-        var fileInfo = new FileInfo(outputFile);
-        var fileSizeBytes = (int)fileInfo.Length;
-
-        // Update tenant storage quota
-        var fileSizeMB = fileSizeBytes / 1024.0 / 1024.0;
-        await _quotaService.IncrementStorageUsageAsync(tenantId, fileSizeMB);
+        byte[] bytes;
+        using (var ms = new MemoryStream())
+        {
+            await img.SaveAsPngAsync(ms, FastPngEncoder);
+            bytes = ms.ToArray();
+        }
+        await ReplaceTileFileAsync(tenantId, outputFile, bytes);
+        var fileSizeBytes = bytes.Length;
 
         var relativePath = Path.Combine("tenants", tenantId, mapId.ToString(), zoom.ToString(), $"{coord.Name()}.png");
         await SaveTileAsync(mapId, coord, zoom, relativePath, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), tenantId, fileSizeBytes);
@@ -415,38 +638,12 @@ public class TileService : ITileService
                     continue;
                 }
 
-                // Check if zoom tile exists (for quota adjustment)
-                var existingTile = await _dbContext.Tiles
-                    .IgnoreQueryFilters()
-                    .Where(t => t.TenantId == tenantId
-                        && t.MapId == dirty.MapId
-                        && t.Zoom == dirty.Zoom
-                        && t.CoordX == dirty.CoordX
-                        && t.CoordY == dirty.CoordY)
-                    .FirstOrDefaultAsync();
-
-                long oldFileSizeBytes = 0;
-                if (existingTile != null && !string.IsNullOrEmpty(existingTile.File))
-                {
-                    var oldFilePath = Path.Combine(gridStorage, existingTile.File);
-                    if (File.Exists(oldFilePath))
-                    {
-                        oldFileSizeBytes = new FileInfo(oldFilePath).Length;
-                    }
-                }
-
                 _logger.LogDebug("Rebuilding dirty zoom tile: Map={MapId}, Zoom={Zoom}, Coord={Coord}, SubTiles={SubTileCount}",
                     dirty.MapId, dirty.Zoom, coord, subTiles.Count);
 
+                // Charges only the size change of the file it replaces (whether or not a Tiles
+                // row pointed at it — the old compensation here missed orphan files).
                 await UpdateZoomLevelAsync(dirty.MapId, coord, dirty.Zoom, tenantId, gridStorage, subTiles);
-
-                // Adjust quota: UpdateZoomLevelAsync already increments for the new file,
-                // so we need to decrement the old file size
-                if (oldFileSizeBytes > 0)
-                {
-                    var oldFileSizeMB = oldFileSizeBytes / 1024.0 / 1024.0;
-                    await _quotaService.IncrementStorageUsageAsync(tenantId, -oldFileSizeMB);
-                }
 
                 // Remove from dirty list
                 _dbContext.DirtyZoomTiles.Remove(dirty);

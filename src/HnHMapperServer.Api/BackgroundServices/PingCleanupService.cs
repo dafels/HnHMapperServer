@@ -36,7 +36,7 @@ public class PingCleanupService : BackgroundService
             var sw = Stopwatch.StartNew();
             try
             {
-                _logger.LogInformation("Ping cleanup job started");
+                _logger.LogDebug("Ping cleanup job started");
 
                 using var scope = _scopeFactory.CreateScope();
                 var pingService = scope.ServiceProvider.GetRequiredService<IPingService>();
@@ -63,7 +63,7 @@ public class PingCleanupService : BackgroundService
                 }
                 else
                 {
-                    _logger.LogInformation("Ping cleanup job completed in {ElapsedMs}ms (no expired pings)", sw.ElapsedMilliseconds);
+                    _logger.LogDebug("Ping cleanup job completed in {ElapsedMs}ms (no expired pings)", sw.ElapsedMilliseconds);
                 }
 
                 await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);

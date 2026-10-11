@@ -14,6 +14,7 @@
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
 @inject CookbookFlatCache FlatCache
+@inject ShippedIcons ShippedIconSet
 @inject AuthenticationStateProvider AuthStateProvider
 
 <PageTitle>Cookbook - HnH Mapper</PageTitle>
@@ -551,7 +552,7 @@
                                                     <td class="panel-table-food">
                                                         @if (row.Food != null)
                                                         {
-                                                            <img class="food-icon" src="@LocalIconSrc(row.Food.Food)" onerror="@RemoteIconFallback(row.Food.Food)" loading="lazy" alt="" />
+                                                            <img class="food-icon" src="@IconSrc(row.Food.Food)" onerror="@IconOnError(row.Food.Food)" loading="lazy" alt="" />
                                                         }
                                                         <span class="food-name">@row.Item.FoodName</span>
                                                         @if (row.Item.IngredientSignature.Length > 0)
@@ -745,8 +746,8 @@
                             </MudTd>
                             <MudTd Class="py-1">
                                 <img class="food-icon"
-                                     src="@LocalIconSrc(context.Food.Food)"
-                                     onerror="@RemoteIconFallback(context.Food.Food)"
+                                     src="@IconSrc(context.Food.Food)"
+                                     onerror="@IconOnError(context.Food.Food)"
                                      loading="lazy" alt="" />
                             </MudTd>
                             <MudTd>
@@ -965,8 +966,8 @@
                         </MudTd>
                         <MudTd Class="py-1">
                             <img class="food-icon"
-                                 src="@LocalIconSrc(context.Food)"
-                                 onerror="@RemoteIconFallback(context.Food)"
+                                 src="@IconSrc(context.Food)"
+                                 onerror="@IconOnError(context.Food)"
                                  loading="lazy" alt="" />
                         </MudTd>
                         <MudTd>
@@ -3421,9 +3422,11 @@
         return attrs;
     }
 
-    private static string LocalIconSrc(FoodDto food) => FoodIcons.LocalSrc(food.ResourceName);
+    // Local PNG when it ships (remote fallback on error); straight to the game's renderer when it
+    // is known not to ship; no request at all for an unusable name.
+    private string IconSrc(FoodDto food) => FoodIcons.Src(ShippedIconSet, food.ResourceName);
 
-    private static string RemoteIconFallback(FoodDto food) => FoodIcons.RemoteFallback(food.ResourceName);
+    private string? IconOnError(FoodDto food) => FoodIcons.RemoteFallback(ShippedIconSet, food.ResourceName);
 
     private async Task RowClicked(TableRowClickEventArgs<FoodRow> args)
     {

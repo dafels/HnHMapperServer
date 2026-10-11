@@ -14,7 +14,7 @@ using ITenantContextAccessor = HnHMapperServer.Core.Interfaces.ITenantContextAcc
 namespace HnHMapperServer.Tests;
 
 /// <summary>
-/// Regression tests for the 2026-08-24 prod incident: an .hmap whose client cache went
+/// Regression tests for duplicate-cell .hmap imports: an .hmap whose client cache went
 /// through cell flip-flop corruption carries two DIFFERENT grid ids claiming the same
 /// segment cell. Pre-fix, both rendered a zoom-0 tile at the same coordinate and the batch
 /// flush died on the Tiles unique index (MapId, Zoom, CoordX, CoordY); the marker phase
@@ -261,10 +261,10 @@ public class HmapImportServiceDuplicateCellTests : IDisposable
     [Fact]
     public async Task CleanupFailedImportAsync_PoisonedContext_StillDeletesEverything()
     {
-        // Reproduces the incident's second stage: the failed batch's entities are still
+        // Reproduces the failure's second stage: the failed batch's entities are still
         // tracked in Added state when cleanup runs on the same scoped context. Pre-fix,
         // every SaveChanges in cleanup rethrew the original UNIQUE violation and nothing
-        // was deleted ("Failed to delete map 2247 during cleanup").
+        // was deleted.
         const int mapId = 5;
         _dbContext.Maps.Add(new MapInfoEntity
         {
@@ -296,10 +296,13 @@ public class HmapImportServiceDuplicateCellTests : IDisposable
         await _dbContext.SaveChangesAsync();
         _dbContext.ChangeTracker.Clear();
 
-        // On-disk directory so the quota refund path runs too
+        // On-disk directories: the import's per-map tiles and a WebP pyramid viewers generated
         var mapDir = Path.Combine(_gridStorage, "tenants", TestTenantId, mapId.ToString(), "0");
         Directory.CreateDirectory(mapDir);
         await File.WriteAllBytesAsync(Path.Combine(mapDir, "0_0.png"), new byte[2048]);
+        var webpDir = Path.Combine(_gridStorage, "tenants", TestTenantId, "large", mapId.ToString(), "0");
+        Directory.CreateDirectory(webpDir);
+        await File.WriteAllBytesAsync(Path.Combine(webpDir, "0_0.webp"), new byte[512]);
 
         // Poison: a duplicate of the committed tile row, tracked in Added state — any
         // SaveChanges on this context now fails with the Tiles UNIQUE violation.
@@ -322,7 +325,7 @@ public class HmapImportServiceDuplicateCellTests : IDisposable
         Assert.Empty(await _dbContext.Tiles.AsNoTracking().Where(t => t.MapId == mapId).ToListAsync());
         Assert.Empty(await _dbContext.Maps.AsNoTracking().Where(m => m.Id == mapId).ToListAsync());
         Assert.False(Directory.Exists(Path.Combine(_gridStorage, "tenants", TestTenantId, mapId.ToString())));
-        _quotaServiceMock.Verify(
-            q => q.IncrementStorageUsageAsync(TestTenantId, It.Is<double>(d => d < 0)), Times.Once);
+        Assert.False(Directory.Exists(Path.Combine(_gridStorage, "tenants", TestTenantId, "large", mapId.ToString())));
+        _quotaServiceMock.Verify(q => q.RecalculateStorageUsageAsync(TestTenantId, _gridStorage), Times.Once);
     }
 }

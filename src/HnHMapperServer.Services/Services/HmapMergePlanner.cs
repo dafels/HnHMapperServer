@@ -44,7 +44,7 @@ public sealed record SegmentMergeDecision(
 /// map at which offset, and which fall back to new maps. Extracted from HmapImportService so the
 /// voting/validation logic is unit-testable without rendering or a database.
 ///
-/// Guard rails (2026-08 map-corruption incident):
+/// Guard rails against coordinate-frame corruption:
 /// - Offsets are voted per (map, offset) group — the winning group defines target map AND offset
 ///   atomically, so a segment can no longer merge into map B using map A's coordinate frame.
 /// - The dominant segment must clear MIN_MERGE_MATCHES agreeing matches; previously it merged

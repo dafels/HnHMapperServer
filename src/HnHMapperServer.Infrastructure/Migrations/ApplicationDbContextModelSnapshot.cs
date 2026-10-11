@@ -345,6 +345,40 @@ namespace HnHMapperServer.Infrastructure.Migrations
                     b.ToTable("CustomMarkers");
                 });
 
+            modelBuilder.Entity("HnHMapperServer.Infrastructure.Data.DirtyWebpCellEntity", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("CellX")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("CellY")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("MapId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("MarkedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MapId");
+
+                    b.HasIndex("TenantId", "MarkedAt");
+
+                    b.HasIndex("TenantId", "MapId", "CellX", "CellY")
+                        .IsUnique();
+
+                    b.ToTable("DirtyWebpCells");
+                });
+
             modelBuilder.Entity("HnHMapperServer.Infrastructure.Data.DirtyZoomTileEntity", b =>
                 {
                     b.Property<int>("Id")
@@ -1433,6 +1467,8 @@ namespace HnHMapperServer.Infrastructure.Migrations
 
                     b.HasIndex("TenantId");
 
+                    b.HasIndex("TenantId", "Cache");
+
                     b.HasIndex("TenantId", "Zoom");
 
                     b.HasIndex("TenantId", "MapId", "Zoom");
@@ -1914,6 +1950,21 @@ namespace HnHMapperServer.Infrastructure.Migrations
                     b.HasOne("HnHMapperServer.Infrastructure.Data.GridDataEntity", null)
                         .WithMany()
                         .HasForeignKey("GridId", "TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HnHMapperServer.Infrastructure.Data.DirtyWebpCellEntity", b =>
+                {
+                    b.HasOne("HnHMapperServer.Infrastructure.Data.MapInfoEntity", null)
+                        .WithMany()
+                        .HasForeignKey("MapId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("HnHMapperServer.Core.Models.TenantEntity", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

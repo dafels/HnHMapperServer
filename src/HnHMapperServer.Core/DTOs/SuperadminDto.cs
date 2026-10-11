@@ -163,6 +163,7 @@ public class PurgeTenantDataResultDto
     public int Pings { get; set; }
     public int Overlays { get; set; }
     public int DirtyZoomTiles { get; set; }
+    public int DirtyWebpCells { get; set; }
 
     // Activity data derived from the map
     public int Timers { get; set; }
@@ -225,7 +226,7 @@ public class RebuildWebpTilesRequestDto
 
 /// <summary>
 /// Result of a WebP pyramid rebuild: the old pyramid is deleted wholesale and regeneration is
-/// seeded (queue fast path + durable dirty rows); tiles also regenerate on-the-fly as viewers
+/// seeded (queue fast path + durable DirtyWebpCells marks); tiles also regenerate on-the-fly as viewers
 /// request them, so the map stays viewable throughout.
 /// </summary>
 public class RebuildWebpTilesResultDto
@@ -238,7 +239,7 @@ public class RebuildWebpTilesResultDto
     /// <summary>Distinct 4x4-grid cells with zoom-0 imagery, all marked for regeneration.</summary>
     public int CellsMarked { get; set; }
 
-    /// <summary>Cells pushed onto the fast in-process queue (the rest follow via the 5-minute scan).</summary>
+    /// <summary>Cells pushed onto the fast in-process queue (the rest follow via the 5-minute backstop).</summary>
     public int CellsEnqueued { get; set; }
 }
 

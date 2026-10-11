@@ -1,112 +1,38 @@
-using Microsoft.AspNetCore.Components.Server.Circuits;
-using System.Security.Claims;
-
 namespace HnHMapperServer.Web.Services;
 
 /// <summary>
-/// Captures authentication state from HttpContext when a Blazor circuit is created.
-/// Stores the ClaimsPrincipal and authentication cookie for the duration of the circuit
-/// so they're available to background threads without requiring HttpContext.
+/// Gives code that runs outside the Blazor circuit's DI scope - above all the IHttpClientFactory
+/// DelegatingHandlers, which the factory resolves in its own handler scope shared by every user for the
+/// handler lifetime - the services of the circuit whose work it is doing. Microsoft's documented
+/// "access server-side Blazor services from a different DI scope" pattern.
+///
+/// The value is an AsyncLocal set by <see cref="ServicesAccessorCircuitHandler"/> around every inbound
+/// circuit activity (component init, events, JS interop, navigation, render callbacks). Execution contexts
+/// captured inside an activity keep it: a Timer created in OnInitializedAsync, Task.Run, every await
+/// continuation. It is therefore NOT available in CircuitHandler callbacks (OnConnectionUpAsync is not an
+/// inbound activity) or in anything started from a singleton event source - never create API-calling
+/// timers or loops there.
 /// </summary>
-public class CircuitServicesAccessor : CircuitHandler
+public sealed class CircuitServicesAccessor
 {
-    private readonly IHttpContextAccessor _httpContextAccessor;
-    private readonly ILogger<CircuitServicesAccessor> _logger;
-    private readonly AuthenticationStateCache _authStateCache;
+    private static readonly AsyncLocal<CircuitServicesHolder?> Current = new();
 
-    public CircuitServicesAccessor(
-        IHttpContextAccessor httpContextAccessor,
-        ILogger<CircuitServicesAccessor> logger,
-        AuthenticationStateCache authStateCache)
-    {
-        _httpContextAccessor = httpContextAccessor;
-        _logger = logger;
-        _authStateCache = authStateCache;
-    }
+    /// <summary>The current circuit's service provider; null outside a circuit flow or after the circuit closed.</summary>
+    public IServiceProvider? Services => Current.Value?.Services;
 
-    /// <summary>
-    /// The user's claims principal captured from the initial HTTP request.
-    /// This is populated when the circuit is created and remains for the circuit lifetime.
-    /// </summary>
-    public ClaimsPrincipal? User { get; private set; }
+    internal void Set(CircuitServicesHolder? holder) => Current.Value = holder;
+}
 
-    public override Task OnConnectionUpAsync(Circuit circuit, CancellationToken cancellationToken)
-    {
-        // Capture the user and authentication cookie from HttpContext when the circuit is first created
-        // At this point, HttpContext IS available because we're in the initial HTTP request
-        var httpContext = _httpContextAccessor.HttpContext;
+/// <summary>
+/// One per circuit. Captured execution contexts (timers, background loops) hold this holder, not the
+/// provider itself, so clearing it when the circuit closes releases the circuit scope everywhere at once -
+/// a stale timer then resolves nothing instead of a disposed provider.
+/// </summary>
+public sealed class CircuitServicesHolder(IServiceProvider services)
+{
+    private IServiceProvider? _services = services;
 
-        if (httpContext != null)
-        {
-            User = httpContext.User;
-            
-            // Defensive: Ensure AuthenticationStateCache is not null before using it
-            if (_authStateCache != null)
-            {
-                _authStateCache.User = User;
+    public IServiceProvider? Services => Volatile.Read(ref _services);
 
-                // Capture the authentication cookie (new name with legacy fallback)
-                var authCookie = httpContext.Request.Cookies["HnH.Auth"];
-                if (string.IsNullOrEmpty(authCookie))
-                {
-                    authCookie = httpContext.Request.Cookies["HnHMapper.Auth"]; // legacy fallback
-                }
-                if (!string.IsNullOrEmpty(authCookie))
-                {
-                    _authStateCache.CookieValue = authCookie;
-                    _logger.LogInformation("Captured authentication cookie for circuit (user: {Username})", User?.Identity?.Name ?? "unknown");
-                }
-                else
-                {
-                    // Clear any stale cookie value
-                    _authStateCache.CookieValue = null;
-                    _logger.LogWarning("No authentication cookie found in request when creating circuit (user authenticated: {IsAuth})",
-                        User?.Identity?.IsAuthenticated ?? false);
-                }
-            }
-            else
-            {
-                _logger.LogError("AuthenticationStateCache is null when creating circuit");
-            }
-
-            if (User?.Identity?.IsAuthenticated == true)
-            {
-                _logger.LogInformation("Circuit created for authenticated user: {Username}", User.Identity.Name);
-            }
-            else
-            {
-                _logger.LogInformation("Circuit created for unauthenticated user");
-            }
-        }
-        else
-        {
-            _logger.LogWarning("HttpContext was null when creating circuit");
-            User = new ClaimsPrincipal(new ClaimsIdentity());
-            if (_authStateCache != null)
-            {
-                _authStateCache.User = User;
-                _authStateCache.CookieValue = null;
-            }
-        }
-
-        return base.OnConnectionUpAsync(circuit, cancellationToken);
-    }
-
-    public override Task OnCircuitClosedAsync(Circuit circuit, CancellationToken cancellationToken)
-    {
-        if (User?.Identity?.IsAuthenticated == true)
-        {
-            _logger.LogInformation("Circuit closed for user: {Username}", User.Identity.Name);
-        }
-
-        // Clear the user and cookie when circuit closes
-        User = null;
-        if (_authStateCache != null)
-        {
-            _authStateCache.User = null;
-            _authStateCache.CookieValue = null;
-        }
-
-        return base.OnCircuitClosedAsync(circuit, cancellationToken);
-    }
+    public void Clear() => Volatile.Write(ref _services, null);
 }

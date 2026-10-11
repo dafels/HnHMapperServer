@@ -63,6 +63,7 @@ public static class TenantAdminEndpoints
         group.MapGet("/tokens", GetTenantTokens);
 
         // DELETE /api/tenants/{tenantId}/tokens/{token} - Revoke a token
+        // (the full token is in the path: masked in telemetry by ServiceDefaults' SensitiveUrlRedactor)
         group.MapDelete("/tokens/{token}", RevokeToken);
 
         // PUT /api/tenants/{tenantId}/discord-settings - Update Discord webhook settings
@@ -1088,6 +1089,9 @@ public static class TenantAdminEndpoints
         [FromForm] string mode,
         IHmapImportService importService,
         ImportLockService lockService,
+        ILargeTileService largeTileService,
+        TileCacheService tileCacheService,
+        IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
         HttpContext context,
         IAuditService auditService,
@@ -1276,6 +1280,9 @@ public static class TenantAdminEndpoints
 
             // Success - release lock
             lockService.ReleaseLock(tenantId, success: true);
+
+            await EvictImportedMapTileCachesAsync(
+                tenantId, importResult.AffectedMapIds.Distinct(), largeTileService, tileCacheService, httpClientFactory, logger);
 
             // Audit log
             await auditService.LogAsync(new AuditEntry
@@ -1467,6 +1474,27 @@ public static class TenantAdminEndpoints
     }
 
     /// <summary>
+    /// After an import wrote zoom-0 data under a map's WebP pyramid: drops both processes' cached
+    /// tiles of the map (positive and negative), so viewers in the imported area get on-view
+    /// generation now instead of a cached 404 for the negative cache's TTL. The existing pyramid
+    /// files are regenerated from the import's DirtyWebpCells marks (gap-fill + backstop).
+    /// Also drops the tenant's page-load tile-token snapshot: the import wrote Tiles rows, and the
+    /// ZoomQ batch the backstop eventually runs writes WebP files only.
+    /// </summary>
+    private static async Task EvictImportedMapTileCachesAsync(
+        string tenantId, IEnumerable<int> mapIds, ILargeTileService largeTileService,
+        TileCacheService tileCacheService, IHttpClientFactory httpClientFactory, ILogger logger)
+    {
+        await tileCacheService.InvalidateCacheAsync(tenantId);
+
+        foreach (var mapId in mapIds)
+        {
+            largeTileService.InvalidateMapCache(tenantId, mapId);
+            await SuperadminEndpoints.InvalidateWebMapTileCacheAsync(httpClientFactory, tenantId, mapId, logger);
+        }
+    }
+
+    /// <summary>
     /// POST /api/tenants/{tenantId}/maps/import-public
     /// Imports the shared PUBLIC map into a tenant map.
     /// No query param → create a new tenant map (safe default).
@@ -1477,6 +1505,9 @@ public static class TenantAdminEndpoints
         string tenantId,
         [FromQuery] int? targetMapId,
         IPublicMapTenantImportService importService,
+        ILargeTileService largeTileService,
+        TileCacheService tileCacheService,
+        IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
         HttpContext context,
         IAuditService auditService,
@@ -1573,6 +1604,9 @@ public static class TenantAdminEndpoints
                 });
                 return;
             }
+
+            await EvictImportedMapTileCachesAsync(
+                tenantId, new[] { importResult.TargetMapId }, largeTileService, tileCacheService, httpClientFactory, logger);
 
             // Audit
             await auditService.LogAsync(new AuditEntry

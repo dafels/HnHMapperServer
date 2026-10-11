@@ -389,7 +389,7 @@ public class MapRegionWipeServiceTests : IDisposable
     public async Task WipeAsync_KeepsTileFilesStillReferencedOutsideTheBox()
     {
         // Tile files are grid-id-keyed and can back multiple rows (frame flip-flop leftovers,
-        // merge copies). The incident-era wipe deleted in-box rows' files unconditionally, which
+        // merge copies). The original wipe deleted in-box rows' files unconditionally, which
         // would blank an out-of-box twin row pointing at the same PNG.
         SeedMap(1, TenantA);
         SeedGrid("g-in", 1, TenantA, 5, 5);

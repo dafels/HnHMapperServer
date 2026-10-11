@@ -15,7 +15,6 @@ using Microsoft.AspNetCore.RateLimiting;
 using Serilog;
 using HnHMapperServer.Services.Interfaces;
 using HnHMapperServer.Services.Services;
-using Serilog.Events;
 using SixLabors.ImageSharp;
 using HnHMapperServer.Core.Models;
 using HnHMapperServer.Infrastructure.Identity;
@@ -50,15 +49,19 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(optio
     options.MultipartHeadersLengthLimit = int.MaxValue;
 });
 
-// Configure ImageSharp for better resource management during zoom tile generation
-SixLabors.ImageSharp.Configuration.Default.MaxDegreeOfParallelism = 2;  // Limit parallel image processing to reduce memory spikes
+// ImageSharp settings for tile generation.
+// MaxDegreeOfParallelism caps the threads ONE ImageSharp operation (Resize, DrawImage, encode)
+// uses for its row loop; it does not limit how many tiles are generated concurrently.
+SixLabors.ImageSharp.Configuration.Default.MaxDegreeOfParallelism = 2;
 
-// Cap the image buffer pool. ImageSharp's allocator pools large buffers outside the GC
-// heap, so they are invisible to the GC's heap limit but very visible to the container's
-// memory limit - which is what the kernel OOM-kills on. The tile pyramid works in
-// 400x400 RGBA tiles (~640 KB each) with at most MaxDegreeOfParallelism in flight, so a
-// 32 MB retained pool is generous; the accumulative limit is a backstop against a
-// pathological image.
+// ImageSharp 3.x serves every buffer up to 1 MiB from ArrayPool<byte>.Shared, rounded up to a
+// power of two, and only larger buffers from its own unmanaged pool - the pool that
+// MaximumPoolSizeMegabytes caps. A 400x400 Rgba32 tile frame (640,000 B) is therefore a 1 MiB
+// array on the managed large object heap, kept by the shared pool after use (up to 32 per size
+// per CPU partition, trimmed slowly on gen2 GCs) and bounded by neither setting; a 100x100 base
+// tile (40,000 B -> 64 KiB) stays on the small-object heap. AllocationLimitMegabytes caps a
+// single allocation (one image buffer), a backstop against a pathological image - it is not a
+// running total.
 SixLabors.ImageSharp.Configuration.Default.MemoryAllocator =
     SixLabors.ImageSharp.Memory.MemoryAllocator.Create(new SixLabors.ImageSharp.Memory.MemoryAllocatorOptions
     {
@@ -66,11 +69,14 @@ SixLabors.ImageSharp.Configuration.Default.MemoryAllocator =
         AllocationLimitMegabytes = 256
     });
 
-// Configure Serilog
+// Configure Serilog. Serilog:MinimumLevel is the ONLY level gate for Console, File and OTLP
+// (writeToProviders + ClearProviders make Logging:LogLevel inert) - see CLAUDE.md "Logging levels".
 builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Configuration(context.Configuration)
     .ReadFrom.Services(services)
-    .Enrich.FromLogContext(),
+    // LAST: FromLogContext + the root enricher that masks client tokens, invite codes and webhook tokens in
+    // every property for all sinks (ServiceDefaults; a test checks this call stays last).
+    .ApplyServiceDefaults(),
     writeToProviders: true);
 builder.Logging.ClearProviders();
 
@@ -90,6 +96,9 @@ else if (!Path.IsPathRooted(gridStorage))
     // Resolve relative GridStorage consistently to solution-level path
     gridStorage = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", gridStorage));
 }
+// Publish the resolved path: every service reads configuration["GridStorage"], and a relative value
+// would otherwise resolve against the working directory instead of the folder the database is in.
+builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?> { ["GridStorage"] = gridStorage });
 // SQLite connection with WAL mode for better concurrency during imports
 // - Cache=Shared: Shared cache for better connection reuse
 // - Pooling=True: Connection pooling for performance
@@ -141,6 +150,7 @@ builder.Services.AddSingleton<IPendingMarkerService, PendingMarkerService>();  /
 builder.Services.AddSingleton<ITenantActivityService, TenantActivityService>();  // Tenant activity tracking with in-memory cache
 builder.Services.AddScoped<ITileService, TileService>();
 builder.Services.AddScoped<IGridService, GridService>();
+builder.Services.AddSingleton<MergeRejectionCache>();  // GridService's merge preflight verdicts (per process)
 builder.Services.AddScoped<IMarkerService, MarkerService>();
 builder.Services.AddScoped<ICustomMarkerService, CustomMarkerService>();
 builder.Services.AddScoped<IRoadService, RoadService>();
@@ -154,6 +164,12 @@ builder.Services.AddSingleton<AuthSettingsCache>();
 builder.Services.AddSingleton(new AuthSettingsStoreOptions { DecryptSecrets = false });   // the API never needs the provider secrets
 builder.Services.AddScoped<IAuthSettingsStore, AuthSettingsStore>();
 builder.Services.AddScoped<ITokenService, TokenService>();
+// TenantContextMiddleware's /client token check (typed rejection reasons) and the per-process
+// dedup of its Warnings: first sighting per (tenant, token), then a summary per interval.
+builder.Services.AddScoped<ClientTokenValidator>();
+builder.Services.AddSingleton(new ClientTokenRejectionTracker(
+    builder.Configuration.GetSection("ClientTokenRejections").Get<ClientTokenRejectionOptions>() ?? new ClientTokenRejectionOptions(),
+    TimeProvider.System));
 builder.Services.AddScoped<TokenMigrationService>();
 builder.Services.AddScoped<TenantNameService>();
 builder.Services.AddScoped<IMapNameService, MapNameService>();
@@ -163,6 +179,7 @@ builder.Services.AddScoped<ITenantFilePathService, TenantFilePathService>();
 builder.Services.AddScoped<ITenantDataPurgeService, TenantDataPurgeService>();  // Superadmin: wipe tenant content, keep users
 builder.Services.AddScoped<IMapRegionWipeService, MapRegionWipeService>();  // Superadmin: surgical region wipe inside one map
 builder.Services.AddScoped<IMapIntegrityService, MapIntegrityService>();  // Superadmin: cross-tenant contested-cell scan
+builder.Services.AddScoped<IMapDeletionService, MapDeletionService>();  // Map delete teardown shared by tenant-admin and superadmin
 builder.Services.AddScoped<IAuditService, AuditService>();  // Phase 6: Audit logging service
 builder.Services.AddScoped<INotificationService, NotificationService>();  // Notification system
 builder.Services.AddScoped<ICookbookNotificationService, CookbookNotificationService>();  // "New foods" digest coalescing
@@ -174,6 +191,7 @@ builder.Services.AddSingleton<ImportLockService>();  // Import lock and cooldown
 
 // Large tile service for 400x400 WebP tiles (private maps)
 builder.Services.AddScoped<ILargeTileService, LargeTileService>();
+builder.Services.AddScoped<WebpDirtyCellBackstop>();  // Durable WebP regeneration backstop (DirtyWebpCells consumer)
 
 // Public maps services (global, not tenant-scoped)
 builder.Services.AddScoped<IPublicMapService, PublicMapService>();
@@ -220,6 +238,7 @@ builder.Services.AddSingleton<TileCacheService>();
 
 // Zoom tile queue: background pre-generation of WebP tiles after upload
 builder.Services.AddSingleton<ZoomTileQueueService>();
+builder.Services.AddSingleton<ZoomTileBatchRegenerator>(); // plans each batch as distinct tiles, rebuilt once each
 
 // Register IconCatalogService with container-friendly path resolution
 // Priority:
@@ -498,6 +517,18 @@ builder.Services.AddRateLimiter(options =>
     // Custom rejection response
     options.OnRejected = async (context, token) =>
     {
+        // One Warning per rejection: the request log no longer records 4xx, so this is the only log of a 429.
+        // Policy + route template only - never Request.Path (/client/{token} carries the secret) or the IP.
+        // When the global limiter rejected, the endpoint's policy is still named; the
+        // aspnetcore.rate_limiting.requests metric's result tag (global_limiter / endpoint_limiter) tells them apart.
+        var endpoint = context.HttpContext.GetEndpoint();
+        var policy = endpoint?.Metadata.GetMetadata<EnableRateLimitingAttribute>()?.PolicyName ?? "(global)";
+        var route = (endpoint as RouteEndpoint)?.RoutePattern.RawText ?? "(unmatched)";
+        context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("HnHMapperServer.Api.RateLimiting")
+            .LogWarning("Rate limit exceeded: policy {Policy}, {Method} {Route}",
+                policy, context.HttpContext.Request.Method, route);
+
         context.HttpContext.Response.StatusCode = 429;
 
         // Try to get retry-after metadata
@@ -511,15 +542,6 @@ builder.Services.AddRateLimiter(options =>
             message = "Too many requests. Please try again later.",
             retryAfter = retryAfter
         }, cancellationToken: token);
-
-        // Log rate limit hit
-        var tenantId = context.HttpContext.Items["TenantId"]?.ToString();
-        if (tenantId != null)
-        {
-            var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<Program>>();
-            logger.LogWarning("Rate limit exceeded for tenant {TenantId} on {Path}",
-                tenantId, context.HttpContext.Request.Path);
-        }
     };
 });
 
@@ -758,56 +780,16 @@ if (app.Environment.IsDevelopment())
     app.UseDeveloperExceptionPage();
 }
 
-app.UseSerilogRequestLogging(options =>
-{
-    // Suppress noisy 404 logs for missing tile images under /map/grids
-    options.GetLevel = (httpContext, elapsedMs, ex) =>
-    {
-        var path = httpContext.Request.Path.Value ?? string.Empty;
-        var status = httpContext.Response?.StatusCode ?? 200;
-
-        if (path.StartsWith("/map/grids", StringComparison.OrdinalIgnoreCase) && status == StatusCodes.Status404NotFound)
-            return LogEventLevel.Debug; // below normal min level, effectively hidden
-
-        if (ex != null || status >= 500) return LogEventLevel.Error;
-        if (status >= 400) return LogEventLevel.Warning;
-        return LogEventLevel.Information;
-    };
-});
+// Request log = Serilog's default levels: exception or 5xx -> Error, everything else Information, which the
+// RequestLoggingMiddleware=Warning override filters out. 4xx are client outcomes, counted per route template
+// (no token) by the http.server.request.duration metric; code with an actionable 4xx logs the reason itself.
+app.UseSerilogRequestLogging();
 
 // Use CORS only if enabled (disabled by default for security)
 if (app.Configuration.GetValue<bool>("EnableCors", false))
 {
     app.UseCors("AllowWebFrontend");
 }
-
-// Diagnostic middleware for debugging client endpoint issues
-app.Use(async (context, next) =>
-{
-    var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
-
-    // Log ALL /client/* requests to diagnose routing issues
-    if (context.Request.Path.StartsWithSegments("/client"))
-    {
-        logger.LogWarning(
-            "DIAGNOSTIC: Incoming request: {Method} {Path} from {IP}",
-            context.Request.Method,
-            context.Request.Path,
-            context.Connection.RemoteIpAddress);
-    }
-
-    await next();
-
-    // Log response status for /client/* requests
-    if (context.Request.Path.StartsWithSegments("/client"))
-    {
-        logger.LogWarning(
-            "DIAGNOSTIC: Response: {Method} {Path} -> {StatusCode}",
-            context.Request.Method,
-            context.Request.Path,
-            context.Response.StatusCode);
-    }
-});
 
 // Enable rate limiting (must be before authentication)
 // Protects endpoints from excessive concurrent requests
@@ -831,7 +813,6 @@ app.MapIdentityEndpoints();
 app.MapClientEndpoints();
 app.MapMapEndpoints();
 app.MapCustomMarkerEndpoints();
-app.MapPollingEndpoints(); // Polling fallback for SSE (VPN users)
 app.MapRoadEndpoints();
 app.MapPingEndpoints();
 app.MapNotificationEndpoints(); // Notification system endpoints

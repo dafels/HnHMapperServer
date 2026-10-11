@@ -1,95 +1,80 @@
 using System.Net;
-using Microsoft.AspNetCore.Authentication;
-using Microsoft.AspNetCore.Authentication.Cookies;
 
 namespace HnHMapperServer.Web.Services;
 
 /// <summary>
-/// A delegating handler that properly forwards authentication cookies from the current HttpContext
-/// to outgoing API requests. When HttpContext is not available (e.g., background threads),
-/// falls back to using cached authentication state from the Blazor circuit.
-/// This ensures that service-to-service calls maintain the user's authentication.
+/// Forwards the caller's authentication cookie and browser origin on every Web→API request.
+///
+/// IHttpClientFactory resolves this handler in its own DI scope, shared by every user of the pooled handler
+/// for its lifetime, so it is stateless: it never caches or writes anything, and it must never take a
+/// scoped/circuit service in its constructor. The identity comes from the flow that sends the request:
+/// <list type="number">
+///   <item>Circuit work (component code, and timers or loops it started) - the circuit's own
+///   <see cref="AuthenticationStateCache"/> through <see cref="CircuitServicesAccessor"/>. Authoritative,
+///   including "no cookie" for an anonymous circuit; still valid after a reconnect ended the request the
+///   circuit started on.</item>
+///   <item>Otherwise the current HTTP request (SSR, prerender, the minimal-API proxies).</item>
+///   <item>Otherwise nothing is sent, with a warning.</item>
+/// </list>
+/// The handler owns the Cookie, X-Forwarded-For and X-Forwarded-Proto headers: caller-set values are dropped.
 /// </summary>
 public class AuthenticationDelegatingHandler : DelegatingHandler
 {
     private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly CircuitServicesAccessor _circuitServices;
     private readonly ILogger<AuthenticationDelegatingHandler> _logger;
-    private readonly AuthenticationStateCache _authStateCache;
 
     public AuthenticationDelegatingHandler(
         IHttpContextAccessor httpContextAccessor,
-        ILogger<AuthenticationDelegatingHandler> logger,
-        AuthenticationStateCache authStateCache)
+        CircuitServicesAccessor circuitServices,
+        ILogger<AuthenticationDelegatingHandler> logger)
     {
         _httpContextAccessor = httpContextAccessor;
+        _circuitServices = circuitServices;
         _logger = logger;
-        _authStateCache = authStateCache;
     }
 
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
         CancellationToken cancellationToken)
     {
-        var httpContext = _httpContextAccessor.HttpContext;
-        string? authCookiePrimary = null;
-        string? authCookieLegacy = null;
-        string? clientIp = null;
-        string? clientScheme = null;
-        bool usingCache = false;
+        string source;
+        string? authCookie;
+        string? clientIp;
+        string? clientScheme;
 
-        if (httpContext != null)
+        var circuitCache = TryGetCircuitCache();
+        if (circuitCache != null)
         {
-            // Priority 1: Get the authentication cookies from the current HTTP request
-            authCookiePrimary = httpContext.Request.Cookies["HnH.Auth"];
-            authCookieLegacy = httpContext.Request.Cookies["HnHMapper.Auth"];
+            source = "Circuit";
+            authCookie = circuitCache.CookieValue;
+            (clientIp, clientScheme) = circuitCache.ClientOrigin;
+        }
+        else if (_httpContextAccessor.HttpContext is { } httpContext)
+        {
+            source = "HttpContext";
+            authCookie = httpContext.Request.Cookies[AuthenticationCaptureCircuitHandler.AuthCookieName];
             clientIp = httpContext.Connection.RemoteIpAddress?.ToString();
             clientScheme = httpContext.Request.Scheme;
-
-            // Cache the primary cookie (and the browser's origin) for use by background threads (SSE reconnects, etc.)
-            if (!string.IsNullOrEmpty(authCookiePrimary) && _authStateCache != null)
-            {
-                _authStateCache.CookieValue = authCookiePrimary;
-            }
-            if (_authStateCache != null && !string.IsNullOrEmpty(clientIp))
-            {
-                _authStateCache.ClientOrigin = (clientIp, clientScheme);
-            }
         }
         else
         {
-            // Priority 2: HttpContext is null (background thread), use cached cookie
-            usingCache = true;
-            if (_authStateCache != null)
-            {
-                authCookiePrimary = _authStateCache.CookieValue;
-                (clientIp, clientScheme) = _authStateCache.ClientOrigin;
-                if (string.IsNullOrEmpty(authCookiePrimary))
-                {
-                    _logger.LogWarning("HttpContext unavailable and AuthenticationStateCache.CookieValue is empty for {Method} {Uri}",
-                        request.Method, request.RequestUri);
-                }
-                else
-                {
-                    _logger.LogDebug("Using cached authentication cookie for background thread request {Method} {Uri}",
-                        request.Method, request.RequestUri);
-                }
-            }
-            else
-            {
-                _logger.LogError("HttpContext unavailable and AuthenticationStateCache is null for {Method} {Uri}",
-                    request.Method, request.RequestUri);
-            }
+            source = "None";
+            authCookie = null;
+            clientIp = null;
+            clientScheme = null;
+            // The one Warning for this call: a 401 that follows is not logged again below.
+            _logger.LogWarning("No circuit services and no HttpContext for {Method} {Uri}; sending without auth cookie",
+                request.Method, request.RequestUri);
         }
 
-        // Build Cookie header with any available cookies
-        var cookies = new List<string>(2);
-        if (!string.IsNullOrEmpty(authCookiePrimary)) cookies.Add($"HnH.Auth={authCookiePrimary}");
-        if (!string.IsNullOrEmpty(authCookieLegacy)) cookies.Add($"HnHMapper.Auth={authCookieLegacy}");
+        request.Headers.Remove("Cookie");
+        request.Headers.Remove("X-Forwarded-For");
+        request.Headers.Remove("X-Forwarded-Proto");
 
-        if (cookies.Count > 0)
+        if (!string.IsNullOrEmpty(authCookie))
         {
-            request.Headers.Remove("Cookie");
-            request.Headers.Add("Cookie", string.Join("; ", cookies));
+            request.Headers.TryAddWithoutValidation("Cookie", $"{AuthenticationCaptureCircuitHandler.AuthCookieName}={authCookie}");
         }
 
         // Every web user's API call leaves this container from the same address. Forward the browser's origin so
@@ -97,34 +82,41 @@ public class AuthenticationDelegatingHandler : DelegatingHandler
         // only because it is not publicly reachable and Caddy rewrites the header for external traffic.
         if (!string.IsNullOrEmpty(clientIp))
         {
-            request.Headers.Remove("X-Forwarded-For");
             request.Headers.TryAddWithoutValidation("X-Forwarded-For", clientIp);
             if (!string.IsNullOrEmpty(clientScheme))
             {
-                request.Headers.Remove("X-Forwarded-Proto");
                 request.Headers.TryAddWithoutValidation("X-Forwarded-Proto", clientScheme);
             }
         }
 
-        // Only log non-SSE requests at Info to reduce noise
-        bool isSseRequest = request.RequestUri?.PathAndQuery?.Contains("/map/updates") ?? false;
-        if (!isSseRequest)
-        {
-            _logger.LogInformation("Outgoing API request {Method} {Uri} (HasAuthCookie: {HasCookie}, UsingCache: {UsingCache})",
-                request.Method, request.RequestUri, cookies.Count > 0, usingCache);
-        }
+        _logger.LogDebug("Outgoing API request {Method} {Uri} (AuthSource: {AuthSource}, HasAuthCookie: {HasCookie})",
+            request.Method, request.RequestUri, source, !string.IsNullOrEmpty(authCookie));
 
-        // Send the request
         var response = await base.SendAsync(request, cancellationToken);
 
-        // Log authentication failures with detailed cookie info for debugging
-        if (response.StatusCode == HttpStatusCode.Unauthorized || (int)response.StatusCode == 302)
+        if (source != "None" &&
+            (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Found))
         {
-            _logger.LogWarning("API auth failure {Status} from {Method} {Uri} | HadCookie: {HasCookie}, UsingCache: {UsingCache}, CookieSource: {CookieSource}",
-                response.StatusCode, request.Method, request.RequestUri, cookies.Count > 0, usingCache, 
-                httpContext != null ? "HttpContext" : (_authStateCache?.CookieValue != null ? "AuthStateCache" : "None"));
+            _logger.LogWarning("API auth failure {Status} from {Method} {Uri} (AuthSource: {AuthSource}, HasAuthCookie: {HasCookie})",
+                (int)response.StatusCode, request.Method, request.RequestUri, source, !string.IsNullOrEmpty(authCookie));
         }
 
         return response;
+    }
+
+    /// <summary>
+    /// The sending circuit's auth cache, or null outside circuit work. A circuit closed under a still-running
+    /// timer resolves nothing (its holder is cleared; a disposed scope throws, which means the same).
+    /// </summary>
+    private AuthenticationStateCache? TryGetCircuitCache()
+    {
+        try
+        {
+            return _circuitServices.Services?.GetService<AuthenticationStateCache>();
+        }
+        catch (ObjectDisposedException)
+        {
+            return null;
+        }
     }
 }

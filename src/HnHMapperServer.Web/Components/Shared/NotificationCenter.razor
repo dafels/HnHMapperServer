@@ -6,6 +6,9 @@
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
 @inject ISnackbar Snackbar
+@inject ILogger<NotificationCenter> Logger
+@inject ReconnectionState Connection
+@inject ShippedIcons ShippedIconSet
 @implements IAsyncDisposable
 
 <MudBadge Content="@_unreadCount"
@@ -86,8 +89,8 @@
                                                 @if (!string.IsNullOrEmpty(food.ResourceName))
                                                 {
                                                     <img class="ck-notif-icon"
-                                                         src="@FoodIcons.LocalSrc(food.ResourceName)"
-                                                         onerror="@FoodIcons.RemoteFallbackOrHide(food.ResourceName)"
+                                                         src="@FoodIcons.Src(ShippedIconSet, food.ResourceName)"
+                                                         onerror="@FoodIcons.RemoteFallbackOrHide(ShippedIconSet, food.ResourceName)"
                                                          loading="lazy" alt="" />
                                                 }
                                                 <span class="ck-notif-food-name" title="@food.Name">@food.Name</span>
@@ -174,7 +177,7 @@
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Failed to initialize notification center JS: {ex.Message}");
+                Logger.Log(UiLog.FailureLevel(ex), ex, "Failed to initialize notification center JS");
             }
         }
     }
@@ -204,7 +207,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error loading notifications: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error loading notifications");
             _notifications ??= new List<NotificationDto>();
         }
         finally
@@ -237,7 +240,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error loading unread count: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error loading unread notification count");
             _unreadCount = 0;
         }
     }
@@ -301,7 +304,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error marking notification as read: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error marking notification as read");
         }
     }
 
@@ -326,7 +329,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error marking all notifications as read: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error marking all notifications as read");
         }
     }
 
@@ -353,7 +356,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error dismissing notification: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error dismissing notification");
         }
     }
 
@@ -371,7 +374,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error navigating to marker: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error navigating to marker from notification");
             // Fallback: just go to map
             Navigation.NavigateTo("/map");
         }
@@ -389,7 +392,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error navigating to custom marker: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error navigating to custom marker from notification");
             Navigation.NavigateTo("/map");
         }
     }
@@ -417,7 +420,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error navigating to cookbook: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error navigating to cookbook from notification");
         }
 
         Navigation.NavigateTo("/cookbook");
@@ -636,8 +639,10 @@
 
     public async ValueTask DisposeAsync()
     {
-        // Only call JS dispose if the component was actually rendered (not just prerendered)
-        if (_isRendered && _objRef != null)
+        // Only call JS dispose if the component was actually rendered (not just prerendered), and only while the
+        // circuit is connected: during circuit teardown ReconnectionState is already false and the call could only
+        // fail. Never throws - an exception escaping DisposeAsync ends the circuit.
+        if (_isRendered && _objRef != null && Connection.IsConnected)
         {
             try
             {
@@ -649,7 +654,7 @@
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error disposing notification center: {ex.Message}");
+                Logger.LogDebug(ex, "Error disposing notification center");
             }
         }
 

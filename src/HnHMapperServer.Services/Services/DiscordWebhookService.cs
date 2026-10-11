@@ -90,12 +90,12 @@ public class DiscordWebhookService : IDiscordWebhookService
             var httpClient = _httpClientFactory.CreateClient();
             httpClient.Timeout = TimeSpan.FromSeconds(10);
 
-            // Debug logging - log the exact object before serialization
-            var imageUrl = embedData.Image?.Url ?? "none";
-            _logger.LogInformation("Discord embed: HasUrl={HasUrl}, HasThumbnail={HasThumbnail}, HasImage={HasImage}, ImageUrl={ImageUrl}",
-                embed.ContainsKey("url"), embed.ContainsKey("thumbnail"), embed.ContainsKey("image"), imageUrl);
+            // Never log the image URL: it is a signed preview link (?expires&sig), valid for 48 hours.
+            _logger.LogDebug("Discord embed: HasUrl={HasUrl}, HasThumbnail={HasThumbnail}, HasImage={HasImage}",
+                embed.ContainsKey("url"), embed.ContainsKey("thumbnail"), embed.ContainsKey("image"));
 
-            // Use PostAsJsonAsync like the test webhook (which works)
+            // Use PostAsJsonAsync like the test webhook (which works).
+            // The webhook URL embeds its token; never log it. Spans mask it via SensitiveUrlRedactor (ServiceDefaults).
             var response = await httpClient.PostAsJsonAsync(webhookUrl, payload);
 
             // Log response for debugging
@@ -379,8 +379,7 @@ public class DiscordWebhookService : IDiscordWebhookService
 
                             previewUrl = $"{baseUrl}{signedUrl}";
 
-                            _logger.LogDebug("Added signed map preview to Discord notification {NotificationId}: {PreviewUrl}",
-                                notification.Id, previewUrl);
+                            _logger.LogDebug("Added signed map preview to Discord notification {NotificationId}", notification.Id);
                         }
                     }
                     // Generate preview for regular markers
@@ -415,8 +414,7 @@ public class DiscordWebhookService : IDiscordWebhookService
 
                                 previewUrl = $"{baseUrl}{signedUrl}";
 
-                                _logger.LogDebug("Added signed map preview to Discord notification {NotificationId}: {PreviewUrl}",
-                                    notification.Id, previewUrl);
+                                _logger.LogDebug("Added signed map preview to Discord notification {NotificationId}", notification.Id);
                             }
                         }
                     }

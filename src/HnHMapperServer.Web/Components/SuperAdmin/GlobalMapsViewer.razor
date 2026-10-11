@@ -239,7 +239,9 @@
 
         try
         {
-            var httpClient = HttpClientFactory.CreateClient("API");
+            // APIUpload client: the delete removes the map's files and pyramid too, which can
+            // exceed the default API client's 10s resilience timeout (cancel + retry -> 404).
+            var httpClient = HttpClientFactory.CreateClient("APIUpload");
             var response = await httpClient.DeleteAsync($"/api/superadmin/tenants/{map.TenantId}/maps/{map.Id}");
 
             if (response.IsSuccessStatusCode)

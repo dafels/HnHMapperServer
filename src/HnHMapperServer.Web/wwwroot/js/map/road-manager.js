@@ -324,9 +324,13 @@ export function clearAllRoads() {
  * Toggle road layer visibility
  * @param {boolean} visible - Whether to show roads
  * @param {object} mapInstance - Leaflet map instance
+ * @returns {boolean} true if applied, false if the road layer or map is not initialized
  */
 export function toggleRoads(visible, mapInstance) {
-    if (!roadLayer || !mapInstance) return;
+    if (!roadLayer || !mapInstance) {
+        console.warn('[Road] Cannot toggle roads - road layer or map not initialized');
+        return false;
+    }
 
     if (visible) {
         if (!mapInstance.hasLayer(roadLayer)) {
@@ -343,6 +347,7 @@ export function toggleRoads(visible, mapInstance) {
             }
         });
     }
+    return true;
 }
 
 /**

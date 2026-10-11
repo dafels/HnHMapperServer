@@ -26,9 +26,11 @@
             The map repair console. Finds cells claimed by more than one grid id (the fingerprint of
             coordinate-frame corruption), plus orphaned storage left behind by merges and map
             deletions — dead tile rows, dead per-map tile directories, and pool PNGs nothing
-            references. Repairs: wipe a contested region, rebuild a map's WebP tile pyramid
-            (fixes stale/ghost zoom imagery), and purge a tenant's orphans. A background check
-            reruns this scan daily and logs a warning when anything shows up.
+            references — drifted WebP tile pyramids, and tile rows whose source PNG is gone.
+            Repairs: wipe a contested region, rebuild a map's WebP tile pyramid (fixes
+            stale/ghost/empty zoom imagery), purge a tenant's orphans, and repair missing tile
+            sources. A background check reruns this scan daily and logs a warning when anything
+            shows up.
         </MudText>
 
         @if (_isScanning)
@@ -199,8 +201,11 @@
                     <div class="d-flex justify-space-between align-center" style="width: 100%">
                         <span>
                             @_report.WebpDrift.Count map(s) have a drifted WebP tile pyramid — ghost files
-                            rendering deleted terrain and/or stale files missing newer content. These maps
-                            show wrong imagery at some zoom levels until rebuilt.
+                            rendering deleted terrain, stale files missing newer content and/or empty
+                            files left by interrupted writes. These maps show wrong imagery at some zoom
+                            levels until rebuilt. "Rebuild all" skips maps that also have missing tile
+                            sources (a rebuild would delete the last imagery of their dark areas) and maps
+                            whose only drift is empty files (those regenerate on their own).
                         </span>
                         <MudButton Variant="Variant.Filled"
                                   Color="Color.Warning"
@@ -220,6 +225,7 @@
                         <MudTh>Map</MudTh>
                         <MudTh>Ghost files</MudTh>
                         <MudTh>Stale files</MudTh>
+                        <MudTh>Empty files</MudTh>
                         <MudTh>Missing z0 cells</MudTh>
                         <MudTh>Checked</MudTh>
                         <MudTh>Actions</MudTh>
@@ -255,6 +261,16 @@
                                 <MudText Typo="Typo.body2">—</MudText>
                             }
                         </MudTd>
+                        <MudTd DataLabel="Empty files">
+                            @if (context.CorruptFiles > 0)
+                            {
+                                <MudChip T="string" Size="Size.Small" Color="Color.Error">@context.CorruptFiles</MudChip>
+                            }
+                            else
+                            {
+                                <MudText Typo="Typo.body2">—</MudText>
+                            }
+                        </MudTd>
                         <MudTd DataLabel="Missing z0 cells">@context.MissingZoom0Cells</MudTd>
                         <MudTd DataLabel="Checked">
                             <MudTooltip Text="@string.Join("; ", context.SampleDriftTiles)">
@@ -272,6 +288,123 @@
                         </MudTd>
                     </RowTemplate>
                 </MudTable>
+            }
+
+            @if (_report.MissingTileSources.Any())
+            {
+                <MudAlert Severity="Severity.Error">
+                    @_report.MissingTileSources.Count map(s) have tile rows whose source PNG no longer
+                    exists — those areas render dark at every zoom level, and neither a WebP rebuild nor
+                    re-importing the .hmap brings them back. Each row still names its original file and
+                    size: restore the files to exactly those paths from a backup (directories and merge
+                    shifts below), then rebuild the map's WebP tiles. Rebuild only after the restore —
+                    before it, a rebuild also deletes whatever the old pyramid still shows of these areas.
+                    "Recoverable" rows have a single owner grid whose pool PNG exists; "ambiguous" rows
+                    sit in contested cells.
+                    <br />
+                    <b>Repair (non-destructive)</b> points recoverable rows at their grid's pool PNG and
+                    redraws just those cells — except cells that still hold a missing row, which keep their
+                    old imagery (possibly the last copy of that row) until the rest is restored or
+                    forgotten — and makes the grids of the other rows requestable again so the next player
+                    who passes re-uploads them (contested rows are skipped; rows without a grid can only be
+                    restored; rows keep their paths for a restore). <b>Forget unrecoverable rows</b> does
+                    the same and then deletes the rows nothing can recover — only after checking backups:
+                    their restore keys (directory, shift, rows, bytes, plus every row those keys cannot
+                    rebuild) are written to the audit log first.
+                </MudAlert>
+
+                <MudTable T="MissingTileSourcesDto" Items="@_report.MissingTileSources" Hover="true" Dense="true">
+                    <HeaderContent>
+                        <MudTh>Tenant</MudTh>
+                        <MudTh>Map</MudTh>
+                        <MudTh>Missing rows</MudTh>
+                        <MudTh>Dark cells</MudTh>
+                        <MudTh>Partly dark</MudTh>
+                        <MudTh>Recoverable</MudTh>
+                        <MudTh>Ambiguous</MudTh>
+                        <MudTh>Where the files were</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd DataLabel="Tenant">
+                            <MudText Typo="Typo.body2">@context.TenantName</MudText>
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary">@context.TenantId</MudText>
+                        </MudTd>
+                        <MudTd DataLabel="Map">
+                            <MudText Typo="Typo.body2">@context.MapName</MudText>
+                            <MudText Typo="Typo.caption" Class="mud-text-secondary">map @context.MapId</MudText>
+                        </MudTd>
+                        <MudTd DataLabel="Missing rows">
+                            <MudTooltip Text="@string.Join("; ", context.SampleFiles)">
+                                <MudText Typo="Typo.body2">@context.MissingRows.ToString("N0")</MudText>
+                            </MudTooltip>
+                        </MudTd>
+                        <MudTd DataLabel="Dark cells">
+                            @if (context.DarkCells > 0)
+                            {
+                                <MudChip T="string" Size="Size.Small" Color="Color.Error">@context.DarkCells.ToString("N0")</MudChip>
+                            }
+                            else
+                            {
+                                <MudText Typo="Typo.body2">—</MudText>
+                            }
+                        </MudTd>
+                        <MudTd DataLabel="Partly dark">
+                            @if (context.PartlyDarkCells > 0)
+                            {
+                                <MudChip T="string" Size="Size.Small" Color="Color.Warning">@context.PartlyDarkCells.ToString("N0")</MudChip>
+                            }
+                            else
+                            {
+                                <MudText Typo="Typo.body2">—</MudText>
+                            }
+                        </MudTd>
+                        <MudTd DataLabel="Recoverable">@context.RecoverableFromPool.ToString("N0")</MudTd>
+                        <MudTd DataLabel="Ambiguous">@context.AmbiguousCells.ToString("N0")</MudTd>
+                        <MudTd DataLabel="Where the files were">
+                            @foreach (var line in context.ByDirectory.Take(MissingSourceDirectoriesShown))
+                            {
+                                <MudText Typo="Typo.caption" Class="d-block"><code>@line</code></MudText>
+                            }
+                            @if (context.ByDirectory.Count > MissingSourceDirectoriesShown)
+                            {
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">
+                                    +@(context.ByDirectory.Count - MissingSourceDirectoriesShown) more
+                                </MudText>
+                            }
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
+
+                <MudText Typo="Typo.subtitle2">Repair per tenant</MudText>
+                @foreach (var tenant in MissingSourcesByTenant())
+                {
+                    <div class="d-flex justify-space-between align-center">
+                        <MudText Typo="Typo.body2">
+                            <b>@tenant.TenantName</b> (@tenant.TenantId): @tenant.MissingRows.ToString("N0") missing row(s)
+                            on @tenant.Maps map(s) — @tenant.Recoverable.ToString("N0") recoverable from the grid pool,
+                            @tenant.Ambiguous.ToString("N0") contested, @tenant.Unrecoverable.ToString("N0") unrecoverable
+                            (@tenant.RowsWithoutGrid.ToString("N0") without a grid)
+                        </MudText>
+                        <MudStack Row="true" Spacing="2" Class="ml-4 flex-shrink-0">
+                            <MudButton Variant="Variant.Filled"
+                                      Color="Color.Warning"
+                                      Size="Size.Small"
+                                      StartIcon="@Icons.Material.Filled.Healing"
+                                      Disabled="@(_busyAction != null)"
+                                      OnClick="@(() => RepairMissingSources(tenant, forgetUnrecoverable: false))">
+                                Repair (non-destructive)
+                            </MudButton>
+                            <MudButton Variant="Variant.Filled"
+                                      Color="Color.Error"
+                                      Size="Size.Small"
+                                      StartIcon="@Icons.Material.Filled.DeleteSweep"
+                                      Disabled="@(_busyAction != null || tenant.Unrecoverable == 0)"
+                                      OnClick="@(() => RepairMissingSources(tenant, forgetUnrecoverable: true))">
+                                Forget unrecoverable rows
+                            </MudButton>
+                        </MudStack>
+                    </div>
+                }
             }
 
             @if (_report.PlaceholderRows.Any())
@@ -300,6 +433,8 @@
 </MudPaper>
 
 @code {
+    private const int MissingSourceDirectoriesShown = 4;
+
     private MapIntegrityReportDto? _report;
     private bool _isScanning = true;
     private MapIntegrityIssueDto? _expandedIssue;
@@ -351,14 +486,24 @@
 
     private async Task RebuildWebpTiles(string tenantId, string tenantName, int mapId, string mapName)
     {
+        // A rebuild deletes the whole pyramid first — for a map with missing tile sources that
+        // includes the last imagery of its dark areas, so the confirm says exactly how much.
+        var missing = _report?.MissingTileSources.FirstOrDefault(m => m.TenantId == tenantId && m.MapId == mapId);
+        var missingWarning = missing == null
+            ? string.Empty
+            : $" WARNING: {missing.MissingRows:N0} tile row(s) of this map have no source file " +
+              $"({missing.DarkCells:N0} fully dark and {missing.PartlyDarkCells:N0} partly dark cell(s)). " +
+              "The rebuild deletes whatever the old pyramid still shows of those areas, and nothing can " +
+              "redraw them — restore the files first (see Missing tile sources).";
+
         var confirmed = await DialogService.ShowMessageBoxAsync(
             "Rebuild WebP tiles",
             $"Rebuild the viewer tile pyramid of map '{mapName}' (ID: {mapId}, tenant '{tenantName}')? " +
             "All its WebP zoom tiles are deleted and regenerated from the current map data. " +
             "This repairs stale or ghost imagery; areas whose underlying data no longer exists will " +
             "show as unexplored at every zoom level until players re-map them. " +
-            "The map stays viewable during the rebuild.",
-            yesText: "Rebuild",
+            "The map stays viewable during the rebuild." + missingWarning,
+            yesText: missing == null ? "Rebuild" : "Rebuild anyway",
             cancelText: "Cancel");
 
         if (confirmed != true)
@@ -403,12 +548,32 @@
 
     private async Task RebuildAllDrifted()
     {
-        var driftCount = _report?.WebpDrift.Count ?? 0;
+        // Mirrors the server's skip rules (it re-decides from a fresh scan).
+        var drifted = _report?.WebpDrift ?? new List<WebpPyramidDriftDto>();
+        var missing = (_report?.MissingTileSources ?? new List<MissingTileSourcesDto>())
+            .ToDictionary(m => (m.TenantId, m.MapId));
+        var skippedDark = drifted.Where(d => missing.ContainsKey((d.TenantId, d.MapId))).ToList();
+        var emptyOnly = drifted.Count(d => !missing.ContainsKey((d.TenantId, d.MapId)) && d.GhostFiles == 0 && d.StaleFiles == 0);
+        var rebuildCount = drifted.Count - skippedDark.Count - emptyOnly;
+
+        var skippedText = skippedDark.Count == 0
+            ? string.Empty
+            : $" Skipped: {skippedDark.Count} map(s) with missing tile sources — " +
+              string.Join(", ", skippedDark.Take(5).Select(d =>
+                  $"'{d.MapName}' ({missing[(d.TenantId, d.MapId)].DarkCells:N0} dark, " +
+                  $"{missing[(d.TenantId, d.MapId)].PartlyDarkCells:N0} partly dark cells)")) +
+              (skippedDark.Count > 5 ? $" and {skippedDark.Count - 5} more" : string.Empty) +
+              "; a rebuild would delete the last imagery of those areas. Restore their files first, then rebuild them one by one.";
+        var emptyText = emptyOnly == 0
+            ? string.Empty
+            : $" Also skipped: {emptyOnly} map(s) whose only drift is empty files (they regenerate on their own).";
+
         var confirmed = await DialogService.ShowMessageBoxAsync(
             "Rebuild all drifted WebP pyramids",
-            $"Rebuild the WebP tile pyramids of all {driftCount} drifted map(s)? The server re-checks " +
+            $"Rebuild the WebP tile pyramids of {rebuildCount} drifted map(s)? The server re-checks " +
             "which maps are drifted and rebuilds each from its current data. Ghost imagery of " +
-            "deleted terrain disappears at every zoom level; maps stay viewable throughout.",
+            "deleted terrain disappears at every zoom level; maps stay viewable throughout." +
+            skippedText + emptyText,
             yesText: "Rebuild all",
             cancelText: "Cancel");
 
@@ -432,6 +597,13 @@
                     $"Rebuilt {result?.MapsRebuilt ?? 0} drifted pyramid(s): {result?.FilesDeleted ?? 0:N0} old tiles " +
                     $"removed ({result?.MegabytesFreed ?? 0:F1} MB), {result?.CellsMarked ?? 0:N0} cells queued for regeneration.",
                     Severity.Success);
+                if (result is { SkippedMissingSources.Count: > 0 })
+                {
+                    Snackbar.Add(
+                        $"Not rebuilt (missing tile sources): {string.Join(", ", result.SkippedMissingSources.Take(5))}" +
+                        (result.SkippedMissingSources.Count > 5 ? $" and {result.SkippedMissingSources.Count - 5} more" : string.Empty),
+                        Severity.Warning);
+                }
                 await RunScan();
             }
             else
@@ -503,6 +675,97 @@
         {
             Logger.LogError(ex, "Error purging orphans for tenant {TenantId}", orphans.TenantId);
             Snackbar.Add("Failed to purge orphaned storage. Please try again.", Severity.Error);
+        }
+        finally
+        {
+            _busyAction = null;
+        }
+    }
+
+    /// <summary>One tenant's missing-source totals across its maps (the repair works per tenant).</summary>
+    private sealed record TenantMissingSources(
+        string TenantId, string TenantName, int Maps, int MissingRows, int Recoverable, int Ambiguous,
+        int RowsWithoutGrid, int HeldCells)
+    {
+        /// <summary>Single owner without a pool PNG, or no owner grid at all.</summary>
+        public int Unrecoverable => Math.Max(0, MissingRows - Recoverable - Ambiguous);
+
+        /// <summary>Unrecoverable rows whose owner grid the repair makes requestable again.</summary>
+        public int Rearmable => Math.Max(0, Unrecoverable - RowsWithoutGrid);
+    }
+
+    private IEnumerable<TenantMissingSources> MissingSourcesByTenant() =>
+        (_report?.MissingTileSources ?? new List<MissingTileSourcesDto>())
+            .GroupBy(m => m.TenantId)
+            .Select(g => new TenantMissingSources(
+                g.Key, g.First().TenantName, g.Count(),
+                g.Sum(m => m.MissingRows), g.Sum(m => m.RecoverableFromPool), g.Sum(m => m.AmbiguousCells),
+                g.Sum(m => m.RowsWithoutGrid), g.Sum(m => m.RepairHeldCells)));
+
+    private async Task RepairMissingSources(TenantMissingSources tenant, bool forgetUnrecoverable)
+    {
+        // Cells holding a repointed row next to one that stays missing are not redrawn: the
+        // compose would drop the missing row from the cell's WebP — possibly its last copy.
+        var heldText = tenant.HeldCells == 0
+            ? string.Empty
+            : $" {tenant.HeldCells:N0} cell(s) also hold rows that stay missing: they keep their current imagery " +
+              "for now and are redrawn once those rows are restored or forgotten.";
+        var message = forgetUnrecoverable
+            ? $"Repair the missing tile sources of tenant '{tenant.TenantName}' and FORGET the unrecoverable rows? " +
+              $"{tenant.Recoverable:N0} row(s) are repointed to their grid's pool PNG, then {tenant.Unrecoverable:N0} " +
+              "row(s) whose files exist nowhere are deleted for good — re-importing will not bring them back, only " +
+              "players re-walking the area, and cells drawn from them lose that imagery. Check the backups first: the " +
+              "restore keys (directory, shift, rows, bytes) and every row those keys cannot rebuild are written to the " +
+              $"audit log before anything is deleted. {tenant.Ambiguous:N0} contested row(s) are kept."
+            : $"Repair the missing tile sources of tenant '{tenant.TenantName}'? {tenant.Recoverable:N0} row(s) are " +
+              "repointed to their grid's pool PNG and their cells redrawn." + heldText +
+              $" The grids of {tenant.Rearmable:N0} row(s) become requestable so the next player who passes re-uploads them; " +
+              $"{tenant.RowsWithoutGrid:N0} row(s) have no grid to re-request and can only be restored from a backup; " +
+              $"{tenant.Ambiguous:N0} contested row(s) are skipped. No row is deleted.";
+
+        var confirmed = await DialogService.ShowMessageBoxAsync(
+            forgetUnrecoverable ? "Forget unrecoverable rows" : "Repair missing tile sources",
+            message,
+            yesText: forgetUnrecoverable ? "Repair and forget" : "Repair",
+            cancelText: "Cancel");
+
+        if (confirmed != true)
+            return;
+
+        _busyAction = $"repair-{tenant.TenantId}";
+        try
+        {
+            // APIUpload client: the repair re-checks every zoom-0 file of the tenant and rewrites
+            // rows, beyond the default API client's 10s resilience timeout.
+            var httpClient = HttpClientFactory.CreateClient("APIUpload");
+            var response = await httpClient.PostAsJsonAsync(
+                $"/api/superadmin/integrity/tenants/{tenant.TenantId}/repair-missing-sources",
+                new { confirmTenantId = tenant.TenantId, forgetUnrecoverable });
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<MissingTileSourcesRepairResultDto>();
+                Snackbar.Add(
+                    $"Repaired '{tenant.TenantName}': {result?.RowsRepointed ?? 0:N0} row(s) repointed " +
+                    $"({result?.CellsEnqueued ?? 0:N0} cells queued for redraw, {result?.CellsHeldForRestore ?? 0:N0} held for the restore), " +
+                    $"{result?.GridsRearmed ?? 0:N0} grid(s) re-armed, " +
+                    $"{result?.AmbiguousSkipped ?? 0:N0} contested skipped, {result?.RowsForgotten ?? 0:N0} forgotten, " +
+                    $"{result?.RowsLeftForRestore ?? 0:N0} left for restore.",
+                    Severity.Success);
+                await RunScan();
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                Logger.LogWarning("Failed to repair missing tile sources for tenant {TenantId}: {StatusCode}, Body={Body}",
+                    tenant.TenantId, response.StatusCode, errorBody);
+                Snackbar.Add("Failed to repair missing tile sources. Please try again.", Severity.Error);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Error repairing missing tile sources for tenant {TenantId}", tenant.TenantId);
+            Snackbar.Add("Failed to repair missing tile sources. Please try again.", Severity.Error);
         }
         finally
         {

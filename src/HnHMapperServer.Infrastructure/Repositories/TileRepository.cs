@@ -1,3 +1,4 @@
+using HnHMapperServer.Core.DTOs;
 using HnHMapperServer.Core.Interfaces;
 using HnHMapperServer.Core.Models;
 using HnHMapperServer.Infrastructure.Data;
@@ -92,21 +93,24 @@ public class TileRepository : ITileRepository
         }
     }
 
-    public async Task<List<TileData>> GetAllTilesAsync()
+    public Task<List<TileCacheDto>> GetTileCacheTokensAsync(string tenantId, long since)
     {
-        // Explicit tenant filtering for defense-in-depth
-        var currentTenantId = _tenantContext.GetCurrentTenantId();
+        // IgnoreQueryFilters + explicit tenant: TileCacheService loads in a fresh scope (and on a
+        // thread-pool thread), where the ambient filter would read the wrong or no tenant.
+        // since > 0 rides IX_Tiles_TenantId_Cache.
+        var query = _context.Tiles
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(t => t.TenantId == tenantId);
 
-        var query = _context.Tiles.AsNoTracking();
-
-        // If tenant context is available, add explicit filter
-        if (!string.IsNullOrEmpty(currentTenantId))
+        if (since > 0)
         {
-            query = query.Where(t => t.TenantId == currentTenantId);
+            query = query.Where(t => t.Cache > since);
         }
 
-        var entities = await query.ToListAsync();
-        return entities.Select(MapToDomain).ToList();
+        return query
+            .Select(t => new TileCacheDto { M = t.MapId, X = t.CoordX, Y = t.CoordY, Z = t.Zoom, T = t.Cache })
+            .ToListAsync();
     }
 
     public async Task<Dictionary<int, int>> GetTileCountsByMapAsync(int zoom = 0)

@@ -8,15 +8,17 @@ namespace HnHMapperServer.Api.BackgroundServices;
 
 /// <summary>
 /// Background service that drains the ZoomTileQueueService channel with time-based batching.
-/// After generating zoom tiles, it bumps mapRevision and sends SSE notifications so the browser refreshes.
+/// Each batch is planned as distinct tiles (ZoomTileBatchPlanner) and rebuilt once each, bottom-up
+/// (ZoomTileBatchRegenerator). Then it bumps mapRevision and sends SSE notifications naming the
+/// regenerated zoom-0 cells, so browsers refresh only those cells and their ancestors.
 /// </summary>
 public class ZoomTileProcessorService : BackgroundService
 {
     private const string LogPrefix = "[ZoomQ]";
-    private const int DebounceWindowMs = 500;
+    private static readonly TimeSpan DebounceWindow = TimeSpan.FromMilliseconds(500);
 
     private readonly ZoomTileQueueService _queue;
-    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ZoomTileBatchRegenerator _regenerator;
     private readonly MapRevisionCache _revisionCache;
     private readonly IUpdateNotificationService _updateNotificationService;
     private readonly IHttpClientFactory _httpClientFactory;
@@ -24,14 +26,14 @@ public class ZoomTileProcessorService : BackgroundService
 
     public ZoomTileProcessorService(
         ZoomTileQueueService queue,
-        IServiceScopeFactory scopeFactory,
+        ZoomTileBatchRegenerator regenerator,
         MapRevisionCache revisionCache,
         IUpdateNotificationService updateNotificationService,
         IHttpClientFactory httpClientFactory,
         ILogger<ZoomTileProcessorService> logger)
     {
         _queue = queue;
-        _scopeFactory = scopeFactory;
+        _regenerator = regenerator;
         _revisionCache = revisionCache;
         _updateNotificationService = updateNotificationService;
         _httpClientFactory = httpClientFactory;
@@ -46,49 +48,11 @@ public class ZoomTileProcessorService : BackgroundService
         {
             try
             {
-                // Block efficiently until the first item arrives
-                var firstRequest = await _queue.Reader.ReadAsync(stoppingToken);
-                var batch = new List<ZoomTileRequest> { firstRequest };
+                // Wait for the first request, then collect a DebounceWindow batch. No exception on the
+                // normal path: the old debounce ended every window by cancelling a pending read.
+                var batch = await _queue.ReadBatchAsync(DebounceWindow, stoppingToken);
 
-                // Collect more items for up to DebounceWindowMs
-                var debounceDeadline = DateTime.UtcNow.AddMilliseconds(DebounceWindowMs);
-                while (DateTime.UtcNow < debounceDeadline)
-                {
-                    if (_queue.Reader.TryRead(out var next))
-                    {
-                        batch.Add(next);
-                    }
-                    else
-                    {
-                        // No more items immediately available, wait a bit
-                        try
-                        {
-                            using var delayCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                            var remaining = debounceDeadline - DateTime.UtcNow;
-                            if (remaining > TimeSpan.Zero)
-                            {
-                                delayCts.CancelAfter(remaining);
-                                var item = await _queue.Reader.ReadAsync(delayCts.Token);
-                                batch.Add(item);
-                            }
-                        }
-                        catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
-                        {
-                            // Debounce window expired, process what we have
-                            break;
-                        }
-                    }
-                }
-
-                // Deduplicate batch by (TenantId, MapId, BaseX, BaseY)
-                var deduplicated = batch
-                    .DistinctBy(r => (r.TenantId, r.MapId, r.BaseX, r.BaseY))
-                    .ToList();
-
-                _logger.LogInformation("{Prefix} Processing batch: {RawCount} items -> {DedupCount} unique tiles",
-                    LogPrefix, batch.Count, deduplicated.Count);
-
-                await ProcessBatchAsync(deduplicated, stoppingToken);
+                await ProcessBatchAsync(batch, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -108,65 +72,14 @@ public class ZoomTileProcessorService : BackgroundService
     private async Task ProcessBatchAsync(List<ZoomTileRequest> requests, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
-        var affectedMaps = new HashSet<int>();
-        var affectedTenants = new HashSet<string>();
-        var generated = 0;
-        var failed = 0;
 
-        using var scope = _scopeFactory.CreateScope();
-        var largeTileService = scope.ServiceProvider.GetRequiredService<ILargeTileService>();
+        // The queue dedups by key, so the batch holds no duplicates; the planner merges requests
+        // that share a zoom-0 cell and the ancestors cells share.
+        var plan = ZoomTileBatchPlanner.Plan(requests);
+        _logger.LogDebug("{Prefix} Processing batch: {RawCount} requests -> {Cells} z0 cells, {Tiles} tiles",
+            LogPrefix, requests.Count, plan.Cells.Count, plan.TileCount);
 
-        foreach (var request in requests)
-        {
-            if (ct.IsCancellationRequested) break;
-
-            try
-            {
-                // Calculate the large tile coordinates from the base tile coordinates
-                var largeTileX = (int)Math.Floor(request.BaseX / 4.0);
-                var largeTileY = (int)Math.Floor(request.BaseY / 4.0);
-
-                // Force-regenerate zoom 0 (bypasses caches, overwrites old file on disk)
-                var result = await largeTileService.ForceRegenerateLargeTileAsync(
-                    request.TenantId, request.MapId, 0, largeTileX, largeTileY);
-
-                // Force-regenerate zoom levels 1-6 (parent tiles) even when zoom 0 came back
-                // null: null means the cell's sources are gone and its stale file was deleted,
-                // and the parents must recomposite without it or the old imagery ghosts on
-                // forever at far-out zoom levels (wipes, merges, moved grids).
-                var parentX = largeTileX;
-                var parentY = largeTileY;
-                for (int zoom = 1; zoom <= 6; zoom++)
-                {
-                    parentX = (int)Math.Floor(parentX / 2.0);
-                    parentY = (int)Math.Floor(parentY / 2.0);
-                    await largeTileService.ForceRegenerateLargeTileAsync(
-                        request.TenantId, request.MapId, zoom, parentX, parentY);
-                }
-
-                if (result != null)
-                {
-                    generated++;
-                }
-                else
-                {
-                    failed++;
-                }
-
-                affectedMaps.Add(request.MapId);
-                affectedTenants.Add(request.TenantId);
-            }
-            catch (Exception ex)
-            {
-                failed++;
-                _logger.LogWarning(ex, "{Prefix} Failed to process tile: tenant={TenantId} map={MapId} ({X},{Y})",
-                    LogPrefix, request.TenantId, request.MapId, request.BaseX, request.BaseY);
-            }
-            finally
-            {
-                _queue.MarkCompleted(request);
-            }
-        }
+        var result = await _regenerator.RegenerateAsync(plan, ct);
 
         // Invalidate Web process tile caches FIRST (cross-process)
         // This ensures the Web process reads fresh files before browsers are notified
@@ -187,24 +100,28 @@ public class ZoomTileProcessorService : BackgroundService
             _logger.LogWarning(ex, "{Prefix} Failed to invalidate Web tile cache", LogPrefix);
         }
 
-        // Invalidate tile caches for affected tenants
-        var tileCacheService = scope.ServiceProvider.GetRequiredService<TileCacheService>();
-        foreach (var tenantId in affectedTenants)
-        {
-            await tileCacheService.InvalidateCacheAsync(tenantId);
-        }
+        // (No TileCacheService invalidation: the batch writes WebP files, never Tiles rows. The row
+        // writers that feed it invalidate themselves: gridUpload, merges, both imports, wipeTile,
+        // setCoords and the superadmin region wipe / missing-source repair.)
 
         // LAST: Bump mapRevision and send SSE notifications
-        // Both API and Web processes now have fresh tiles, so browsers get correct data on refresh
-        foreach (var mapId in affectedMaps)
+        // Both API and Web processes now have fresh tiles, so browsers get correct data on refresh.
+        // The event names the regenerated zoom-0 cells (null = too many, refresh everything); a
+        // client honours the list only when the revision follows the one it holds by exactly 1.
+        var changedCells = ZoomTileCells.ChangedCellsByMap(requests);
+        var revisions = new List<string>(result.AffectedMaps.Count);
+        foreach (var mapId in result.AffectedMaps)
         {
             var newRevision = _revisionCache.Increment(mapId);
-            _updateNotificationService.NotifyMapRevision(mapId, newRevision);
+            changedCells.TryGetValue(mapId, out var cells);
+            _updateNotificationService.NotifyMapRevision(mapId, newRevision, cells);
+            revisions.Add($"{mapId}@{newRevision}:{cells?.Length.ToString() ?? "all"}");
         }
 
         sw.Stop();
         _logger.LogInformation(
-            "{Prefix} Batch complete: {Generated} generated, {Failed} failed, {MapCount} maps revised in {Ms}ms",
-            LogPrefix, generated, failed, affectedMaps.Count, sw.ElapsedMilliseconds);
+            "{Prefix} Batch complete: {Generated} generated, {Failed} failed, {MapCount} maps revised in {Ms}ms ({Tiles} tiles, {Cells} z0 cells for {Requests} requests; revisions {Revisions})",
+            LogPrefix, result.Generated, result.Failed, result.AffectedMaps.Count, sw.ElapsedMilliseconds,
+            result.Tiles, result.Cells, requests.Count, string.Join(", ", revisions));
     }
 }

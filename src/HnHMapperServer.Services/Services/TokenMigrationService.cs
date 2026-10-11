@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using HnHMapperServer.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -59,8 +57,10 @@ public class TokenMigrationService
                     // New format: {tenantId}_{secret}
                     var newFullToken = $"{DefaultTenantId}_{oldSecret}";
 
-                    // Compute new hash
-                    var newHash = ComputeSha256(newFullToken);
+                    // Hash only the secret: that is what validation hashes (ClientToken.Hash).
+                    // Hashing the full {tenant}_{secret} string made every migrated token
+                    // impossible to validate.
+                    var newHash = ClientToken.Hash(oldSecret);
 
                     // Update token
                     token.DisplayToken = newFullToken;
@@ -99,14 +99,5 @@ public class TokenMigrationService
             _logger.LogError(ex, "Token migration failed");
             throw;
         }
-    }
-
-    /// <summary>
-    /// Computes SHA-256 hash of a string
-    /// </summary>
-    private static string ComputeSha256(string value)
-    {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
-        return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 }

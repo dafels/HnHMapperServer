@@ -1,12 +1,22 @@
 namespace HnHMapperServer.Services.Interfaces;
 
 /// <summary>
-/// Service for managing tenant storage quotas
+/// Service for managing tenant storage quotas.
+///
+/// Contract: <c>Tenants.CurrentStorageMB</c> is kept incrementally by single atomic delta
+/// UPDATEs (<see cref="IncrementStorageUsageAsync"/>), each charging the change in bytes on
+/// disk (new size minus the size of the file it replaced), and reset to the truth by
+/// <see cref="ReconcileStorageUsageAsync"/> (a full scan of <c>tenants/{t}/</c>), which the
+/// 6-hourly verification job and every admin teardown run. The WebP pyramid
+/// (<c>tenants/{t}/large/**</c>) is reconciled-only: its writes are never charged and its deletes
+/// never credited, because every delete path is followed by uncharged regeneration.
 /// </summary>
 public interface IStorageQuotaService
 {
     /// <summary>
-    /// Checks if a tenant has enough quota for an upload
+    /// Checks if a tenant has enough quota for an upload that grows its storage by
+    /// <paramref name="sizeMB"/> (pass the growth, not the file size, for a replacement).
+    /// Reads the row, never a tracked copy.
     /// </summary>
     /// <param name="tenantId">Tenant ID</param>
     /// <param name="sizeMB">Size to check in MB</param>
@@ -14,14 +24,17 @@ public interface IStorageQuotaService
     Task<bool> CheckQuotaAsync(string tenantId, double sizeMB);
 
     /// <summary>
-    /// Increments tenant storage usage (atomic operation)
+    /// Adds <paramref name="sizeMB"/> (may be negative) to the tenant's usage in ONE atomic UPDATE,
+    /// clamped at 0. Callers pass the change in bytes on disk (new minus replaced). The UPDATE
+    /// neither refreshes a tenant entity tracked in the same scope nor saves the caller's pending
+    /// changes. Throws when the tenant does not exist.
     /// </summary>
     /// <param name="tenantId">Tenant ID</param>
-    /// <param name="sizeMB">Size to add in MB</param>
+    /// <param name="sizeMB">Size to add in MB (negative to subtract)</param>
     Task IncrementStorageUsageAsync(string tenantId, double sizeMB);
 
     /// <summary>
-    /// Decrements tenant storage usage (atomic operation)
+    /// <see cref="IncrementStorageUsageAsync"/> with the sign flipped.
     /// </summary>
     /// <param name="tenantId">Tenant ID</param>
     /// <param name="sizeMB">Size to subtract in MB</param>
@@ -42,7 +55,8 @@ public interface IStorageQuotaService
     Task<double> GetQuotaLimitAsync(string tenantId);
 
     /// <summary>
-    /// Recalculates storage usage from filesystem and updates database
+    /// Recalculates storage usage from the filesystem and writes it to the database
+    /// (<see cref="ReconcileStorageUsageAsync"/> without the drift report).
     /// </summary>
     /// <param name="tenantId">Tenant ID</param>
     /// <param name="gridStorage">Base grid storage path</param>
@@ -50,12 +64,21 @@ public interface IStorageQuotaService
     Task<double> RecalculateStorageUsageAsync(string tenantId, string gridStorage);
 
     /// <summary>
-    /// Updates storage usage from pre-calculated values (avoids duplicate filesystem scan).
-    /// Use this when you've already calculated the directory size to avoid redundant I/O.
+    /// The authoritative reset: reads the tracked value fresh from the row, scans every file under
+    /// <c>tenants/{t}/</c>, sets the absolute value atomically (and on a tenant entity tracked in
+    /// this scope, left Unchanged), writes .storage.json and logs one Information line with the
+    /// signed drift. Never warns — classifying the drift is the caller's job (StorageDrift).
+    /// Throws when the tenant does not exist.
     /// </summary>
-    /// <param name="tenantId">Tenant ID</param>
-    /// <param name="gridStorage">Base grid storage path (for writing .storage.json)</param>
-    /// <param name="totalSizeBytes">Pre-calculated total size in bytes</param>
-    /// <param name="fileCount">Pre-calculated file count</param>
-    Task UpdateStorageFromCalculationAsync(string tenantId, string gridStorage, long totalSizeBytes, int fileCount);
+    Task<StorageReconciliation> ReconcileStorageUsageAsync(string tenantId, string gridStorage);
+}
+
+/// <summary>
+/// One reconciliation: the tracked value just before it (<paramref name="PreviousMB"/>), the disk
+/// total it was reset to (<paramref name="CurrentMB"/>), the quota and the files counted.
+/// </summary>
+public sealed record StorageReconciliation(double PreviousMB, double CurrentMB, int QuotaMB, int FileCount)
+{
+    /// <summary>Tracked minus disk: positive = overcount (a write path charges bytes that are not on disk).</summary>
+    public double DriftMB => PreviousMB - CurrentMB;
 }

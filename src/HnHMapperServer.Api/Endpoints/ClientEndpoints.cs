@@ -80,6 +80,8 @@ public static partial class ClientEndpoints
     public static void MapClientEndpoints(this IEndpointRouteBuilder app)
     {
         // Phase 7: Apply per-tenant rate limiting to all client endpoints
+        // The token is a credential in the URL path: never log Request.Path here. Telemetry masks it via
+        // ServiceDefaults' SensitiveUrlRedactor (keep that list in sync when adding secret-bearing routes).
         var group = app.MapGroup("/client/{token}")
             .RequireRateLimiting("PerTenant");
 
@@ -499,26 +501,42 @@ public static partial class ClientEndpoints
             return Results.BadRequest($"Unknown grid id: {id}");
         }
 
-        // Check if tile updates are allowed (only block if tile already exists)
+        // The id becomes the pool file name. gridUpdate no longer stores path-like ids; a legacy
+        // row with one must not write into another map's directory.
+        if (!TenantFilePathService.IsSafeGridId(grid.Id))
+        {
+            return Results.BadRequest("Grid id is not a plain file name");
+        }
+
+        var gridStorage = configuration["GridStorage"] ?? "map";
+
+        // Check if tile updates are allowed (only block if a tile is already drawn there). A row
+        // whose source file is gone (a merge deleted it, lost on disk) protects nothing: letting
+        // the upload through is how such a dark cell heals on a no-updates tenant.
         if (!config.AllowGridUpdates)
         {
-            var existingTile = await tileService.GetTileAsync(grid.Map, grid.Coord, 0);
-            if (existingTile != null && !string.IsNullOrEmpty(existingTile.File))
+            if (await tileService.HasRenderableTileAsync(grid.Map, grid.Coord, gridStorage))
             {
                 logger.LogWarning("GridUpload: Tile update blocked for grid {GridId} - updates disabled for tenant {TenantId}", id, tenantId);
                 return Results.Json(new { error = "Tile updates are disabled for this tenant" }, statusCode: 403);
             }
-            // No existing tile - allow new tile upload
+            // No drawable tile yet - allow the upload
         }
 
-        var gridStorage = configuration["GridStorage"] ?? "map";
         var updateTile = DateTime.UtcNow > grid.NextUpdate;
 
         if (updateTile)
         {
-            // Use sanitized bytes size for quota calculation
+            // Use tenant-specific file path (grid-id keyed: a refresh or a winter replacement
+            // overwrites the same file).
+            var filePath = filePathService.GetGridFilePath(tenantId, grid.Id, gridStorage);
+
+            // Gate on GROWTH, not size: a refresh of a grid the tenant already has adds only the
+            // size change, so a tenant at its quota can keep its map current. A tenant already
+            // over its quota is still blocked (current + 0 > quota).
             var fileSizeMB = sanitizedBytes.Length / 1024.0 / 1024.0;
-            var canUpload = await quotaService.CheckQuotaAsync(tenantId, fileSizeMB);
+            var growthMB = Math.Max(0, sanitizedBytes.Length - AtomicFile.LengthOrZero(filePath)) / 1024.0 / 1024.0;
+            var canUpload = await quotaService.CheckQuotaAsync(tenantId, growthMB);
 
             if (!canUpload)
             {
@@ -526,8 +544,8 @@ public static partial class ClientEndpoints
                 var quotaLimit = await quotaService.GetQuotaLimitAsync(tenantId);
 
                 logger.LogWarning(
-                    "GridUpload: Quota exceeded for tenant {TenantId}. Current: {Current}MB, Quota: {Quota}MB, Upload: {Upload}MB",
-                    tenantId, currentUsage, quotaLimit, fileSizeMB);
+                    "GridUpload: Quota exceeded for tenant {TenantId}. Current: {Current}MB, Quota: {Quota}MB, Upload: {Upload}MB, Growth: {Growth}MB",
+                    tenantId, currentUsage, quotaLimit, fileSizeMB, growthMB);
 
                 await AuditRejectedUploadAsync(auditService, tenantId, userId, id,
                     "QuotaExceeded", null, file.FileName, sanitizedBytes.Length);
@@ -545,49 +563,15 @@ public static partial class ClientEndpoints
             // Ensure tenant directories exist
             filePathService.EnsureTenantDirectoriesExist(tenantId, gridStorage);
 
-            // Use tenant-specific file path
-            var filePath = filePathService.GetGridFilePath(tenantId, grid.Id, gridStorage);
-            var fileDir = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(fileDir))
-            {
-                Directory.CreateDirectory(fileDir);
-            }
+            // Save the sanitized (re-encoded) file: temp file + rename, charging only the size
+            // change (refreshes overwrite the grid-id-keyed PNG every 30 min). A failed write
+            // leaves the previous tile intact — the old catch here deleted the file after a failed
+            // step, which for a refresh was the only copy of the tile.
+            var chargedBytes = await tileService.ReplaceTileFileAsync(tenantId, filePath, sanitizedBytes);
 
-            // Save sanitized file and increment quota atomically
-            using (var transaction = await db.Database.BeginTransactionAsync())
-            {
-                try
-                {
-                    // Save sanitized (re-encoded) file to disk
-                    await File.WriteAllBytesAsync(filePath, sanitizedBytes);
-
-                    // Increment storage usage
-                    await quotaService.IncrementStorageUsageAsync(tenantId, fileSizeMB);
-
-                    await transaction.CommitAsync();
-
-                    logger.LogDebug(
-                        "GridUpload: Saved tile for tenant {TenantId}, grid {GridId}, size {SizeMB:F2}MB",
-                        tenantId, grid.Id, fileSizeMB);
-                }
-                catch (Exception ex)
-                {
-                    await transaction.RollbackAsync();
-                    logger.LogError(ex, "GridUpload: Failed to save tile for tenant {TenantId}, grid {GridId}", tenantId, grid.Id);
-
-                    // Clean up file if it was created
-                    if (File.Exists(filePath))
-                    {
-                        try
-                        {
-                            File.Delete(filePath);
-                        }
-                        catch { }
-                    }
-
-                    throw;
-                }
-            }
+            logger.LogDebug(
+                "GridUpload: Saved tile for tenant {TenantId}, grid {GridId}, size {SizeMB:F2}MB, charged {ChargedBytes} bytes",
+                tenantId, grid.Id, fileSizeMB, chargedBytes);
 
             var relativePath = filePathService.GetGridRelativePath(tenantId, grid.Id);
             var fileSizeBytes = sanitizedBytes.Length;
@@ -609,6 +593,8 @@ public static partial class ClientEndpoints
             zoomTileQueueService.EnqueueZoomRegeneration(
                 new ZoomTileRequest(tenantId, grid.Map, grid.Coord.X, grid.Coord.Y));
 
+            // Reconnect deltas come straight from the DB; this only keeps the page-load (since=0)
+            // snapshot fresh. A lock-free removal.
             await tileCacheService.InvalidateCacheAsync(tenantId);
         }
 
@@ -808,7 +794,7 @@ public static partial class ClientEndpoints
                 {
                     // Log available keys to help diagnose payload structure
                     var availableKeys = string.Join(", ", data.Keys);
-                    logger.LogWarning("PositionUpdate: Skipping character ID={CharacterId} Name={Name} GridID={GridId} - missing Coords field. Available keys in payload: [{Keys}]. Expected: Coords={{X,Y}}", id, name, gridId, availableKeys);
+                    logger.LogWarning("PositionUpdate: Skipping character ID={CharacterId} GridID={GridId} - missing Coords field. Available keys in payload: [{Keys}]. Expected: Coords={{X,Y}}", id, gridId, availableKeys);
                     loggedMissingCoords++;
                 }
                 continue;
@@ -833,7 +819,7 @@ public static partial class ClientEndpoints
                 skippedMissingCoords++;
                 if (loggedMissingCoords < 5)
                 {
-                    logger.LogWarning(ex, "PositionUpdate: Failed to parse coords X/Y for character ID={CharacterId} Name={Name}", id, name);
+                    logger.LogWarning(ex, "PositionUpdate: Failed to parse coords X/Y for character ID={CharacterId}", id);
                     loggedMissingCoords++;
                 }
                 continue;
@@ -846,7 +832,7 @@ public static partial class ClientEndpoints
                 unknownGrids.Add(gridId);
                 if (loggedMissingGrid < 5)
                 {
-                    logger.LogWarning("PositionUpdate: Skipping character ID={CharacterId} Name={Name} - unknown GridID={GridId}. Client must send gridUpdate first to register this grid.", id, name, gridId);
+                    logger.LogDebug("PositionUpdate: Skipping character ID={CharacterId} - unknown GridID={GridId}. Client must send gridUpdate first to register this grid.", id, gridId);
                     loggedMissingGrid++;
                 }
                 continue;
@@ -892,7 +878,7 @@ public static partial class ClientEndpoints
     /// <summary>
     /// Reads a JSON request body, or returns null when it is empty or malformed so the endpoint
     /// answers 400 instead of throwing. Clients sometimes post an empty body when their
-    /// connection is cut mid-request (seen in production around restarts), and the unhandled
+    /// connection is cut mid-request (e.g. around server restarts), and the unhandled
     /// JsonException surfaced as a 500.
     /// </summary>
     private static async Task<T?> ReadJsonBodyAsync<T>(HttpContext context, ILogger<Program> logger, string endpoint)
@@ -910,10 +896,10 @@ public static partial class ClientEndpoints
     }
 
     /// <summary>
-    /// Reads a client marker payload (JSON array of loosely-typed marker objects).
-    /// Parses strictly first; on failure retries with bare value tokens quoted — older
-    /// Haven client builds emit shared-marker ids as unquoted hex (see LenientJson) and
-    /// none of the marker endpoints consume that field. Returns null when unparseable.
+    /// Reads a client marker payload (JSON array of loosely-typed marker objects) in a single
+    /// parse: bare value tokens are quoted first (LenientJson returns valid JSON unchanged).
+    /// Current Hurricane builds send shared-marker ids as unquoted hex, and none of the marker
+    /// endpoints consume that field. Returns null when the body is empty or unparseable.
     /// </summary>
     private static async Task<List<Dictionary<string, object>>?> ReadMarkerListAsync(
         HttpContext context, ILogger<Program> logger, string endpoint)
@@ -925,27 +911,16 @@ public static partial class ClientEndpoints
         if (string.IsNullOrWhiteSpace(body))
             return null;
 
-        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         try
         {
-            return JsonSerializer.Deserialize<List<Dictionary<string, object>>>(body, options);
+            var markers = LenientJson.Deserialize<List<Dictionary<string, object>>>(
+                body, CaseInsensitiveJsonOpts, out var repaired);
+            if (repaired)
+                logger.LogDebug("{Endpoint}: repaired malformed marker payload (bare value tokens quoted)", endpoint);
+            return markers;
         }
         catch (JsonException error)
         {
-            var repairedBody = LenientJson.QuoteBareTokens(body);
-            if (!ReferenceEquals(repairedBody, body))
-            {
-                try
-                {
-                    var markers = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(repairedBody, options);
-                    logger.LogWarning("{Endpoint}: repaired malformed marker payload (bare value tokens quoted)", endpoint);
-                    return markers;
-                }
-                catch (JsonException)
-                {
-                }
-            }
-
             logger.LogWarning(error, "{Endpoint}: rejecting unparseable marker payload: {Snippet}",
                 endpoint, body.Length <= 300 ? body : body[..300]);
             return null;
@@ -1103,7 +1078,7 @@ public static partial class ClientEndpoints
             return null;
         }
 
-        logger.LogWarning("MarkerUpdate: Received {Count} markers", markers.Count);
+        logger.LogDebug("MarkerUpdate: Received {Count} markers", markers.Count);
 
         foreach (var m in markers)
         {
@@ -1115,7 +1090,7 @@ public static partial class ClientEndpoints
             var image = GetValue(m, "Image")?.ToString() ?? "";
             var ready = Convert.ToBoolean(GetValue(m, "Ready")?.ToString() ?? "false");
 
-            logger.LogWarning(
+            logger.LogDebug(
                 "MarkerUpdate: Processing marker - GridID={GridId}, X={X}, Y={Y}, Name={Name}, Image={Image}, Ready={Ready}",
                 gridId, x, y, name, image, ready);
 

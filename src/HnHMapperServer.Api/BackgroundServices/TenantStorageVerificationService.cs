@@ -1,13 +1,16 @@
 using System.Diagnostics;
 using HnHMapperServer.Infrastructure.Data;
 using HnHMapperServer.Services.Interfaces;
+using HnHMapperServer.Services.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace HnHMapperServer.Api.BackgroundServices;
 
 /// <summary>
-/// Background service that periodically verifies tenant storage usage matches filesystem reality
-/// Runs every 6 hours to detect and fix discrepancies between database and actual file storage
+/// Background service that periodically resets every active tenant's tracked storage usage to the
+/// filesystem total (the authoritative reconciliation) and warns only when the drift it corrected
+/// could matter: an overcount above max(2 MB, 0.5% of quota) or an undercount below
+/// -max(10 MB, 2% of quota) (StorageDrift; keys StorageVerification:*). Runs every 6 hours.
 /// </summary>
 public class TenantStorageVerificationService : BackgroundService
 {
@@ -15,6 +18,8 @@ public class TenantStorageVerificationService : BackgroundService
     private readonly ILogger<TenantStorageVerificationService> _logger;
     private readonly string _gridStorage;
     private readonly TimeSpan _verificationInterval;
+    private readonly TimeSpan _firstRunDelay;
+    private readonly StorageDriftThresholds _thresholds;
 
     public TenantStorageVerificationService(
         IServiceProvider serviceProvider,
@@ -28,6 +33,16 @@ public class TenantStorageVerificationService : BackgroundService
         // Default: 6 hours (configurable)
         var intervalHours = configuration.GetValue<int>("StorageVerification:IntervalHours", 6);
         _verificationInterval = TimeSpan.FromHours(intervalHours);
+
+        // Let the system stabilize after startup before the first scan (default 1 hour).
+        _firstRunDelay = TimeSpan.FromMinutes(configuration.GetValue<double>("StorageVerification:StartupDelayMinutes", 60));
+
+        var defaults = new StorageDriftThresholds();
+        _thresholds = new StorageDriftThresholds(
+            configuration.GetValue("StorageVerification:OvercountWarnMinMB", defaults.OvercountMinMB),
+            configuration.GetValue("StorageVerification:OvercountWarnPercentOfQuota", defaults.OvercountPercentOfQuota),
+            configuration.GetValue("StorageVerification:UndercountWarnMinMB", defaults.UndercountMinMB),
+            configuration.GetValue("StorageVerification:UndercountWarnPercentOfQuota", defaults.UndercountPercentOfQuota));
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -37,10 +52,10 @@ public class TenantStorageVerificationService : BackgroundService
         _logger.LogInformation("TenantStorageVerificationService starting in {Delay:F1}s", startupDelay.TotalSeconds);
         await Task.Delay(startupDelay, stoppingToken);
 
-        _logger.LogInformation("TenantStorageVerificationService started. Interval: {Interval}", _verificationInterval);
+        _logger.LogInformation("TenantStorageVerificationService started. Interval: {Interval}, first run in {FirstRun}",
+            _verificationInterval, _firstRunDelay);
 
-        // Wait 1 hour before first run (let system stabilize after startup)
-        await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
+        await Task.Delay(_firstRunDelay, stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -69,111 +84,56 @@ public class TenantStorageVerificationService : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         var quotaService = scope.ServiceProvider.GetRequiredService<IStorageQuotaService>();
 
-        var tenants = await db.Tenants
+        // Ids only: nothing tracked, so no stale snapshot of a tenant row lives in this scope.
+        var tenantIds = await db.Tenants
             .IgnoreQueryFilters()
             .Where(t => t.IsActive)
+            .Select(t => t.Id)
             .ToListAsync(cancellationToken);
 
-        _logger.LogDebug("Starting storage verification for {Count} active tenants", tenants.Count);
+        _logger.LogDebug("Starting storage verification for {Count} active tenants", tenantIds.Count);
 
-        foreach (var tenant in tenants)
+        int overcounts = 0, undercounts = 0;
+        (string? TenantId, double DriftMB) maxOver = (null, 0), maxUnder = (null, 0);
+
+        foreach (var tenantId in tenantIds)
         {
             if (cancellationToken.IsCancellationRequested)
                 break;
 
             try
             {
-                await VerifyTenantAsync(tenant.Id, db, quotaService);
+                var r = await quotaService.ReconcileStorageUsageAsync(tenantId, _gridStorage);
+                if (r.DriftMB > maxOver.DriftMB) maxOver = (tenantId, r.DriftMB);
+                if (r.DriftMB < maxUnder.DriftMB) maxUnder = (tenantId, r.DriftMB);
+
+                switch (StorageDrift.Classify(r.PreviousMB, r.CurrentMB, r.QuotaMB, _thresholds))
+                {
+                    case StorageDriftKind.Overcount:
+                        overcounts++;
+                        _logger.LogWarning(
+                            "Storage overcount for tenant {TenantId}: tracked {TrackedMB:F2}MB vs disk {DiskMB:F2}MB (+{DriftMB:F2}MB, quota {QuotaMB}MB) - a write path charges bytes that are not on disk",
+                            tenantId, r.PreviousMB, r.CurrentMB, r.DriftMB, r.QuotaMB);
+                        break;
+                    case StorageDriftKind.Undercount:
+                        undercounts++;
+                        _logger.LogWarning(
+                            "Storage undercount for tenant {TenantId}: tracked {TrackedMB:F2}MB vs disk {DiskMB:F2}MB ({DriftMB:F2}MB, quota {QuotaMB}MB) - a write path is not charged",
+                            tenantId, r.PreviousMB, r.CurrentMB, r.DriftMB, r.QuotaMB);
+                        break;
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to verify storage for tenant {TenantId}", tenant.Id);
+                _logger.LogError(ex, "Failed to verify storage for tenant {TenantId}", tenantId);
             }
         }
 
         sw.Stop();
-        _logger.LogInformation("Storage verification job completed in {ElapsedMs}ms for {Count} tenants", sw.ElapsedMilliseconds, tenants.Count);
-    }
-
-    private async Task VerifyTenantAsync(string tenantId, ApplicationDbContext db, IStorageQuotaService quotaService)
-    {
-        // Calculate from filesystem - single pass for both count and size
-        var tenantDir = Path.Combine(_gridStorage, "tenants", tenantId);
-        var (fileCount, fsUsageBytes) = CalculateDirectorySizeAndCount(tenantDir);
-        var fsUsageMB = fsUsageBytes / 1024.0 / 1024.0;
-
-        // Get current tracked value
-        var tenant = await db.Tenants
-            .IgnoreQueryFilters()
-            .FirstOrDefaultAsync(t => t.Id == tenantId);
-
-        if (tenant != null)
-        {
-            var oldUsage = tenant.CurrentStorageMB;
-            var diffMB = Math.Abs(oldUsage - fsUsageMB);
-
-            // Update if there's a significant difference (> 1 MB)
-            if (diffMB > 1)
-            {
-                _logger.LogInformation(
-                    "Updated tenant {TenantId} storage usage: {OldMB:F2}MB → {NewMB:F2}MB",
-                    tenantId, oldUsage, fsUsageMB);
-            }
-            else
-            {
-                _logger.LogDebug(
-                    "Storage verified for tenant {TenantId}: {UsageMB:F2}MB",
-                    tenantId, fsUsageMB);
-            }
-        }
-
-        // Use the new optimized method that takes pre-calculated values
-        // This avoids a duplicate filesystem scan
-        await quotaService.UpdateStorageFromCalculationAsync(tenantId, _gridStorage, fsUsageBytes, fileCount);
-    }
-
-    /// <summary>
-    /// Calculates total size and file count of a directory in a single pass.
-    /// Uses EnumerateFiles for streaming instead of GetFiles to reduce memory pressure.
-    /// </summary>
-    private static (int fileCount, long totalBytes) CalculateDirectorySizeAndCount(string dirPath)
-    {
-        if (!Directory.Exists(dirPath))
-            return (0, 0);
-
-        try
-        {
-            int count = 0;
-            long total = 0;
-
-            // Use EnumerateFiles for streaming - more memory efficient for large directories
-            foreach (var file in Directory.EnumerateFiles(dirPath, "*", SearchOption.AllDirectories))
-            {
-                try
-                {
-                    var fileInfo = new FileInfo(file);
-                    total += fileInfo.Length;
-                    count++;
-                }
-                catch (IOException)
-                {
-                    // File may have been deleted during enumeration, skip it
-                }
-                catch (UnauthorizedAccessException)
-                {
-                    // Skip files we can't access
-                }
-            }
-
-            return (count, total);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return (0, 0);
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return (0, 0);
-        }
+        _logger.LogInformation(
+            "Storage verification job completed in {ElapsedMs}ms for {Count} tenants: {Overcounts} overcount, {Undercounts} undercount warning(s); " +
+            "max overcount {MaxOverMB:F2}MB ({MaxOverTenant}), max undercount {MaxUnderMB:F2}MB ({MaxUnderTenant})",
+            sw.ElapsedMilliseconds, tenantIds.Count, overcounts, undercounts,
+            maxOver.DriftMB, maxOver.TenantId ?? "-", maxUnder.DriftMB, maxUnder.TenantId ?? "-");
     }
 }

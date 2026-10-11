@@ -72,6 +72,7 @@ public class TenantDataPurgeServiceTests : IDisposable
         Assert.Equal(1, result.Pings);
         Assert.Equal(2, result.Overlays); // overlay data + overlay offset
         Assert.Equal(1, result.DirtyZoomTiles);
+        Assert.Equal(1, result.DirtyWebpCells);
         Assert.Equal(1, result.Timers);
         Assert.Equal(1, result.TimerHistory);
         Assert.Equal(1, result.Notifications);
@@ -86,6 +87,8 @@ public class TenantDataPurgeServiceTests : IDisposable
         Assert.Empty(await _db.OverlayData.IgnoreQueryFilters().Where(o => o.TenantId == TargetTenant).ToListAsync());
         Assert.Empty(await _db.OverlayOffsets.IgnoreQueryFilters().Where(o => o.TenantId == TargetTenant).ToListAsync());
         Assert.Empty(await _db.DirtyZoomTiles.IgnoreQueryFilters().Where(d => d.TenantId == TargetTenant).ToListAsync());
+        Assert.Empty(await _db.DirtyWebpCells.Where(d => d.TenantId == TargetTenant).ToListAsync());
+        Assert.Single(await _db.DirtyWebpCells.Where(d => d.TenantId == OtherTenant).ToListAsync());
         Assert.Empty(await _db.Timers.IgnoreQueryFilters().Where(t => t.TenantId == TargetTenant).ToListAsync());
         Assert.Empty(await _db.TimerHistory.IgnoreQueryFilters().Where(t => t.TenantId == TargetTenant).ToListAsync());
         Assert.Empty(await _db.Notifications.IgnoreQueryFilters().Where(n => n.TenantId == TargetTenant).ToListAsync());
@@ -431,6 +434,15 @@ public class TenantDataPurgeServiceTests : IDisposable
             CoordY = 0,
             Zoom = 1,
             CreatedAt = now
+        });
+
+        _db.DirtyWebpCells.Add(new DirtyWebpCellEntity
+        {
+            TenantId = tenantId,
+            MapId = mapId,
+            CellX = 0,
+            CellY = 0,
+            MarkedAt = now
         });
 
         _db.Notifications.Add(new NotificationEntity

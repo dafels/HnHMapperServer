@@ -1,23 +1,26 @@
 using System.Text;
+using System.Text.Json;
 
 namespace HnHMapperServer.Core.Json;
 
 /// <summary>
 /// Repairs JSON-shaped payloads that contain bare (unquoted) value tokens by quoting them.
-/// Newer Haven client builds carry their shared-marker ids as a UID type whose toString()
-/// is unsigned base-16, and the client-side org.json writes any Number verbatim — producing
-/// tokens like {"id":531a9f2e44c81b07} that strict parsers reject.
+/// Current Haven client builds (Hurricane) carry their shared-marker ids as a UID type whose
+/// toString() is unsigned base-16, and the client-side org.json writes any Number verbatim —
+/// producing tokens like {"id":531a9f2e44c81b07} that strict parsers reject.
 /// </summary>
 public static class LenientJson
 {
     /// <summary>
     /// Quotes bare tokens that are not valid JSON literals or numbers. Content inside string
-    /// literals is never touched. Returns the original instance when nothing needed repair.
+    /// literals is never touched. Returns the original instance when nothing needed repair; it
+    /// runs on every marker payload, so a valid one costs one scan and no copy (the builder is
+    /// only allocated at the first bare token).
     /// </summary>
     public static string QuoteBareTokens(string json)
     {
-        var sb = new StringBuilder(json.Length + 32);
-        var repaired = false;
+        StringBuilder? sb = null;   // json[..copied] is already in sb
+        var copied = 0;
         var inString = false;
         var i = 0;
         while (i < json.Length)
@@ -25,14 +28,9 @@ public static class LenientJson
             var c = json[i];
             if (inString)
             {
-                sb.Append(c);
-                if (c == '\\' && i + 1 < json.Length)
-                {
-                    sb.Append(json[i + 1]);
-                    i += 2;
-                    continue;
-                }
-                if (c == '"')
+                if (c == '\\')
+                    i++;            // skip the escaped character
+                else if (c == '"')
                     inString = false;
                 i++;
                 continue;
@@ -40,13 +38,11 @@ public static class LenientJson
             if (c == '"')
             {
                 inString = true;
-                sb.Append(c);
                 i++;
                 continue;
             }
             if (IsStructural(c) || char.IsWhiteSpace(c))
             {
-                sb.Append(c);
                 i++;
                 continue;
             }
@@ -56,18 +52,29 @@ public static class LenientJson
                 i++;
             var token = json.AsSpan(start, i - start);
             if (IsJsonPrimitive(token))
-            {
-                sb.Append(token);
-            }
-            else
-            {
-                sb.Append('"');
-                AppendEscaped(sb, token);
-                sb.Append('"');
-                repaired = true;
-            }
+                continue;
+
+            sb ??= new StringBuilder(json.Length + 32);
+            sb.Append(json, copied, start - copied).Append('"');
+            AppendEscaped(sb, token);
+            sb.Append('"');
+            copied = i;
         }
-        return repaired ? sb.ToString() : json;
+        return sb is null ? json : sb.Append(json, copied, json.Length - copied).ToString();
+    }
+
+    /// <summary>
+    /// Parses a possibly lenient payload in one pass: bare tokens are quoted first, so the
+    /// serializer only throws for structurally broken JSON (it used to parse strictly, throw,
+    /// repair and parse again — two first-chance exceptions per current Hurricane marker post).
+    /// <paramref name="repaired"/> reports whether quoting changed the input.
+    /// </summary>
+    /// <exception cref="JsonException">The payload is not JSON even after quoting.</exception>
+    public static T? Deserialize<T>(string json, JsonSerializerOptions options, out bool repaired)
+    {
+        var normalized = QuoteBareTokens(json);
+        repaired = !ReferenceEquals(normalized, json);
+        return JsonSerializer.Deserialize<T>(normalized, options);
     }
 
     private static bool IsStructural(char c) => c is '{' or '}' or '[' or ']' or ',' or ':';

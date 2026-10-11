@@ -1,511 +1,470 @@
-// Browser-based SSE (Server-Sent Events) client for map updates
-// Uses native EventSource with automatic reconnection and cookie-based auth
+// Browser-side SSE client for /map/updates (live tiles, characters, markers, map events).
+//
+// Connection contract (server side: MapEndpoints.WatchGridUpdates + Core/Constants/SseFrames.cs):
+// - The server sends a NAMED `heartbeat` event when its live loop starts and then every ~5 s,
+//   unconditionally. It must stay a named event: EventSource never surfaces `: comment` lines to
+//   JavaScript, which is why the old `: keep-alive` comment let the watchdog below kill every quiet
+//   stream about every 17 s.
+// - Every delivered event (heartbeat, tile batch, any named event) proves the stream is alive.
+// - Reconnects are always manual, never the browser's native retry: the URL carries `?since=`, which
+//   has to be rebuilt from the newest tile token on every attempt (native retry replays the old URL).
+// - The server ends every stream after ~15 min (±20%) so authorization is re-evaluated; a healthy
+//   stream's end reconnects after ~1 s with a fresh snapshot.
+// - There is no polling fallback. A stream that keeps failing is retried forever
+//   with backoff, and after a few unhealthy connections Map.razor shows "Live updates reconnecting…".
+
+// SseFrames.HeartbeatEvent
+const HEARTBEAT_EVENT = 'heartbeat';
+
+// Watchdog: one tick every 5 s; a stream with no event for 20 s (four missed heartbeats) is dead.
+const HEALTH_CHECK_INTERVAL = 5000;
+const CONNECTION_TIMEOUT = 20000;
+
+// Reconnect backoff: 1 s doubling to 30 s, ±20% jitter, retried forever.
+const RECONNECT_BASE_DELAY = 1000;
+const MAX_RECONNECT_DELAY = 30000;
+
+// Consecutive unhealthy connections before Map.razor shows the "reconnecting" indicator.
+const UNHEALTHY_NOTIFY_THRESHOLD = 3;
 
 let eventSource = null;
 let dotnetRef = null;
-let isConnecting = false;
-let reconnectAttempts = 0;
-const MAX_RECONNECT_DELAY = 5000; // 5 seconds max backoff
 
-// Polling fallback configuration (for VPN users where SSE fails)
-let isPollingMode = false;
-let pollInterval = null;
-let sseFailureCount = 0;
-const SSE_FAILURE_THRESHOLD = 3;  // Switch to polling after 3 consecutive SSE failures
-const POLL_INTERVAL_MS = 3000;    // Poll every 3 seconds
+let reconnectTimer = null;
+let reconnectAttempts = 0;      // backoff exponent; reset by a healthy connection
+let unhealthyStreak = 0;        // consecutive connections that ended before turning healthy
+let reconnectingShown = false;  // .NET was told to show the indicator
 
-// Connection health monitoring
-let lastEventTime = 0;
 let healthCheckInterval = null;
-const HEALTH_CHECK_INTERVAL = 8000;  // Check every 8 seconds
-const CONNECTION_TIMEOUT = 12000;    // 12 seconds without data = unhealthy
+let lastEventTime = 0;
+let lastTick = 0;
+let connectedAt = 0;
+let sawHeartbeat = false;
+let connectionHealthy = false;
 
 // Track the highest tile cache token (T) we've seen.
 //
 // Why:
-// - The server may (re)send a large "initial tile cache" payload on SSE connect.
-// - If the browser tab is backgrounded, the SSE connection may drop and reconnect when the tab returns.
+// - The server (re)sends the tile cache on every connect: the whole list without `since`.
 // - Re-sending the full tile cache (~300k entries) on each reconnect can freeze the browser.
 // - We therefore reconnect with `?since=<lastTileCache>` to request only tiles updated since we last synced.
+// - Kept across disconnectSseUpdates (SPA exit, circuit pause) on purpose, so re-entry asks for the delta.
 //
 // Note:
 // - This assumes tile cache tokens (T) are monotonically increasing in practice (timestamp-like).
 let lastTileCache = 0;
 
-// Track if initial data has been loaded via HTTP
-let initialDataLoaded = false;
+// Fallback-path dedupe for mapRevision (see applyMapRevision): mapId -> last revision sent to .NET.
+const forwardedRevisions = new Map();
+
+// Named events forwarded to .NET as parsed JSON, unchanged.
+const FORWARDED_EVENTS = {
+    merge: 'OnSseMapMerge',
+    mapUpdate: 'OnSseMapUpdated',            // upsert: full map item, incl. newly created maps
+    customMarkerCreated: 'OnCustomMarkerCreated',
+    customMarkerUpdated: 'OnCustomMarkerUpdated',
+    customMarkerDeleted: 'OnCustomMarkerDeleted',
+    markerCreated: 'OnMarkerCreated',
+    markerUpdated: 'OnMarkerUpdated',
+    markerDeleted: 'OnMarkerDeleted',
+    pingCreated: 'OnPingCreated',
+    pingDeleted: 'OnPingDeleted',
+    timerCreated: 'OnTimerCreated',
+    timerUpdated: 'OnTimerUpdated',
+    timerCompleted: 'OnTimerCompleted',
+    roadCreated: 'OnRoadCreated',
+    roadUpdated: 'OnRoadUpdated',
+    roadDeleted: 'OnRoadDeleted',
+    overlayUpdated: 'OnOverlayUpdated',
+    charactersSnapshot: 'OnSseCharactersSnapshot',   // full state, sent only at connect
+    characterDelta: 'OnSseCharacterDelta'
+};
+
+// circuit-pause.js (a classic script, it cannot import this module) calls this after a successful
+// pause: the paused circuit's dotnetRef is dead, so the stream would only feed calls nobody receives.
+// The resumed Map component calls initializeSseUpdates again.
+try {
+    window.mapUpdates = window.mapUpdates || {};
+    window.mapUpdates.suspend = disconnectSseUpdates;
+} catch { /* ignore - non-browser environment */ }
 
 /**
- * Initialize map updates - fetches initial data via HTTP first, then tries SSE for real-time updates
+ * Start (or restart) live map updates.
+ *
+ * Always opens a fresh stream, even if one is open: the server sends charactersSnapshot and the
+ * mapRevision replay only at connect, and a re-initialised component (circuit reconnect, resume after
+ * a pause, SPA re-entry) starts with empty character state.
+ *
  * @param {object} dotnetReference - DotNet object reference for callbacks
- * @returns {Promise<boolean>} - true if initialization successful
+ * @returns {boolean} - true if the EventSource was created
  */
-export async function initializeSseUpdates(dotnetReference) {
-    console.warn('[SSE] ===== initializeSseUpdates called =====');
-    console.warn('[SSE] dotnetReference:', dotnetReference);
+export function initializeSseUpdates(dotnetReference) {
     dotnetRef = dotnetReference;
+    forwardedRevisions.clear();
+    // The .NET side starts without the indicator (fresh component, or Map.razor cleared it on
+    // circuit-up); a stream that is still failing raises it again on its next unhealthy loss.
+    // reconnectAttempts/unhealthyStreak deliberately carry over (disconnectSseUpdates resets them):
+    // a re-init during an outage must not restart the backoff from 1 s.
+    reconnectingShown = false;
 
-    // Reuse existing connection if it's still working (prevents closing on Blazor reconnect)
-    if (eventSource) {
-        if (eventSource.readyState === EventSource.OPEN) {
-            console.warn('[SSE] EventSource already connected and open, reusing existing connection');
-            return true;  // Reuse existing connection
-        } else {
-            console.warn('[SSE] Closing broken EventSource (readyState: ' + eventSource.readyState + ' - 0=CONNECTING, 1=OPEN, 2=CLOSED)');
-            eventSource.close();
-            eventSource = null;
-        }
-    }
-
-    // If already in polling mode, just ensure polling is running
-    if (isPollingMode) {
-        console.warn('[SSE] Already in polling mode, ensuring polling is active');
-        if (!pollInterval) startPolling();
-        return true;
-    }
-
-    // STEP 1: Fetch initial data via HTTP immediately (doesn't depend on SSE)
-    // This ensures the map loads even if SSE is blocked by VPN/proxy
-    if (!initialDataLoaded) {
-        console.warn('[HTTP] Fetching initial map data via HTTP...');
-        try {
-            await fetchInitialData();
-            initialDataLoaded = true;
-            console.warn('[HTTP] Initial data loaded successfully');
-        } catch (error) {
-            console.error('[HTTP] Failed to fetch initial data:', error);
-            // Continue anyway - SSE might still work
-        }
-    }
-
-    // STEP 2: Try to establish SSE connection for real-time updates
-    console.warn('[SSE] Calling connectSse...');
-    const result = connectSse();
-    console.warn('[SSE] connectSse returned:', result);
-    return result;
+    clearReconnectTimer();
+    closeEventSource();
+    return connectSse();
 }
 
 /**
- * Connect to SSE endpoint - browser automatically sends cookies
+ * Stop everything this module started: the stream, the watchdog and any pending reconnect, and drop
+ * the .NET reference (the caller disposes it). Called from Map.razor's DisposeAsync (leaving /map) and
+ * by circuit-pause.js. lastTileCache is kept so the next initializeSseUpdates asks only for the delta.
+ */
+export function disconnectSseUpdates() {
+    clearReconnectTimer();
+    closeEventSource();
+    dotnetRef = null;
+    reconnectAttempts = 0;
+    unhealthyStreak = 0;
+    reconnectingShown = false;
+    forwardedRevisions.clear();
+}
+
+/**
+ * Check if SSE is currently connected
+ * @returns {boolean}
+ */
+export function isSseConnected() {
+    return eventSource !== null && eventSource.readyState === EventSource.OPEN;
+}
+
+/**
+ * Open the stream. The browser sends the auth cookie itself (same origin).
  */
 function connectSse() {
-    console.warn('[SSE] connectSse called - isConnecting:', isConnecting, 'eventSource:', eventSource);
+    if (eventSource) return true;
 
-    if (isConnecting || eventSource) {
-        console.warn('[SSE] Already connecting or connected, returning false');
+    // Rebuilt on every attempt: ask only for tiles newer than the newest token we have.
+    let url = '/map/updates';
+    if (Number.isFinite(lastTileCache) && lastTileCache > 0) {
+        url += `?since=${encodeURIComponent(String(lastTileCache))}`;
+    }
+
+    let es;
+    try {
+        es = new EventSource(url, { withCredentials: true });
+    } catch (e) {
+        console.error('[SSE] Failed to create EventSource:', e);
+        onConnectionEnded(false, 'create failed');
         return false;
     }
 
-    isConnecting = true;
-
+    eventSource = es;
     try {
-        // Build SSE URL. If we have previously processed any tile cache tokens, request only the
-        // delta since that token. This prevents huge re-sync payloads (and browser freezes) on reconnect.
-        let url = '/map/updates';
-        if (typeof lastTileCache === 'number' && Number.isFinite(lastTileCache) && lastTileCache > 0) {
-            url += `?since=${encodeURIComponent(String(lastTileCache))}`;
+        window.mapUpdates.eventSource = es; // debugging aid (DevTools)
+    } catch { /* ignore */ }
+
+    connectedAt = Date.now();
+    lastEventTime = connectedAt;
+    sawHeartbeat = false;
+    connectionHealthy = false;
+    // Armed at connect, not at onopen, so a request stuck in CONNECTING is caught too.
+    startHealthCheck();
+
+    // Every handler ignores events of a stream that has since been replaced or closed.
+    const listen = (name, handler) => es.addEventListener(name, (event) => {
+        if (es !== eventSource) return;
+        markAlive();
+        handler(event);
+    });
+
+    es.onopen = () => {
+        if (es !== eventSource) return;
+        console.debug('[SSE] Connected to', url);
+        markAlive();
+    };
+
+    // Set before markAlive so the heartbeat that completes the health window is counted at once.
+    es.addEventListener(HEARTBEAT_EVENT, () => {
+        if (es !== eventSource) return;
+        sawHeartbeat = true;
+        markAlive();
+    });
+
+    // Default (unnamed) messages are tile batches: the initial tile cache in chunks, then a batch every 10 s.
+    es.onmessage = (event) => {
+        if (es !== eventSource) return;
+        markAlive();
+        applyTileBatch(event.data);
+    };
+
+    for (const [name, method] of Object.entries(FORWARDED_EVENTS)) {
+        listen(name, (event) => {
+            const payload = parseEventData(name, event);
+            if (payload !== undefined) {
+                invokeDotNetSafe(method, payload);
+            }
+        });
+    }
+
+    // Map deletion event. Server sends camelCase JSON ({ id: ... })
+    listen('mapDelete', (event) => {
+        const deleteInfo = parseEventData('mapDelete', event);
+        if (deleteInfo === undefined) return;
+        const id = deleteInfo?.id ?? deleteInfo?.Id;
+        if (typeof id === 'number' && Number.isFinite(id)) {
+            invokeDotNetSafe('OnSseMapDeleted', id);
+        } else {
+            console.warn('[SSE] Ignoring mapDelete with invalid id:', deleteInfo);
         }
+    });
 
-        console.warn('[SSE] Creating new EventSource for', url);
+    // Timer deletion event. Server sends camelCase JSON ({ id: ... })
+    listen('timerDeleted', (event) => {
+        const deleteInfo = parseEventData('timerDeleted', event);
+        if (deleteInfo === undefined) return;
+        const id = deleteInfo?.id ?? deleteInfo?.Id;
+        if (typeof id === 'number' && Number.isFinite(id)) {
+            invokeDotNetSafe('OnTimerDeleted', id);
+        } else {
+            console.warn('[SSE] Ignoring timerDeleted with invalid id:', deleteInfo);
+        }
+    });
 
-        // EventSource automatically includes cookies for same-origin requests
-        eventSource = new EventSource(url, {
-            withCredentials: true
-        });
+    // Map revision event (tile cache busting). Server sends camelCase JSON ({ mapId, revision }, plus
+    // `cells` - the regenerated zoom-0 cells - on ZoomQ bumps). Every connect replays all of the
+    // tenant's revisions (without cells), so most of these are duplicates.
+    listen('mapRevision', (event) => {
+        const revision = parseEventData('mapRevision', event);
+        if (revision === undefined) return;
+        if (revision && Number.isInteger(revision.mapId) && Number.isInteger(revision.revision)) {
+            applyMapRevision(revision.mapId, revision.revision, Array.isArray(revision.cells) ? revision.cells : null);
+        } else {
+            console.warn('[SSE] Ignoring mapRevision with invalid values:', revision);
+        }
+    });
 
-        // Expose globally for notification-center.js to access
-        window.mapUpdates = window.mapUpdates || {};
-        window.mapUpdates.eventSource = eventSource;
-        console.warn('[SSE] EventSource exposed as window.mapUpdates.eventSource');
+    // Any error, in any readyState: close and reconnect ourselves. Left alone, EventSource would retry
+    // its original URL (stale ?since=) or give up for good (CLOSED after a non-200 answer).
+    es.onerror = () => {
+        if (es !== eventSource) return;
+        handleConnectionLost('error');
+    };
 
-        console.warn('[SSE] EventSource created successfully');
-        console.warn('[SSE] EventSource.url:', eventSource.url);
-        console.warn('[SSE] EventSource.readyState:', eventSource.readyState, '(0=CONNECTING, 1=OPEN, 2=CLOSED)');
-        console.warn('[SSE] EventSource.withCredentials:', eventSource.withCredentials);
+    return true;
+}
 
-        // Wait a bit to see if readyState changes
-        setTimeout(() => {
-            console.warn('[SSE] EventSource readyState after 100ms:', eventSource?.readyState);
-        }, 100);
-
-        setTimeout(() => {
-            console.warn('[SSE] EventSource readyState after 500ms:', eventSource?.readyState);
-        }, 500);
-
-        // Connection opened successfully
-        eventSource.onopen = function () {
-            console.warn('[SSE] ===== CONNECTED to /map/updates =====');
-            isConnecting = false;
-            reconnectAttempts = 0;
-            sseFailureCount = 0;  // Reset failure count on successful connection
-            lastEventTime = Date.now();
-            startHealthCheck();
-
-            // Notify Blazor of connection mode
-            invokeDotNetSafe('OnConnectionModeChanged', 'sse');
-        };
-
-        // Default message handler (tile updates - batched every 5s)
-        eventSource.onmessage = function (event) {
-            lastEventTime = Date.now();  // Track last event for health monitoring
-            try {
-                // NOTE:
-                // The server may stream a large initial tile cache as many smaller SSE messages.
-                // Each message still contains a JSON array, so the logic here remains the same.
-                const tiles = JSON.parse(event.data);
-                if (tiles && Array.isArray(tiles) && tiles.length > 0) {
-                    // Update last seen cache token BEFORE applying (so reconnect uses a fresh `since` marker).
-                    // We intentionally do this in a tight loop (no allocations) for speed.
-                    // Accept both `T` and `t` for robustness.
-                    for (let i = 0; i < tiles.length; i++) {
-                        const t = tiles[i];
-                        const cache = t?.T ?? t?.t;
-                        if (typeof cache === 'number' && Number.isFinite(cache) && cache > lastTileCache) {
-                            lastTileCache = cache;
-                        }
-                    }
-
-                    // Expose for debugging (helps confirm reconnect delta behavior in DevTools).
-                    try {
-                        window.mapUpdates = window.mapUpdates || {};
-                        window.mapUpdates.lastTileCache = lastTileCache;
-                    } catch { /* ignore */ }
-
-                    // FAST PATH:
-                    // Apply tile updates directly in JS (Leaflet) to avoid JS -> .NET -> JS per-tile roundtrips.
-                    // This is critical to prevent UI freezes when the tab returns to foreground and a burst of
-                    // updates arrives at once.
-                    try {
-                        const fastApply = window?.hnhMapper?.applyTileUpdates;
-                        if (typeof fastApply === 'function') {
-                            fastApply(tiles);
-                            return;
-                        }
-                    } catch {
-                        // If anything goes wrong, fall back to the legacy .NET path.
-                    }
-
-                    // Fallback: legacy path (JS -> .NET). Kept for backwards compatibility / early init cases.
-                    invokeDotNetSafe('OnSseTileUpdates', tiles);
-                }
-            } catch (e) {
-                console.error('[SSE] Error parsing tile updates:', e);
-            }
-        };
-
-        // Map merge event
-        eventSource.addEventListener('merge', function (event) {
-            try {
-                const merge = JSON.parse(event.data);
-                invokeDotNetSafe('OnSseMapMerge', merge);
-            } catch (e) {
-                console.error('[SSE] Error parsing merge event:', e);
-            }
-        });
-
-        // Map metadata update event (name, hidden, priority)
-        eventSource.addEventListener('mapUpdate', function (event) {
-            try {
-                const mapInfo = JSON.parse(event.data);
-                invokeDotNetSafe('OnSseMapUpdated', mapInfo);
-            } catch (e) {
-                console.error('[SSE] Error parsing mapUpdate event:', e);
-            }
-        });
-
-        // Map deletion event
-        // Note: Server sends camelCase JSON ({ id: ... })
-        eventSource.addEventListener('mapDelete', function (event) {
-            try {
-                const deleteInfo = JSON.parse(event.data);
-                const id = deleteInfo.id ?? deleteInfo.Id;
-                if (typeof id === 'number' && Number.isFinite(id)) {
-                    invokeDotNetSafe('OnSseMapDeleted', id);
-                } else {
-                    console.warn('[SSE] Ignoring mapDelete with invalid id:', deleteInfo);
-                }
-            } catch (e) {
-                console.error('[SSE] Error parsing mapDelete event:', e);
-            }
-        });
-
-        // Map revision event (cache busting)
-        // Note: Server sends camelCase JSON (mapId, revision)
-        eventSource.addEventListener('mapRevision', function (event) {
-            try {
-                const revision = JSON.parse(event.data);
-                // Use Number.isFinite() to ensure values are valid finite numbers
-                // This catches null, undefined, NaN, Infinity which would fail .NET deserialization
-                if (revision &&
-                    typeof revision.mapId === 'number' && Number.isFinite(revision.mapId) &&
-                    typeof revision.revision === 'number' && Number.isFinite(revision.revision)) {
-                    invokeDotNetSafe('OnSseMapRevision', revision.mapId, revision.revision);
-                } else {
-                    console.warn('[SSE] Ignoring mapRevision with invalid values:', revision);
-                }
-            } catch (e) {
-                console.error('[SSE] Error parsing mapRevision event:', e);
-            }
-        });
-
-        // Custom marker created event
-        eventSource.addEventListener('customMarkerCreated', function (event) {
-            try {
-                const marker = JSON.parse(event.data);
-                invokeDotNetSafe('OnCustomMarkerCreated', marker);
-            } catch (e) {
-                console.error('[SSE] Error parsing customMarkerCreated event:', e);
-            }
-        });
-
-        // Custom marker updated event
-        eventSource.addEventListener('customMarkerUpdated', function (event) {
-            try {
-                const marker = JSON.parse(event.data);
-                invokeDotNetSafe('OnCustomMarkerUpdated', marker);
-            } catch (e) {
-                console.error('[SSE] Error parsing customMarkerUpdated event:', e);
-            }
-        });
-
-        // Custom marker deleted event
-        eventSource.addEventListener('customMarkerDeleted', function (event) {
-            try {
-                const deleteInfo = JSON.parse(event.data);
-                invokeDotNetSafe('OnCustomMarkerDeleted', deleteInfo);
-            } catch (e) {
-                console.error('[SSE] Error parsing customMarkerDeleted event:', e);
-            }
-        });
-
-        // Game marker created event
-        eventSource.addEventListener('markerCreated', function (event) {
-            try {
-                const marker = JSON.parse(event.data);
-                invokeDotNetSafe('OnMarkerCreated', marker);
-            } catch (e) {
-                console.error('[SSE] Error parsing markerCreated event:', e);
-            }
-        });
-
-        // Game marker updated event
-        eventSource.addEventListener('markerUpdated', function (event) {
-            try {
-                const marker = JSON.parse(event.data);
-                invokeDotNetSafe('OnMarkerUpdated', marker);
-            } catch (e) {
-                console.error('[SSE] Error parsing markerUpdated event:', e);
-            }
-        });
-
-        // Game marker deleted event
-        eventSource.addEventListener('markerDeleted', function (event) {
-            try {
-                const deleteInfo = JSON.parse(event.data);
-                invokeDotNetSafe('OnMarkerDeleted', deleteInfo);
-            } catch (e) {
-                console.error('[SSE] Error parsing markerDeleted event:', e);
-            }
-        });
-
-        // Ping created event
-        eventSource.addEventListener('pingCreated', function (event) {
-            try {
-                const ping = JSON.parse(event.data);
-                invokeDotNetSafe('OnPingCreated', ping);
-            } catch (e) {
-                console.error('[SSE] Error parsing pingCreated event:', e);
-            }
-        });
-
-        // Ping deleted event
-        eventSource.addEventListener('pingDeleted', function (event) {
-            try {
-                const deleteInfo = JSON.parse(event.data);
-                invokeDotNetSafe('OnPingDeleted', deleteInfo);
-            } catch (e) {
-                console.error('[SSE] Error parsing pingDeleted event:', e);
-            }
-        });
-
-        // Timer created event
-        eventSource.addEventListener('timerCreated', function (event) {
-            try {
-                const timer = JSON.parse(event.data);
-                invokeDotNetSafe('OnTimerCreated', timer);
-            } catch (e) {
-                console.error('[SSE] Error parsing timerCreated event:', e);
-            }
-        });
-
-        // Timer updated event
-        eventSource.addEventListener('timerUpdated', function (event) {
-            try {
-                const timer = JSON.parse(event.data);
-                invokeDotNetSafe('OnTimerUpdated', timer);
-            } catch (e) {
-                console.error('[SSE] Error parsing timerUpdated event:', e);
-            }
-        });
-
-        // Timer completed event
-        eventSource.addEventListener('timerCompleted', function (event) {
-            try {
-                const timer = JSON.parse(event.data);
-                invokeDotNetSafe('OnTimerCompleted', timer);
-            } catch (e) {
-                console.error('[SSE] Error parsing timerCompleted event:', e);
-            }
-        });
-
-        // Timer deleted event
-        // Note: Server sends camelCase JSON ({ id: ... })
-        eventSource.addEventListener('timerDeleted', function (event) {
-            try {
-                const deleteInfo = JSON.parse(event.data);
-                const id = deleteInfo.id ?? deleteInfo.Id;
-                if (typeof id === 'number' && Number.isFinite(id)) {
-                    invokeDotNetSafe('OnTimerDeleted', id);
-                } else {
-                    console.warn('[SSE] Ignoring timerDeleted with invalid id:', deleteInfo);
-                }
-            } catch (e) {
-                console.error('[SSE] Error parsing timerDeleted event:', e);
-            }
-        });
-
-        // Road created event
-        eventSource.addEventListener('roadCreated', function (event) {
-            try {
-                const road = JSON.parse(event.data);
-                invokeDotNetSafe('OnRoadCreated', road);
-            } catch (e) {
-                console.error('[SSE] Error parsing roadCreated event:', e);
-            }
-        });
-
-        // Road updated event
-        eventSource.addEventListener('roadUpdated', function (event) {
-            try {
-                const road = JSON.parse(event.data);
-                invokeDotNetSafe('OnRoadUpdated', road);
-            } catch (e) {
-                console.error('[SSE] Error parsing roadUpdated event:', e);
-            }
-        });
-
-        // Road deleted event
-        eventSource.addEventListener('roadDeleted', function (event) {
-            try {
-                const deleteInfo = JSON.parse(event.data);
-                invokeDotNetSafe('OnRoadDeleted', deleteInfo);
-            } catch (e) {
-                console.error('[SSE] Error parsing roadDeleted event:', e);
-            }
-        });
-
-        // Overlay updated event
-        eventSource.addEventListener('overlayUpdated', function (event) {
-            try {
-                const overlay = JSON.parse(event.data);
-                invokeDotNetSafe('OnOverlayUpdated', overlay);
-            } catch (e) {
-                console.error('[SSE] Error parsing overlayUpdated event:', e);
-            }
-        });
-
-        // Characters snapshot event (initial full state)
-        eventSource.addEventListener('charactersSnapshot', function (event) {
-            try {
-                const characters = JSON.parse(event.data);
-                invokeDotNetSafe('OnSseCharactersSnapshot', characters);
-            } catch (e) {
-                console.error('[SSE] Error parsing charactersSnapshot event:', e);
-            }
-        });
-
-        // Character delta event (incremental updates)
-        eventSource.addEventListener('characterDelta', function (event) {
-            try {
-                const delta = JSON.parse(event.data);
-                invokeDotNetSafe('OnSseCharacterDelta', delta);
-            } catch (e) {
-                console.error('[SSE] Error parsing characterDelta event:', e);
-            }
-        });
-
-        // Error handler - EventSource auto-reconnects, but we track attempts
-        eventSource.onerror = function (error) {
-            console.error('[SSE] ===== CONNECTION ERROR =====');
-            console.error('[SSE] Error event:', error);
-            console.error('[SSE] EventSource readyState:', eventSource?.readyState);
-            console.error('[SSE] ReadyState meanings: 0=CONNECTING, 1=OPEN, 2=CLOSED');
-            isConnecting = false;
-
-            // Track consecutive failures
-            reconnectAttempts++;
-            sseFailureCount++;
-            console.error('[SSE] Reconnect attempt:', reconnectAttempts, 'SSE failure count:', sseFailureCount);
-
-            // Switch to polling mode if SSE consistently fails (VPN/proxy blocking)
-            if (sseFailureCount >= SSE_FAILURE_THRESHOLD) {
-                console.warn('[SSE] Too many failures (' + sseFailureCount + '), switching to polling mode');
-                switchToPollingMode();
-                return;
-            }
-
-            // If auth fails (401), EventSource will keep retrying
-            // The server-side fix ensures cookies work, so this should resolve
-        };
-
-        return true;
+/**
+ * Parse an event's JSON payload; logs and returns undefined when it is not valid JSON.
+ */
+function parseEventData(name, event) {
+    try {
+        return JSON.parse(event.data);
     } catch (e) {
-        console.error('[SSE] Failed to create EventSource:', e);
-        isConnecting = false;
-        scheduleManualReconnect();
-        return false;
+        console.error(`[SSE] Error parsing ${name} event:`, e);
+        return undefined;
     }
 }
 
 /**
- * Manual reconnect with exponential backoff (fallback if EventSource fails to auto-reconnect)
+ * Apply one default-message tile batch.
  */
-function scheduleManualReconnect() {
-    const baseDelay = reconnectAttempts === 0 ? 1000 : Math.min(reconnectAttempts * 1000, MAX_RECONNECT_DELAY);
-    const jitter = Math.random() * 200 - 100; // ±100ms jitter
-    const delay = Math.max(500, baseDelay + jitter);
+function applyTileBatch(data) {
+    try {
+        const tiles = JSON.parse(data);
+        if (!Array.isArray(tiles) || tiles.length === 0) return;
 
-    console.debug(`[SSE] Scheduling manual reconnect in ${delay}ms`);
-
-    setTimeout(() => {
-        // Clean up closed EventSource before reconnecting
-        if (eventSource && eventSource.readyState === EventSource.CLOSED) {
-            eventSource.close(); // Ensure cleanup
-            eventSource = null;
+        // Update last seen cache token BEFORE applying (so reconnect uses a fresh `since` marker).
+        // We intentionally do this in a tight loop (no allocations) for speed.
+        // Accept both `T` and `t` for robustness.
+        for (let i = 0; i < tiles.length; i++) {
+            const t = tiles[i];
+            const cache = t?.T ?? t?.t;
+            if (typeof cache === 'number' && Number.isFinite(cache) && cache > lastTileCache) {
+                lastTileCache = cache;
+            }
         }
 
-        if (!eventSource) {
+        // Expose for debugging (helps confirm reconnect delta behavior in DevTools).
+        try {
+            window.mapUpdates.lastTileCache = lastTileCache;
+        } catch { /* ignore */ }
+
+        // FAST PATH:
+        // Apply tile updates directly in JS (Leaflet) to avoid JS -> .NET -> JS per-tile roundtrips.
+        // This is critical to prevent UI freezes when the tab returns to foreground and a burst of
+        // updates arrives at once.
+        try {
+            const fastApply = window?.hnhMapper?.applyTileUpdates;
+            if (typeof fastApply === 'function') {
+                fastApply(tiles);
+                return;
+            }
+        } catch {
+            // If anything goes wrong, fall back to the legacy .NET path.
+        }
+
+        // Fallback: legacy path (JS -> .NET). Kept for backwards compatibility / early init cases.
+        invokeDotNetSafe('OnSseTileUpdates', tiles);
+    } catch (e) {
+        console.error('[SSE] Error parsing tile updates:', e);
+    }
+}
+
+/**
+ * Revisions stay in the browser: leaflet-interop.js owns the store (window.hnhMapper.setMapRevision,
+ * registered by initializeMap) and drops exact duplicates itself; it also decides whether `cells` may
+ * narrow the refresh. The .NET round trip is only a fallback for when that bridge is missing (it
+ * drops the cells: a full refresh); it is deduped here and again in Map.razor.cs.
+ */
+function applyMapRevision(mapId, revision, cells) {
+    try {
+        const setRevision = window?.hnhMapper?.setMapRevision;
+        if (typeof setRevision === 'function') {
+            setRevision(mapId, revision, cells);
+            return;
+        }
+    } catch {
+        // Fall through to the .NET path.
+    }
+
+    if (forwardedRevisions.get(mapId) === revision) return;
+    forwardedRevisions.set(mapId, revision);
+    invokeDotNetSafe('OnSseMapRevision', mapId, revision);
+}
+
+/**
+ * Any event proves the stream is alive.
+ */
+function markAlive() {
+    lastEventTime = Date.now();
+    checkHealthy(lastEventTime);
+}
+
+/**
+ * A connection counts as healthy only once it delivered a heartbeat (the server's live loop runs and
+ * the proxy chain streams) AND stayed up for CONNECTION_TIMEOUT. Only then are the backoff and the
+ * unhealthy streak reset - never at onopen or on the first byte, so a stream that dies in its snapshot
+ * phase, or sits behind a buffering proxy, still backs off and raises the indicator.
+ */
+function checkHealthy(now) {
+    if (connectionHealthy || !sawHeartbeat || now - connectedAt < CONNECTION_TIMEOUT) return;
+
+    connectionHealthy = true;
+    reconnectAttempts = 0;
+    unhealthyStreak = 0;
+    if (reconnectingShown) {
+        reconnectingShown = false;
+        console.info('[SSE] Live updates restored');
+        invokeDotNetSafe('OnLiveUpdatesReconnecting', false);
+    }
+}
+
+/**
+ * The current stream failed (error event or watchdog): close it and schedule the next attempt.
+ */
+function handleConnectionLost(reason) {
+    const wasHealthy = connectionHealthy;
+    closeEventSource();
+    onConnectionEnded(wasHealthy, reason);
+}
+
+function onConnectionEnded(wasHealthy, reason) {
+    if (wasHealthy) {
+        // A long-lived stream dropped (lifetime bound, deploy, proxy reload, network blip): come straight back.
+        reconnectAttempts = 0;
+        unhealthyStreak = 0;
+    } else {
+        unhealthyStreak++;
+        if (unhealthyStreak >= UNHEALTHY_NOTIFY_THRESHOLD && !reconnectingShown) {
+            reconnectingShown = true;
+            invokeDotNetSafe('OnLiveUpdatesReconnecting', true);
+        }
+    }
+    scheduleReconnect(reason);
+}
+
+/**
+ * Exponential backoff with jitter (1 s, 2 s, 4 s ... 30 s), forever. Jitter spreads the reconnects of
+ * every open tab after a deploy instead of landing them on the API in the same instant.
+ */
+function scheduleReconnect(reason) {
+    clearReconnectTimer();
+    if (!dotnetRef) return; // disconnected or suspended: nobody to deliver to
+
+    const base = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+    reconnectAttempts = Math.min(reconnectAttempts + 1, 10);
+    const delay = Math.round(base * (0.8 + Math.random() * 0.4));
+
+    const message = `[SSE] Stream lost (${reason}), reconnecting in ${delay} ms (unhealthy streak ${unhealthyStreak})`;
+    if (unhealthyStreak > 0) {
+        console.warn(message);
+    } else {
+        console.debug(message);
+    }
+
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (dotnetRef && !eventSource) {
             connectSse();
         }
     }, delay);
 }
 
-/**
- * Disconnect SSE stream
- */
-export function disconnectSseUpdates() {
+function clearReconnectTimer() {
+    if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+}
+
+function closeEventSource() {
+    stopHealthCheck();
     if (eventSource) {
-        console.debug('[SSE] Disconnecting');
-        eventSource.close();
+        try {
+            eventSource.close();
+        } catch { /* ignore */ }
         eventSource = null;
     }
-    isConnecting = false;
-    reconnectAttempts = 0;
+    connectionHealthy = false;
+    sawHeartbeat = false;
+    try {
+        window.mapUpdates.eventSource = null;
+    } catch { /* ignore */ }
+}
+
+/**
+ * Watchdog. Runs from connect until the stream is closed.
+ */
+function startHealthCheck() {
+    stopHealthCheck();
+    lastTick = Date.now();
+    healthCheckInterval = setInterval(healthTick, HEALTH_CHECK_INTERVAL);
+}
+
+function healthTick() {
+    const now = Date.now();
+    // Time this timer itself did not run is not the stream's fault: hidden tabs clamp timers to about
+    // once a minute and frozen tabs run nothing, while events queued meanwhile are dispatched after
+    // this tick. So the allowance grows with the lateness and the watchdog still works, just slower.
+    const late = Math.max(0, now - lastTick - HEALTH_CHECK_INTERVAL);
+    lastTick = now;
+    if (!eventSource) return;
+
+    const silentFor = now - lastEventTime;
+    if (silentFor > CONNECTION_TIMEOUT + late) {
+        console.warn(`[SSE] No event for ${Math.round(silentFor / 1000)} s, reconnecting`);
+        handleConnectionLost('stale');
+    }
+}
+
+function stopHealthCheck() {
+    if (healthCheckInterval !== null) {
+        clearInterval(healthCheckInterval);
+        healthCheckInterval = null;
+    }
 }
 
 /**
  * Safely invoke .NET methods from JS; silently drop calls during Blazor disconnects.
- * Does NOT retry - SSE will send fresh data when circuit reconnects.
+ * Does NOT retry - every reconnect of the stream re-sends the state that matters (snapshot, revisions).
  */
 function invokeDotNetSafe(method, ...args) {
     // Quick bail-out checks
@@ -526,247 +485,6 @@ function invokeDotNetSafe(method, ...args) {
         return promise;
     } catch (e) {
         // Synchronous throw from invokeMethodAsync - circuit not ready
-        // Silently drop, don't retry (fresh SSE data will arrive)
         return null;
     }
-}
-
-/**
- * Check if SSE is currently connected
- * @returns {boolean}
- */
-export function isSseConnected() {
-    return eventSource !== null && eventSource.readyState === EventSource.OPEN;
-}
-
-/**
- * Get current connection mode
- * @returns {string} 'sse', 'polling', 'connecting', or 'disconnected'
- */
-export function getConnectionMode() {
-    if (isPollingMode) return 'polling';
-    if (eventSource && eventSource.readyState === EventSource.OPEN) return 'sse';
-    if (isConnecting) return 'connecting';
-    return 'disconnected';
-}
-
-/**
- * Start connection health monitoring
- * Detects stale connections and forces reconnect
- */
-function startHealthCheck() {
-    stopHealthCheck();
-    healthCheckInterval = setInterval(() => {
-        const timeSinceLastEvent = Date.now() - lastEventTime;
-        if (timeSinceLastEvent > CONNECTION_TIMEOUT && eventSource) {
-            console.warn('[SSE] Connection appears stale (no events for ' + Math.round(timeSinceLastEvent / 1000) + 's), forcing reconnect');
-            sseFailureCount++;
-
-            if (sseFailureCount >= SSE_FAILURE_THRESHOLD) {
-                console.warn('[SSE] Too many stale connections, switching to polling mode');
-                switchToPollingMode();
-            } else {
-                // Force reconnect
-                if (eventSource) {
-                    eventSource.close();
-                    eventSource = null;
-                }
-                scheduleManualReconnect();
-            }
-        }
-    }, HEALTH_CHECK_INTERVAL);
-}
-
-/**
- * Stop health check interval
- */
-function stopHealthCheck() {
-    if (healthCheckInterval) {
-        clearInterval(healthCheckInterval);
-        healthCheckInterval = null;
-    }
-}
-
-/**
- * Switch to polling mode when SSE consistently fails
- */
-function switchToPollingMode() {
-    if (isPollingMode) return;
-
-    console.log('[POLL] Switching to polling mode');
-    isPollingMode = true;
-
-    // Clean up SSE connection
-    stopHealthCheck();
-    if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-    }
-    isConnecting = false;
-
-    // Notify Blazor of mode change
-    invokeDotNetSafe('OnConnectionModeChanged', 'polling');
-
-    // Start polling
-    startPolling();
-}
-
-/**
- * Start polling interval
- */
-function startPolling() {
-    stopPolling();
-
-    // Initial poll immediately
-    poll();
-
-    // Regular polling
-    pollInterval = setInterval(poll, POLL_INTERVAL_MS);
-}
-
-/**
- * Stop polling interval
- */
-function stopPolling() {
-    if (pollInterval) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-    }
-}
-
-/**
- * Fetch initial map data via HTTP (called before SSE connection attempt)
- * This ensures the map loads immediately even if SSE is blocked
- */
-async function fetchInitialData() {
-    const response = await fetch('/map/api/v1/poll', {
-        credentials: 'include'
-    });
-
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
-
-    // Process tiles (initial full load)
-    if (data.tiles && data.tiles.length > 0) {
-        console.log('[HTTP] Received', data.tiles.length, 'tiles');
-
-        // Update lastTileCache
-        for (const t of data.tiles) {
-            const cache = t.T ?? t.t;
-            if (typeof cache === 'number' && Number.isFinite(cache) && cache > lastTileCache) {
-                lastTileCache = cache;
-            }
-        }
-
-        // Apply tile updates
-        try {
-            const fastApply = window?.hnhMapper?.applyTileUpdates;
-            if (typeof fastApply === 'function') {
-                fastApply(data.tiles);
-            } else {
-                invokeDotNetSafe('OnSseTileUpdates', data.tiles);
-            }
-        } catch (e) {
-            console.error('[HTTP] Error applying tile updates:', e);
-        }
-    }
-
-    // Process characters
-    if (data.characters) {
-        console.log('[HTTP] Received', data.characters.length, 'characters');
-        invokeDotNetSafe('OnSseCharactersSnapshot', data.characters);
-    }
-
-    // Process map revisions
-    if (data.mapRevisions) {
-        for (const [mapId, revision] of Object.entries(data.mapRevisions)) {
-            const mapIdNum = parseInt(mapId, 10);
-            if (Number.isFinite(mapIdNum) && Number.isFinite(revision)) {
-                invokeDotNetSafe('OnSseMapRevision', mapIdNum, revision);
-            }
-        }
-    }
-}
-
-/**
- * Poll the server for updates (fallback when SSE fails)
- */
-async function poll() {
-    try {
-        const params = new URLSearchParams();
-        if (typeof lastTileCache === 'number' && Number.isFinite(lastTileCache) && lastTileCache > 0) {
-            params.set('since', String(lastTileCache));
-        }
-
-        const response = await fetch(`/map/api/v1/poll?${params.toString()}`, {
-            credentials: 'include'
-        });
-
-        if (!response.ok) {
-            console.error('[POLL] Request failed:', response.status);
-            return;
-        }
-
-        const data = await response.json();
-
-        // Process tiles
-        if (data.tiles && data.tiles.length > 0) {
-            // Update lastTileCache
-            for (const t of data.tiles) {
-                const cache = t.T ?? t.t;
-                if (typeof cache === 'number' && Number.isFinite(cache) && cache > lastTileCache) {
-                    lastTileCache = cache;
-                }
-            }
-
-            // Apply tile updates
-            try {
-                const fastApply = window?.hnhMapper?.applyTileUpdates;
-                if (typeof fastApply === 'function') {
-                    fastApply(data.tiles);
-                } else {
-                    invokeDotNetSafe('OnSseTileUpdates', data.tiles);
-                }
-            } catch (e) {
-                console.error('[POLL] Error applying tile updates:', e);
-            }
-        }
-
-        // Process characters as snapshot
-        if (data.characters) {
-            invokeDotNetSafe('OnSseCharactersSnapshot', data.characters);
-        }
-
-        // Process map revisions
-        if (data.mapRevisions) {
-            for (const [mapId, revision] of Object.entries(data.mapRevisions)) {
-                const mapIdNum = parseInt(mapId, 10);
-                if (Number.isFinite(mapIdNum) && Number.isFinite(revision)) {
-                    invokeDotNetSafe('OnSseMapRevision', mapIdNum, revision);
-                }
-            }
-        }
-
-    } catch (error) {
-        console.error('[POLL] Error:', error);
-    }
-}
-
-/**
- * Retry SSE connection from polling mode
- * @returns {boolean} true if retry initiated
- */
-export function retrySseConnection() {
-    if (!isPollingMode) return false;
-
-    console.log('[SSE] Retrying SSE connection from polling mode');
-    stopPolling();
-    isPollingMode = false;
-    sseFailureCount = 0;
-    reconnectAttempts = 0;
-
-    return connectSse();
 }

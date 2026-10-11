@@ -4,8 +4,10 @@
 @using HnHMapperServer.Services.Interfaces
 @using HnHMapperServer.Core.DTOs
 @using Microsoft.Extensions.Logging
+@using System.Diagnostics
 @inject IJSRuntime JS
 @inject SafeJsInterop SafeJs
+@inject ReconnectionState Connection
 @inject ILogger<MapView> Logger
 @inject IBuildInfoProvider BuildInfo
 @implements IAsyncDisposable
@@ -46,38 +48,40 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        // InitializeMapAsync sends the initial changeMap itself, and later switches go through ChangeMapAsync /
+        // OnMapReady's queued map - no second changeMap here (it was redundant, and unguarded).
         if (firstRender)
         {
             await InitializeMapAsync();
-            
-            // If State.CurrentMapId is set after initialization, update the map
-            if (initialized && State.CurrentMapId > 0 && jsModule != null)
-            {
-                await jsModule.InvokeVoidAsync("changeMap", State.CurrentMapId);
-            }
         }
     }
 
+    /// <summary>
+    /// One attempt. initializeMap creates Leaflet synchronously, so it answers in tens of milliseconds whether
+    /// or not the tab is visible; anything else is classified below, and a real failure is reported to the
+    /// parent through OnMapInitialized(false) so it can offer a reload. Never throws (OnAfterRenderAsync).
+    /// </summary>
     private async Task InitializeMapAsync()
     {
         try
         {
             Logger.LogInformation("Starting map initialization...");
 
-            // Load JavaScript module
-            Logger.LogDebug("Loading leaflet-interop.js module...");
             jsModule = await JS.InvokeAsync<IJSObjectReference>(
                 "import", $"./js/leaflet-interop.js{JsVersion}");
-            Logger.LogDebug("Leaflet module loaded successfully");
-
-            // Create .NET reference for callbacks
             dotnetRef = DotNetObjectReference.Create(this);
-            Logger.LogDebug("DotNetObjectReference created");
 
-            // Initialize map
             Logger.LogDebug("Calling initializeMap in JavaScript...");
+            var started = Stopwatch.GetTimestamp();
             await jsModule.InvokeVoidAsync("initializeMap", mapElement, dotnetRef);
-            Logger.LogDebug("initializeMap completed");
+            var initializeMapMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+            // DisposeAsync may have run while we awaited (SPA navigation away); it nulls jsModule.
+            if (disposed)
+            {
+                Logger.LogDebug("Map initialization finished after the component was disposed");
+                return;
+            }
 
             // Set initial map ID if available (prevents requesting tiles for mapId 0)
             if (State.CurrentMapId > 0)
@@ -86,20 +90,44 @@
                 await jsModule.InvokeVoidAsync("changeMap", State.CurrentMapId);
             }
 
-            // Note: initialized flag will be set by OnMapReady() callback when Leaflet 'load' event fires
-            Logger.LogInformation("Map initialization call completed, waiting for Leaflet 'load' event...");
+            // 'initialized' is set by OnMapReady() when Leaflet's 'load' event fires
+            Logger.LogInformation("Map initialization call completed (initializeMap took {InitializeMapMs:F0} ms), waiting for Leaflet 'load' event...",
+                initializeMapMs);
+        }
+        catch (Exception ex) when (disposed || initialized || ex is JSDisconnectedException)
+        {
+            // Nothing to recover: the component is gone (DisposeAsync sets 'disposed' BEFORE disposing jsModule,
+            // so an ObjectDisposedException lands here too - keep that order), the circuit is gone, or
+            // OnMapReady already arrived and only the changeMap reply was lost (HandleMapInitialized re-sends it).
+            Logger.LogDebug(ex, "Map initialization interrupted (disposed={Disposed}, ready={Ready})", disposed, initialized);
+        }
+        catch (TaskCanceledException ex)
+        {
+            // No answer within CircuitOptions.JSInteropDefaultCallTimeout. initializeMap/changeMap are synchronous
+            // in JS, so the call or its reply was lost with a dropped connection (Blazor does not replay JS
+            // interop after a reconnect).
+            Logger.LogWarning(ex, "Browser did not answer map initialization within the JS interop timeout; map unusable until reload");
+            await NotifyInitializationFailedAsync();
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "CRITICAL: Failed to initialize map. This will prevent markers from loading. Exception: {Message}", ex.Message);
-            Logger.LogError("Stack trace: {StackTrace}", ex.StackTrace);
+            Logger.LogError(ex, "Map initialization failed; map unusable until reload");
+            await NotifyInitializationFailedAsync();
+        }
+    }
 
-            // Also log to browser console for client-side debugging
-            Console.WriteLine($"[MapView] CRITICAL ERROR during initialization: {ex.Message}");
-            Console.WriteLine($"[MapView] Stack trace: {ex.StackTrace}");
+    private async Task NotifyInitializationFailedAsync()
+    {
+        if (!OnMapInitialized.HasDelegate) return;
 
-            // Don't set initialized = true, map is broken
-            // This will cause the parent component to log "MapView not initialized after waiting 100x50ms"
+        try
+        {
+            await OnMapInitialized.InvokeAsync(false);
+        }
+        catch (Exception ex)
+        {
+            // Called from OnAfterRenderAsync: an escaping exception would end the circuit
+            Logger.LogWarning(ex, "OnMapInitialized(false) handler failed");
         }
     }
 
@@ -219,7 +247,7 @@
     {
         if (!initialized || jsModule == null || disposed)
         {
-            Console.WriteLine("[MapView] AddCustomMarkerAsync skipped because map is not initialized.");
+            Logger.LogDebug("AddCustomMarkerAsync skipped because map is not initialized");
             return;
         }
 
@@ -301,7 +329,7 @@
     {
         if (!initialized || jsModule == null || disposed) return;
 
-        Console.WriteLine($"[MapView] JumpToCustomMarkerAsync -> markerId={markerId}, zoom={zoomLevel?.ToString() ?? "null"}");
+        Logger.LogDebug("JumpToCustomMarkerAsync -> markerId={MarkerId}, zoom={Zoom}", markerId, zoomLevel);
         await SafeJs.InvokeVoidSafeAsync(jsModule, "jumpToCustomMarker", markerId, zoomLevel);
     }
 
@@ -314,32 +342,25 @@
 
     public async Task SetCharactersSnapshotAsync(object charactersData)
     {
-        Console.WriteLine($"[MapView] SetCharactersSnapshotAsync called - initialized={initialized}, jsModule={(jsModule != null ? "not null" : "null")}, disposed={disposed}");
-
         if (!initialized || jsModule == null || disposed)
         {
-            Console.WriteLine("[MapView] SetCharactersSnapshotAsync aborted - conditions not met");
+            Logger.LogDebug("SetCharactersSnapshotAsync skipped - initialized={Initialized}, hasModule={HasModule}, disposed={Disposed}",
+                initialized, jsModule != null, disposed);
             return;
         }
 
-        Console.WriteLine($"[MapView] Calling JS setCharactersSnapshot...");
         // Use SafeJs directly - .NET JSInterop handles camelCase AND preserves array types
         // CamelCaseJs breaks Array.isArray() checks in JavaScript
-        var result = await SafeJs.InvokeVoidSafeAsync(jsModule, "setCharactersSnapshot", charactersData);
-        Console.WriteLine($"[MapView] JS setCharactersSnapshot result: {result}");
+        await SafeJs.InvokeVoidSafeAsync(jsModule, "setCharactersSnapshot", charactersData);
     }
 
     public async Task ApplyCharacterDeltaAsync(object delta)
     {
-        Console.WriteLine($"[MapView] ApplyCharacterDeltaAsync called");
-
         if (!initialized || jsModule == null || disposed) return;
 
-        Console.WriteLine($"[MapView] Calling JS applyCharacterDelta...");
         // Use SafeJs directly - .NET JSInterop handles camelCase AND preserves array types
         // CamelCaseJs breaks Array.isArray() checks in JavaScript for delta.updates array
-        var result = await SafeJs.InvokeVoidSafeAsync(jsModule, "applyCharacterDelta", delta);
-        Console.WriteLine($"[MapView] JS applyCharacterDelta result: {result}");
+        await SafeJs.InvokeVoidSafeAsync(jsModule, "applyCharacterDelta", delta);
     }
 
     public async Task ClearAllMarkersAsync()
@@ -369,6 +390,19 @@
         if (!initialized || jsModule == null || disposed) return;
 
         await SafeJs.InvokeVoidSafeAsync(jsModule, "setMapRevision", mapId, revision);
+    }
+
+    /// <summary>
+    /// Seeds the JS-owned revision store from a GET snapshot in one interop call (was one awaited call per
+    /// map: ~4.4 s for a 94-map tenant). JS applies a value only when the map is unknown or the value is
+    /// newer, so a snapshot can never roll back a revision the SSE stream already delivered.
+    /// </summary>
+    public async Task SeedMapRevisionsAsync(IReadOnlyDictionary<int, int> revisions)
+    {
+        if (!initialized || jsModule == null || disposed || revisions.Count == 0) return;
+
+        // A single non-array argument, so params does not spread it; int keys serialize as JSON strings
+        await SafeJs.InvokeVoidSafeAsync(jsModule, "seedMapRevisions", revisions);
     }
 
     // JavaScript callbacks (called from JS, different names to avoid conflicts with Parameters)
@@ -423,16 +457,25 @@
     [JSInvokable]
     public async Task OnMapReady()
     {
+        // DisposeAsync keeps dotnetRef alive until its module-dispose round trip ends, so 'load' can still
+        // arrive here. Do not start the parent's initialization sequence for a page that is going away.
+        if (disposed)
+        {
+            Logger.LogDebug("Map ready event arrived after the component was disposed");
+            return;
+        }
+
         Logger.LogInformation("Map ready event received from JavaScript (Leaflet 'load' event fired)");
         initialized = true;
 
         // Apply a map switch that was requested before Leaflet finished loading
-        if (pendingMapId > 0 && jsModule != null && !disposed)
+        if (pendingMapId > 0 && jsModule != null)
         {
             var toApply = pendingMapId;
             pendingMapId = 0;
             Logger.LogInformation("Applying queued map switch to {MapId}", toApply);
             await SafeJs.InvokeVoidSafeAsync(jsModule, "changeMap", toApply);
+            if (disposed) return;
         }
 
         if (OnMapInitialized.HasDelegate)
@@ -496,21 +539,40 @@
         }
     }
 
+    /// <summary>
+    /// Idempotent (Map.DisposeAsync also calls it) and never throws: an exception escaping a component's
+    /// DisposeAsync terminates the circuit.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
+        // Must stay first: InitializeMapAsync classifies a failure during disposal by this flag.
         disposed = true;
-        
-        if (jsModule != null)
+
+        var module = jsModule;
+        jsModule = null;
+        if (module != null)
         {
-            try
+            if (Connection.IsConnected)
             {
-                await jsModule.DisposeAsync();
+                try
+                {
+                    await module.DisposeAsync();
+                }
+                catch (Exception ex) when (ex is JSDisconnectedException or TaskCanceledException or ObjectDisposedException or JSException)
+                {
+                    Logger.LogDebug("MapView disposal: module dispose skipped ({ExceptionType})", ex.GetType().Name);
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning(ex, "MapView disposal: module dispose failed");
+                }
             }
-            catch
+            else
             {
-                // Ignore disposal errors
+                // During circuit teardown ReconnectionState flips before components are disposed; a JS call now
+                // could only fail (JSDisconnectedException), so skip it.
+                Logger.LogDebug("MapView disposal: circuit not connected, skipping JS teardown");
             }
-            jsModule = null;
         }
 
         dotnetRef?.Dispose();

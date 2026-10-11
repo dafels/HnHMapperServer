@@ -57,9 +57,18 @@ public interface IUpdateNotificationService
     void NotifyMapDeleted(int mapId);
 
     /// <summary>
-    /// Notifies all subscribers of a map revision update (for cache busting)
+    /// Notifies all subscribers of a map revision update (for cache busting). Clients refresh
+    /// every tile of the map.
     /// </summary>
     void NotifyMapRevision(int mapId, int revision);
+
+    /// <summary>
+    /// Notifies all subscribers of a map revision update that regenerated only
+    /// <paramref name="changedCells"/> (WebP zoom-0 cells <c>[x, y]</c>; null = unknown/whole map,
+    /// same as the two-argument overload). An overload, not an optional parameter: Moq
+    /// Setup/Verify expressions cannot omit optional arguments (CS0854).
+    /// </summary>
+    void NotifyMapRevision(int mapId, int revision, int[][]? changedCells);
 
     /// <summary>
     /// Subscribes to custom marker creation notifications

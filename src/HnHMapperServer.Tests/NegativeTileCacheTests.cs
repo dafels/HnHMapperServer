@@ -5,7 +5,7 @@ namespace HnHMapperServer.Tests;
 /// <summary>
 /// NegativeTileCache: time-to-live, removal, eviction order, and eviction under concurrent
 /// adds and removes. The old eviction (LINQ straight over the live ConcurrentDictionary) threw
-/// ArgumentException and ArgumentNullException in production under that concurrent load.
+/// ArgumentException and ArgumentNullException under that concurrent load.
 /// </summary>
 public class NegativeTileCacheTests
 {
@@ -89,7 +89,7 @@ public class NegativeTileCacheTests
     [Fact]
     public async Task ConcurrentAddsRemovesAndLookups_NeverThrow_AndStayBounded()
     {
-        // The production shape: a cache at its cap with many threads adding at once while others
+        // The shape under load: a cache at its cap with many threads adding at once while others
         // remove (upload invalidation) and read. The old eviction threw within seconds of this.
         const int capacity = 1_000;
         var cache = new NegativeTileCache(capacity, TimeSpan.FromMinutes(5));

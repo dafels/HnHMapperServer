@@ -3,9 +3,11 @@ using System.Security.Claims;
 namespace HnHMapperServer.Web.Services;
 
 /// <summary>
-/// Scoped service that caches authentication state for the Blazor circuit lifetime.
-/// This allows background threads (like timers) to access authentication information
-/// without requiring HttpContext.
+/// Scoped service that caches the circuit's authentication state for the circuit lifetime, filled by
+/// <see cref="AuthenticationCaptureCircuitHandler"/> on every (re)connect. Circuit work that outlives the
+/// connection's request (timers, loops) reaches it through <see cref="CircuitServicesAccessor"/>.
+/// Never inject it into an IHttpClientFactory DelegatingHandler: those are resolved in the factory's own
+/// handler scope, so the instance they get is shared by every user of the pooled handler.
 ///
 /// Thread-safe: Uses lock to ensure visibility across threads (main circuit thread and background timers).
 /// </summary>
@@ -20,7 +22,7 @@ public class AuthenticationStateCache
 
     /// <summary>
     /// The browser's address (already de-proxied by the forwarded-headers middleware) and scheme, captured
-    /// while an HttpContext is available so circuit/background requests to the API can still carry them.
+    /// while the circuit's HttpContext is available so circuit/background requests to the API can still carry them.
     /// </summary>
     public (string? Ip, string? Scheme) ClientOrigin
     {

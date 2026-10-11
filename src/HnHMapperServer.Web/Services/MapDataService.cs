@@ -37,7 +37,8 @@ public class MapDataService
 
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogWarning("Failed to fetch markers. Status: {StatusCode}", response.StatusCode);
+            // Debug: AuthenticationDelegatingHandler (auth failures) and the caller already log this failure
+            _logger.LogDebug("Failed to fetch markers. Status: {StatusCode}", response.StatusCode);
             throw new HttpRequestException($"Request failed with status {response.StatusCode}", null, response.StatusCode);
         }
 

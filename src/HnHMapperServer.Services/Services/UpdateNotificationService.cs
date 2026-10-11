@@ -107,10 +107,14 @@ public class UpdateNotificationService : IUpdateNotificationService
     public void NotifyMapDeleted(int mapId) => _mapDeletes.Notify(mapId);
 
     public void NotifyMapRevision(int mapId, int revision) =>
+        NotifyMapRevision(mapId, revision, null);
+
+    public void NotifyMapRevision(int mapId, int revision, int[][]? changedCells) =>
         _mapRevisions.Notify(new MapRevisionDto
         {
             MapId = mapId,
-            Revision = revision
+            Revision = revision,
+            Cells = changedCells
         });
 
     public void NotifyCustomMarkerCreated(CustomMarkerEventDto marker) => _customMarkerCreated.Notify(marker);

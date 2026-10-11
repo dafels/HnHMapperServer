@@ -666,23 +666,18 @@ public class HmapImportService : IHmapImportService
                 // Delete map record
                 await _mapRepository.DeleteMapAsync(mapId);
 
-                // Delete map directory (includes all tile files)
-                var mapDir = Path.Combine(gridStorage, "tenants", tenantId, mapId.ToString());
-                long totalDeletedBytes = 0;
-
-                if (Directory.Exists(mapDir))
+                // Delete the map's directories: tenants/{t}/{mapId} (all its imported tile files)
+                // and its WebP pyramid tenants/{t}/large/{mapId} — viewers may have generated
+                // tiles there while the import ran, and a leftover tree is orphan storage.
+                foreach (var mapDir in new[]
+                         {
+                             Path.Combine(gridStorage, "tenants", tenantId, mapId.ToString()),
+                             Path.Combine(gridStorage, "tenants", tenantId, "large", mapId.ToString())
+                         })
                 {
-                    // Calculate total size for storage quota adjustment
-                    foreach (var file in Directory.GetFiles(mapDir, "*.png", SearchOption.AllDirectories))
+                    if (!Directory.Exists(mapDir))
                     {
-                        try
-                        {
-                            totalDeletedBytes += new FileInfo(file).Length;
-                        }
-                        catch
-                        {
-                            // Ignore file access errors
-                        }
+                        continue;
                     }
 
                     try
@@ -696,19 +691,23 @@ public class HmapImportService : IHmapImportService
                     }
                 }
 
-                // Decrement storage quota
-                if (totalDeletedBytes > 0)
-                {
-                    var sizeMB = totalDeletedBytes / (1024.0 * 1024.0);
-                    await _quotaService.IncrementStorageUsageAsync(tenantId, -sizeMB);
-                }
-
                 _logger.LogDebug("Deleted map {MapId}", mapId);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to delete map {MapId} during cleanup", mapId);
             }
+        }
+
+        // Rewrite CurrentStorageMB from what is actually left on disk (the import incremented it
+        // per file; decrementing only the PNGs found under the map directory missed the rest).
+        try
+        {
+            await _quotaService.RecalculateStorageUsageAsync(tenantId, gridStorage);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to recalculate storage usage for tenant {TenantId} after cleanup", tenantId);
         }
 
         _logger.LogInformation("Cleanup completed for tenant {TenantId}", tenantId);
@@ -1087,8 +1086,9 @@ public class HmapImportService : IHmapImportService
             await _tileRepository.SaveTilesBatchAsync(tiles, skipExistenceCheck: false);
 
             // The repository path bypasses TileService.SaveTileAsync, so nothing marked the
-            // zoom parents dirty — and without dirty rows the WebP scan never force-refreshes
-            // existing (now stale) tiles covering the imported area.
+            // zoom parents dirty — and without the WebP cell marks the backstop never
+            // force-refreshes existing (now stale) tiles covering the imported area. Marked per
+            // flush: a later flush into a cell regenerated meanwhile moves its mark forward.
             foreach (var group in tiles.Where(t => t.Zoom == 0).GroupBy(t => (t.TenantId, t.MapId)))
             {
                 await _tileService.MarkParentTilesDirtyBatchAsync(

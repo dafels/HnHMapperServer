@@ -336,17 +336,20 @@ public class MapNavigationService
     #region Revision Management
 
     /// <summary>
-    /// Set map revision (for cache busting)
+    /// Set map revision (for cache busting).
     /// </summary>
-    public void SetMapRevision(int mapId, int revision)
+    /// <returns>true when the stored revision changed; false for a duplicate (an SSE connect replays every
+    /// revision), which callers use to skip the JS call.</returns>
+    public bool SetMapRevision(int mapId, int revision)
     {
-        var oldRevision = _mapRevisions.TryGetValue(mapId, out var old) ? old : 0;
-        _mapRevisions[mapId] = revision;
-
-        if (oldRevision != revision)
+        if (_mapRevisions.TryGetValue(mapId, out var oldRevision) && oldRevision == revision)
         {
-            _logger.LogDebug("Map {MapId} revision updated: {OldRevision} → {NewRevision}", mapId, oldRevision, revision);
+            return false;
         }
+
+        _mapRevisions[mapId] = revision;
+        _logger.LogDebug("Map {MapId} revision updated: {OldRevision} → {NewRevision}", mapId, oldRevision, revision);
+        return true;
     }
 
     /// <summary>

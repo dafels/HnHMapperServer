@@ -188,13 +188,17 @@ All endpoints tenant-scoped and backward compatible:
 - `GET /map/updates` - Server-Sent Events for real-time character and marker updates
 - 500ms server-side drain loop over per-event channels, filtered by tenant
 - Events: tile batches (default), `charactersSnapshot` (initial), `characterDelta`, `merge`,
-  `mapUpdate` (**upsert** — full map item incl. new maps), `mapDelete`, `mapRevision`,
+  `mapUpdate` (**upsert** — full map item incl. new maps), `mapDelete`, `mapRevision` (+ `cells` on ZoomQ bumps),
   `customMarker*`, `marker*`, `ping*`, `road*`, `timer*`, `notification*`, `overlayUpdated`
+- Liveness: a named `heartbeat` event (`Core/Constants/SseFrames`) when the loop starts and every 5 s;
+  `map-updates.js` reconnects (manual backoff, `?since=` rebuilt) after 20 s without any event. The server ends
+  each stream after ~15 min (re-authorization + resync; the client is back within ~1 s). No polling
+  fallback (removed 2026-10-11) — see that Recent Changes entry
 
 **Map APIs:**
 - `GET /map/api/v1/characters` - Character list (deprecated, use SSE)
 - `GET /map/api/v1/markers` - Marker list
-- `GET /map/grids/{mapid}/{zoom}/{x}_{y}.png` - Tile images (6 zoom levels)
+- `GET /map/tiles/{mapid}/{zoom}/{x}_{y}.webp?v={revision}` - 400px WebP tiles, zoom 0-6 (served by the Web)
 - `GET /map/api/maps` - Map list
 - `GET /map/api/config` - Runtime configuration
 
@@ -230,7 +234,7 @@ User-placed annotations with authorization:
 | `MarkerReadinessService` | 30s | Update marker ready status |
 | `MapCleanupService` | 10min | Delete empty maps older than 1 hour |
 | `InvitationExpirationService` | 1 hour | Expire old invitations |
-| `TenantStorageVerificationService` | 6 hours | Verify storage quotas |
+| `TenantStorageVerificationService` | 6 hours (first run after `StorageVerification:StartupDelayMinutes`, 60) | Reset tracked storage to disk; warn on sign-aware drift |
 | `NotificationCleanupService` | 30min | Delete expired notifications (all tenants), broadcast dismissals |
 
 ---
@@ -434,7 +438,10 @@ CREATE TABLE AuditLogs (
 
 ### Environment Variables
 
-- `GridStorage`: Data directory (default: "map")
+- `GridStorage`: Data directory (default: "map"). Both Program.cs files resolve it once (a relative value is
+  taken relative to the solution folder, i.e. `src/map` in dev) and publish the absolute path back into
+  configuration, so every `configuration["GridStorage"]` reader agrees with the database path regardless of the
+  process working directory.
 - `Cleanup:DeleteEmptyMapsAfterMinutes`: Empty map retention (default: 60)
 - `Cleanup:MapCleanupIntervalSeconds`: Cleanup interval (default: 600)
 
@@ -444,6 +451,38 @@ Stored in `Config` table (tenant-scoped):
 - `title`: Site title
 - `prefix`: URL prefix for token display
 - `defaultHide`: Default hidden status for new maps
+
+### Logging levels and telemetry rules
+
+- **Policy.** Error = a user-visible failure or a server bug (unhandled exception, 5xx, data loss).
+  Warning = degraded/unexpected and operator-actionable, **never a routine client outcome**.
+  Information = one record per lifecycle/business event, never per request or per tick.
+  Debug = per-request/item/tick diagnostics and anything carrying player names.
+- **`Serilog:MinimumLevel` is the only level gate** for Console, File and OTLP: `UseSerilog(writeToProviders)`
+  + `ClearProviders` make `Logging:LogLevel` inert. An environment file can overwrite keys but never remove
+  them, so **never put Debug overrides in a base `appsettings.json`** — use `appsettings.Development.json`, or
+  during an incident `Serilog__MinimumLevel__Override__<Category>=Debug` on the container (SignalR /
+  Http.Connections Debug logs circuit secrets and form input: env var only, never committed).
+  `LoggingConfigurationTests` enforces this.
+- **Request log** = Serilog's default levels (exception/5xx = Error, else Information, filtered by the
+  `RequestLoggingMiddleware=Warning` override): 4xx are not logged — count them in
+  `http.server.request.duration` (route template, no token). 429s are logged once by the API's `OnRejected`
+  (policy + route template, never path or IP).
+- **Secrets in URLs.** Never log `Request.Path`/URIs of secret-bearing routes, player names or IPs, and never
+  interpolate values into a log template. `ServiceDefaults/Telemetry/SensitiveUrlRedactor` is THE list of
+  secret-bearing URLs (`/client/{token}`, invite codes, token revoke, outbound Discord webhooks); the Serilog
+  root enricher (added by ServiceDefaults' `ApplyServiceDefaults()`, which must stay the LAST call in both
+  `UseSerilog` lambdas — `LoggingConfigurationTests` checks it) and the span processor apply it to every log
+  property and `url.*` tag. It cannot see template text, exception messages or structure/dictionary values.
+  **Adding a route or HttpClient call with a secret in the path = extend the redactor and its tests.**
+- **Stale /client tokens:** `TenantContextMiddleware` logs each rejection at Debug and tags
+  `http.server.request.duration` with `hnhmapper.client_token.rejection`; `ClientTokenRejectionTracker` emits one
+  Warning per (tenant, token) at first sighting and a summary per 15 min — tenant-named only for an existing
+  tenant and a canonical secret, never the token, its hash or the IP.
+- Components log through `ILogger`, never `Console.WriteLine` (bypasses levels and the dashboard); failures
+  caught in components use `UiLog.FailureLevel(ex)` (Warning, Debug for circuit-gone/cancelled). An expected
+  outcome is not a failure: catch it first at Debug (e.g. EventsPanel's 404 for a deleted custom marker).
+- The aspnet base image provides `ASPNETCORE_HTTP_PORTS=8080`; do not set `ASPNETCORE_URLS` (startup warning).
 
 ---
 
@@ -523,11 +562,21 @@ Zoom levels 1-6 generated from base zoom-0 tiles:
 
 ### Storage Quotas
 
-**Real-time tracking:**
-- Atomic updates on tile upload/delete
-- Background verification every 6 hours
-- Upload rejection when quota exceeded (413 status)
-- UI gauge showing usage percentage
+**Contract (2026-10-11):**
+- `Tenants.CurrentStorageMB` changes only through single atomic delta UPDATEs
+  (`IStorageQuotaService.IncrementStorageUsageAsync`, clamped at 0), each charging the **change in bytes on
+  disk** (new size minus the replaced file's: `ITileService.ReplaceTileFileAsync`, `ZoomTileCache`, the merge's
+  `DeleteRetiredMapDirectoriesAsync`). The increment does not save the caller's pending changes and does not
+  refresh a tracked tenant; `TenantRepository.UpdateAsync` never writes `CurrentStorageMB`/`LastActivityAt`.
+- `tenants/{t}/large/**` (WebP pyramid) is **reconciled-only**: writes never charged, deletes never credited.
+- The scan is authoritative: `ReconcileStorageUsageAsync` resets the value to everything under
+  `tenants/{t}/` — every 6 h (`TenantStorageVerificationService`) and after every admin teardown
+  (`RecalculateStorageUsageAsync`: wipe, purge, map delete, integrity purge, failed import).
+- The 6-hourly job warns only on drift that matters: overcount > max(2 MB, 0.5% of quota), undercount <
+  −max(10 MB, 2% of quota) (`StorageDrift`; keys `StorageVerification:IntervalHours`, `StartupDelayMinutes`,
+  `OvercountWarnMinMB`, `OvercountWarnPercentOfQuota`, `UndercountWarnMinMB`, `UndercountWarnPercentOfQuota`).
+- gridUpload gates on **growth** (413 when current + growth > quota): refreshing an existing grid never 413s
+  a tenant at its quota; a tenant over its quota is blocked. UI gauge shows usage percentage.
 
 ### Tenant Isolation
 
@@ -538,6 +587,30 @@ modelBuilder.Entity<Map>().HasQueryFilter(m => m.TenantId == _tenantContext.Tena
 - All queries automatically filtered by tenant
 - No manual TenantId checks required in business logic
 - Prevents cross-tenant data leakage
+
+### Blazor circuit and JS interop rules
+
+- **Never inject scoped/circuit services into an IHttpClientFactory DelegatingHandler.** The factory resolves
+  handlers in its own scope, shared by every user for the 2-minute handler lifetime, so "scoped" there means
+  "shared across users". Read circuit state through `CircuitServicesAccessor` (see
+  `AuthenticationDelegatingHandler`); keep handlers stateless.
+- **Create API-calling timers and loops only in component lifecycle or event code** (an inbound circuit
+  activity), never in a CircuitHandler or a `ReconnectionState` callback (`OnConnectionUp` is not an inbound
+  activity: such a timer has no circuit identity and its calls go out unauthenticated). To resume work after a
+  reconnect, re-arm the existing timer.
+- **Never start JS interop while `ReconnectionState.IsConnected` is false.** The call is never delivered and is
+  not replayed after a reconnect; it only ends as a TaskCanceledException after `JSInteropDefaultCallTimeout`
+  (2 min). `SafeJsInterop` enforces this; direct `IJSObjectReference` calls must check it. Never report a JS
+  failure through another JS call.
+- **`DisposeAsync` must never throw** — an exception escaping a component's DisposeAsync terminates the circuit.
+  Skip JS teardown while disconnected, keep a broad catch around every step, always dispose timers and
+  DotNetObjectReferences.
+- **No `requestAnimationFrame` (or other visibility-dependent) waits in a JS function .NET awaits** — browsers
+  pause rAF in hidden tabs, so the call hangs until the interop timeout. Fire-and-forget rAF batching is fine.
+- Pages that load data in `OnInitializedAsync` return early during static prerender (`HttpContext != null`,
+  the cascading parameter) instead of fetching everything twice.
+- Web-level tests (bUnit components, circuit handlers, Web services) live in `HnHMapperServer.Web.Tests`;
+  `HnHMapperServer.Tests` must not reference the Web project.
 
 ---
 
@@ -576,6 +649,14 @@ See `deploy/SECURITY.md` for complete security checklist.
 
 ## Testing
 
+### Automated tests
+
+- `src/HnHMapperServer.Tests` — Core, Services, Infrastructure (real SQLite where EF behaviour matters; never
+  call `SqliteConnection.ClearAllPools`). It must not reference the Web project.
+- `src/HnHMapperServer.Web.Tests` — Web-level: bUnit component tests, circuit handlers, the Web→API
+  `AuthenticationDelegatingHandler`, Web services. Building it builds Web: not during a live VS/Aspire session.
+- CI runs both through the solution (`dotnet test` at the repo root).
+
 ### Manual Testing Checklist
 
 **Multi-Tenancy:**
@@ -595,6 +676,8 @@ See `deploy/SECURITY.md` for complete security checklist.
 - [ ] Single stable SSE connection per client
 - [ ] Character deltas appear within 250ms
 - [ ] No HTTP polling requests in Network tab
+- [ ] EventStream shows `heartbeat` every 5 s; one `/map/updates` request stays open for 10+ min, and after
+  12–18 min the server ends it and one new `/map/updates?since=…` follows within ~1 s (no chip)
 
 **Admin Panel:**
 - [ ] Create/edit/delete users within tenant
@@ -621,7 +704,13 @@ See `deploy/SECURITY.md` for complete security checklist.
 ### "401 Unauthorized when accessing admin endpoints"
 
 **Cause:** Cookie not forwarded or tenant context missing
-**Solution:** Verify `AuthenticationDelegatingHandler` registered and Data Protection keys shared
+**Solution:** Verify `AuthenticationDelegatingHandler` registered and Data Protection keys shared. Its Warning
+names the `AuthSource`: `Circuit` = the circuit's captured `HnH.Auth` cookie (captured by
+`AuthenticationCaptureCircuitHandler` on every connect — an expired session stays expired until a reload),
+`HttpContext` = the current request's cookie, and "No circuit services and no HttpContext" = the call was made
+outside both (e.g. a timer created in a CircuitHandler callback — see "Blazor circuit and JS interop rules").
+A Map "Circuit services not available" Warning means the framework stopped wrapping component init in inbound
+circuit activities (re-check `ServicesAccessorCircuitHandler` after runtime upgrades).
 
 ### "Build fails with file locked errors"
 
@@ -636,6 +725,817 @@ See `deploy/SECURITY.md` for complete security checklist.
 ---
 
 ## Recent Changes
+
+### 2026-10-11: Storage quota charges the change on disk; stale client tokens summarized; marker/food icon fallbacks; ImageSharp comments corrected
+
+**From the 2026-10-10 export (plan step 6, part B: P3-E, P3-B phase 1, P3-C, P3-H).** The verification
+run found haggis +2.03 MB and fineroe +1.37 MB tracked above disk — grid refreshes overwrite the same
+`grids/{id}.png` every 30 min but were charged the full size each time; one tenant's two deleted tokens
+produced 1,040 Warnings in 48 min (5 per request); 48 wellspring markers and 23 food icons 404'd. No
+migration. **The /client status codes and JSON bodies are unchanged** (both 401 bodies byte-identical;
+gridUpload's 413 body still reports the upload size).
+- **Storage quota (P3-E).** `CurrentStorageMB` is now kept by single atomic delta UPDATEs
+  (`IncrementStorageUsageAsync` = one `ExecuteUpdateAsync`, `x = x + d` clamped at 0; `Decrement`
+  delegates). The old read-modify-write saved a possibly stale tracked tenant + delta: token validation
+  tracks the tenant per request, `ZoomTileRebuildService` tracks every tenant for its whole run, and
+  `TenantRepository.UpdateAsync` (superadmin rename, provisioning) wrote every column back — each lost
+  concurrent deltas. **Contract change:** the increment no longer calls SaveChanges, so it neither flushes
+  the caller's pending changes nor refreshes a tracked tenant (every caller already saves first).
+  `CheckQuotaAsync` reads the row AsNoTracking; `TenantRepository.UpdateAsync` never writes
+  `CurrentStorageMB`/`LastActivityAt` (attaches only when detached).
+  - **Charged as the change on disk.** New `Services/AtomicFile` (`WriteAllBytesAsync` = LargeTileService's
+    temp + rename, moved verbatim; `LengthOrZero`) and `ITileService.ReplaceTileFileAsync(tenant, path,
+    bytes)` (old size, atomic write, charge new − old). Used by **GridUpload** (refresh/winter replacement:
+    a same-size refresh charges 0) and **`UpdateZoomLevelAsync`** (every legacy zoom rebuild: merge, wipeTile,
+    setCoords, CleanupMultiIdGrids, the dirty rebuild — whose row-based old-size compensation, which missed
+    orphan files, is deleted). **GridUpload no longer deletes the tile after a failed step** (that catch
+    deleted the only copy of a refreshed tile and left its row dangling); a failed write leaves the old
+    file intact and the request answers 500 as before. `ZoomTileCache` (hmap + public import zoom 1-6)
+    subtracts the bytes its flushes overwrite.
+  - **Merges:** the retired-directory teardown moved from `GridService` to
+    `ITileService.DeleteRetiredMapDirectoriesAsync(tenant, map, gridStorage, rehomedBytes)` (same
+    live-reference guard; its "Kept directory of merged map" Warning now logs under the **TileService**
+    category): one update = bytes the re-home copied into the pool − the per-map directory's bytes, credited
+    only when the delete succeeds. **`tenants/{t}/large/**` is reconciled-only** — WebP writes never
+    charged, deletes never credited (every delete path is followed by uncharged regeneration).
+  - **Quota gate on growth:** gridUpload checks `max(0, new − existing file)`, so a tenant at its quota can
+    keep refreshing grids it has; a tenant already over quota is still blocked (current + 0 > quota). A new
+    grid's growth = its size, so the 413 cases for new ground are unchanged.
+  - **Reconciliation is the authority.** `ReconcileStorageUsageAsync` reads the previous value fresh, scans
+    `tenants/{t}/`, sets the absolute value with ExecuteUpdate, syncs a tracked copy (left unmodified), writes
+    `.storage.json` and logs one Information line `RecalculateStorage: Tenant … Files, Size, Tracked, Drift`.
+    `RecalculateStorageUsageAsync` (the admin teardowns, MapDeletionService included) delegates and **no
+    longer warns** — the old "discrepancy detected" Warning is gone (saved queries!).
+    `UpdateStorageFromCalculationAsync` and the verification job's duplicate scanner are deleted.
+    `TenantStorageVerificationService` loads ids only and warns through the pure **`StorageDrift`**
+    classifier, sign-aware and quota-relative: `Storage overcount for tenant …` when tracked − disk >
+    max(2 MB, 0.5% of quota), `Storage undercount …` when < −max(10 MB, 2%); its completion line counts both
+    and names the largest drift each way. Keys in Api `appsettings.json`: `StorageVerification:IntervalHours`
+    (6), `StartupDelayMinutes` (60, was a fixed hour), `OvercountWarnMinMB` (2),
+    `OvercountWarnPercentOfQuota` (0.5), `UndercountWarnMinMB` (10), `UndercountWarnPercentOfQuota` (2).
+- **Stale client tokens (P3-B phase 1, logging + metrics only).** One static **`ClientToken`** (`Hash`,
+  `IsCanonicalSecret` = 64 lowercase hex, `TrySplit` = first underscore at index > 0) replaces the hash
+  copies in TokenService, the middleware and TokenMigrationService. **`ClientTokenValidator`** (scoped,
+  Services) is the middleware's query moved unchanged (IgnoreQueryFilters, no cancellation) returning
+  `ClientTokenValidation(IsValid, Rejection, TokenHash, TenantExists)` — reasons `MalformedToken`,
+  `EmptySecret`, `NotFound`, `Expired`, `TenantInactive` (`Core/Enums/ClientTokenRejectionReason`); it never
+  logs. **`ClientTokenRejectionTracker`** (Api singleton, `TimeProvider`): the first sighting of a
+  (tenant, token hash) → one Warning `Game client of tenant {TenantId} sends a rejected token ({Reason}) on
+  {Route} …`, then `… still sends a rejected token ({Reason}): {Count} requests since {Since}, last on
+  {Route}` once per `SummaryInterval` (15 min, decided on the next request); idle 24 h → forgotten. Only an
+  existing tenant with a canonical secret is attributed, at most 16 hashes + one overflow entry per tenant
+  (`Game clients of tenant … more than 16 distinct rejected tokens …`); everything else (malformed, empty,
+  non-canonical, unknown tenant) is pooled per reason with **no tenant name** (`N game-client request(s)
+  rejected (…) … (not attributed to a tenant)`), so random prefixes can neither grow it nor plant
+  tenant-named Warnings. **No log line carries the token, its hash or the IP**; the route is the endpoint
+  template (`/client/{token}/positionUpdate`). Per request: Debug + the fixed-value tag
+  **`hnhmapper.client_token.rejection`** (`malformed|empty_secret|not_found|expired|tenant_inactive`) on
+  `http.server.request.duration` via `IHttpMetricsTagsFeature` — exact counts live there. Options section
+  `ClientTokenRejections` (`SummaryInterval`, `IdleExpiry`, `PerTenantCap`; defaults in code). State is
+  per process (a restart = one new first sighting). The plan's Serilog Items-flag demotion was not needed:
+  step 2 already keeps 4xx out of the request log. Replay of the incident: 1,040 Warnings → 3.
+  **`TokenMigrationService` fixed:** it hashed the full `{tenant}_{secret}`, so a migrated legacy token
+  could never validate (no-op in production: every token already has a prefix).
+- **Icons (P3-C).** Game markers fall back to `gfx/terobjs/mm/custom.png` like every other icon surface:
+  `marker-manager.js` `GameMarkerIcon` (an `L.Icon.extend` whose `createIcon` sets `onerror`, always
+  overwritten so the glow swap's reused IMG is harmless), an inline `onerror` on the timer `<img>`, and
+  `Image=''` goes to the fallback with no request (`/.png` before). **No failed-URL memo** on purpose:
+  onerror cannot tell a 404 from a blip and JS state survives circuit resumes. New pure
+  `Core/Cookbook/ShippedIcons` (FrozenSet, Ordinal; `Unknown` = may contain anything) built once at Web
+  startup by `Services/ShippedIconScanner.Scan(WebRootPath)` (every PNG under `wwwroot/gfx`; missing,
+  unreadable or empty → Unknown; startup line `Shipped icon manifest: N icons`). **`FoodIcons` moved to
+  `Core/Cookbook`**: `Src(shipped, name)` = local when it ships (or Unknown), the renderer
+  `https://www.havenandhearth.com/mt/r/{name}` when it is known not to, `""` for an unusable name (no
+  request); `RemoteFallback` is null when src already is remote; `RemoteFallbackOrHide` only hides then.
+  Cookbook.razor / NotificationCenter.razor inject `ShippedIcons ShippedIconSet` (not `Icons` — MudBlazor's).
+  Browser notifications use `/favicon.png` (the `/favicon.ico` they pointed at never shipped); `App.razor`
+  declares the favicon `image/png` (was gif). New **`wwwroot/robots.txt`**: only `/public/{slug}` pages
+  allowed (`Allow: /public/`, `Disallow: /public/*/` — tiles/info/markers — and `Disallow: /`).
+  **`gfx/terobjs/mm/wellspring.png` is still missing** — it has to be taken from the game client's res
+  cache (not fetched or drawn here); until then wellsprings show `custom.png`.
+- **ImageSharp comments (P3-H, docs only)** in both `Program.cs`: buffers ≤ 1 MiB — every 400x400 tile
+  frame (640,000 B → a 1 MiB array) — come from `ArrayPool<byte>.Shared` on the managed LOH and are
+  bounded by neither setting; `MaximumPoolSizeMegabytes` caps only the unmanaged pool (> 1 MiB);
+  `MaxDegreeOfParallelism` is per operation; `AllocationLimitMegabytes` is per allocation. The 2026-08-23
+  memory-work bullet below is corrected the same way.
+- **Tests (767 + Web 50, +97):** `StorageQuotaServiceTests` (14, temp-file SQLite, two contexts: stale
+  request-scope and `GetAllAsync` snapshots keep concurrent deltas, clamp, unknown tenant, zero no-op, no
+  flush of pending changes, 8 concurrent scopes lose nothing, check reads the row, growth gate at/over quota,
+  reconcile fresh previous + tracked copy Unchanged + missing dir + unknown tenant), `TenantRepositoryTests`
+  (2), `StorageDriftTests` (11), `AtomicFileTests` (4), `TileServiceStorageAccountingTests` (5: size-change
+  charges, zoom rebuild twice = bytes on disk, orphan zoom file not double-counted, retired dirs credit
+  legacy only, live reference keeps the dir), `GridServiceMapMergeTests` +1 and `HmapImportServiceMergeTests`
+  +1 (quota delta == non-WebP disk delta; both fail with the fix reverted), `ClientTokenTests` (15),
+  `IconNamesTests` (1), `ClientTokenValidatorTests` (11 incl. the migration fix), `ClientTokenRejectionTrackerTests`
+  (9: session-B replay = First + one Summary of 113, cap/overflow, pooling, prune, concurrent prune),
+  `ShippedIconsTests` (3), `ShippedIconScannerTests` (5), `FoodIconsTests` (15).
+  `GridServiceMergeImportedTilesTests` now asserts the "Kept directory" line on the TileService logger.
+- **Not verified live:** the marker fallback and robots.txt in a browser (no JS harness) — dev check: a
+  marker with a missing image shows custom.png with no "Marker" text; `/robots.txt` is 200 text/plain;
+  `/cookbook` makes no `/gfx/invobjs` 404s.
+- **Ops:** saved queries on `discrepancy detected`, `Token validation failed`, `Invalid token for tenant` or
+  the GridService "Kept directory" category need updating. Expect after deploy: per-tenant `RecalculateStorage
+  … Drift` lines ≈ 0 for refresh-heavy tenants, no overcount Warnings; 1 + ⌊minutes/15⌋ Warnings per stale
+  client token. Ship `wellspring.png` from the game client (and list other missing marker images from a prod
+  DB copy); check the live Caddyfile's CSP still allows `https://www.havenandhearth.com` in `img-src`.
+
+### 2026-10-11: ZoomQ rebuilds each tile once per batch; revision bumps name their cells; reconnect tile deltas from the DB; no exceptions as control flow
+
+**From the 2026-10-10 export (plan step 6, part A: P3-D, P3-G, P2-A step 3, P3-F).** ZoomQ rebuilt the z0 cell and
+all six ancestors per uploaded grid (7 rebuilds per upload where 2.5-4 tiles change; 392 batches, p50 1.8 s);
+every revision bump made every viewer refetch every tile in view (16-19 requests per viewer per bump, 72% of map
+2813's tile requests); `TileCacheService` reloaded a whole tenant's tile list 168 times in 75 min to answer
+0-6-row `since` deltas; and 392 of the API's 681 `OperationCanceledException`s were ZoomQ's debounce timer, plus
+one JsonReaderException + JsonException per Hurricane marker post. One migration (`AddTileTenantCacheIndex`).
+- **No exceptions on normal paths (P3-D).** `ZoomTileQueueService.ReadBatchAsync(window, ct)`: wait for the first
+  request, a plain `Task.Delay(window)`, then a non-blocking `TryRead` drain — the processor used a cancelled
+  `ReadAsync` as its 500 ms timer (one exception per batch). `LenientJson.Deserialize<T>(json, options, out
+  repaired)` quotes bare tokens FIRST and parses once (`QuoteBareTokens` now copies spans and allocates its builder
+  only at the first bare token, so a valid body costs one scan); `ClientEndpoints.ReadMarkerListAsync` uses it
+  with the shared `CaseInsensitiveJsonOpts` (was a new options object per call) and logs repairs at Debug. The
+  /client marker endpoints answer exactly as before (same parse results, same 400 path). **Rules: never end a
+  wait by cancelling it on a normal path; `dotnet.exceptions` counts every async rethrow under the SHORT type name
+  (`JsonReaderException` is System.Text.Json's internal type, no Newtonsoft) — one escaped exception can show as
+  10-15.**
+- **Distinct tiles per batch (P3-G).** Pure `Services/ZoomTileBatchPlanner` (requests grouped by zoom-0 cell =
+  `WebpDirtyCellPlanner.CellOf`, then distinct parents level by level z1..z6, bottom-up; parents always planned —
+  the 2026-08-22 "walk parents even when z0 is null" ghost fix) + `ZoomTileBatchRegenerator` (Api singleton): each
+  planned tile `ForceRegenerate`d once, every z0 cell before any parent, so each parent composites once from fresh
+  children; a throw is caught per tile and the batch goes on. Generated/Failed stay per request (= its cell
+  produced bytes). A 3x3 neighbourhood: 63 rebuilds → 10 (aligned) / 28 (at an origin). The processor's dead
+  `DistinctBy` is gone (the queue never holds duplicates).
+  - **Key release just before the read.** `ZoomTileQueueService.BeginProcessing` (called for a cell's requests
+    right before its z0 read) releases the dedup key, so an upload landing during the batch is queued for the next
+    one instead of being skipped behind a read that already happened (it used to be released after the request's
+    whole chain); `EndProcessing` (batch end) never touches a re-enqueued key; requests a cancelled batch never
+    reached are released with `MarkCompleted`. `IsQueued` = pending OR in flight until the batch ends, so the
+    WebP backstop's attempt accounting (`ProcessedAttempts`) still counts an attempt only once its whole chain
+    ran. **Deviation:** the backstop now checks `IsQueued` before enqueueing — with the key released early, the
+    enqueue alone would accept a duplicate of an in-flight cell (and forget the in-flight attempt).
+  - Logs: `Processing batch: N requests -> C z0 cells, T tiles` (Debug); `Batch complete: … in Ms ms (T tiles,
+    C z0 cells for N requests; revisions 2813@115:3, …)` — `@rev:cells`, or `:all` over the cap. Saved queries on
+    the old text need adjusting. The ZoomQ `TileCacheService` invalidation is deleted: the batch writes WebP
+    files, never Tiles rows. Web invalidation and the per-map revision bump are unchanged. **Review fix:** the
+    Tiles writers that had silently relied on it (their cells reached ZoomQ) now invalidate themselves —
+    `GridService.MergeMapsAsync` (GridService takes the `TileCacheService` singleton) and both imports
+    (`TenantAdminEndpoints.EvictImportedMapTileCachesAsync`); without it a page load after a merge/import got
+    the pre-change token list, and rows below the client's later `since` marker never arrived.
+- **Revision bumps name their cells (P2-A step 3).** `MapRevisionDto.Cells` (`int[][]?`, `[x, y]` zoom-0 cells,
+  `JsonIgnore WhenWritingNull`); new **overload** `IUpdateNotificationService.NotifyMapRevision(mapId, revision,
+  changedCells)` (not an optional parameter — Moq expression trees, CS0854; the two-argument one = null = whole
+  map, used by every other writer); `ZoomTileCells.ChangedCellsByMap(requests)` (distinct cells per map, null over
+  256). `WatchGridUpdates` serializes the DTO: `{"mapId","revision"}` byte-identical without cells,
+  `"cells":[[x,y],…]` with them; the connect replay never carries cells. Client: map-updates.js passes `cells` to
+  `window.hnhMapper.setMapRevision(mapId, revision, cells)`, which honours them **only when the revision is the
+  held one + 1** (`MapRevisionCache` steps by 1; anything else = a missed bump → full refresh, as for every bump
+  without cells, the .NET fallback and seeds). `smart-tile-layer.js` keeps pending `all` / `cells` per layer
+  (union across debounced bumps; >256 or malformed → full); a narrowed run refreshes only the tile nodes (every
+  retained level) whose server coords are a changed cell or one of its ancestors (`x >> z`), deletes only those
+  negative-cache entries (also out-of-view ones: a newly mapped area's cached 404 must not hide it) plus the retry
+  set's (a failed refresh negative-caches its tile, which would skip the retry). Hidden-tab coalescing and the
+  failed-tile retry set are kept. **Deviation:** runs no longer supersede each other (a narrowed run covers only
+  its cells, so cancelling an earlier run's remaining batches would lose them): one shared per-layer key queue,
+  drained by a single 4-per-frame loop. Old JS ignores `cells` (full refresh); new JS against an old API gets no
+  cells (full refresh) — no deploy-order constraint. **Review fix — placeholders:** a node whose first load
+  failed (createTile's error path hides it) or that `getTileUrl` skipped while negative-cached shows
+  `L.Util.emptyImageUrl` and was only ever re-requested by the old every-bump full refresh, so a transient 503
+  stayed a hole. Narrowed runs now also queue every placeholder node (`_isPlaceholder`) but keep its
+  negative-cache entry, so `_refreshTile` re-requests it only once the 30 s entry has expired (a lasting 404 =
+  one request per TTL, not per bump); a failed placeholder refresh stays out of the eager retry set (which
+  would clear the entry every bump).
+- **Reconnect tile deltas from the DB (P3-F).** `TileCacheService.GetTilesSinceAsync(tenantId, since)`:
+  `since > 0` (every reconnect) = `ITileRepository.GetTileCacheTokensAsync` (projected `TileCacheDto`,
+  `IgnoreQueryFilters` + explicit TenantId) — never touches or loads the snapshot, and sees every committed writer;
+  `since <= 0` (page load) = a per-tenant `Lazy<Task<Snapshot>>` of projected DTOs (one shared load via `Task.Run`;
+  a failed load is removed by value-matched `TryRemove`; an invalidation during a load cannot resurrect it). The
+  process-wide `SemaphoreSlim`, the unsynchronized `Dictionary` and the `HttpContext.Items["TenantId"]` write are
+  gone; `GetAllTilesAsync` (service and repository) is deleted. Invalidation is a lock-free removal (gridUpload,
+  wipeTile, setCoords, merges, both imports and the superadmin paths call it — it only keeps page loads
+  fresh, so every writer of Tiles rows must); "Loading tiles"
+  and per-tenant "Invalidated" lines are Debug, "Loaded N tiles" stays Information (~one per page load after an
+  upload). New index **`IX_Tiles_TenantId_Cache`** (migration `20261011023704_AddTileTenantCacheIndex`,
+  CLI-generated, one `CreateIndex`): the delta is O(log n + changed rows) — without it a 58k-68k-row tenant took
+  24-30 ms per reconnect on the dev copy. `SseWireContractTests` now looks for `GetTilesSinceAsync(` after the
+  subscriptions.
+- **Tests (670 + Web 50, +60):** `ZoomTileQueueServiceTests` +9 (window collects, waits for the first item, next
+  batch, no first-chance exception on window expiry — filtered to the test's async flow, plus a detector test
+  proving the old CancelAfter pattern IS caught — shutdown while waiting and inside the window,
+  Begin/EndProcessing), `ZoomTileBatchPlannerTests` (10: 3x3 blocks 10/7/28 tiles, single request = the old loop's
+  chain incl. negatives, grouping, tenant/map separation), `ZoomTileBatchRegeneratorTests` (8: once per tile and
+  z0 first, null z0 still builds parents, key released just before the read and kept in flight, throw / failed
+  scope / cancellation release everything), `LargeTileServiceTests` +1 (real service: a stale opaque sibling never
+  reaches the parent, each tile built once), `ZoomTileCellsTests` (11), `UpdateNotificationServiceTests` +2,
+  `MapRevisionDtoWireTests` (3, incl. the Moq overload guard), `LenientJsonTests` +6 (no first-chance
+  JsonException, span bookkeeping, strict-parse equivalence, broken JSON still throws), `TileCacheServiceTests`
+  (10, temp-file SQLite `Pooling=False`, ambient tenant pointing elsewhere: tombstones, strict delta, cached until
+  invalidated, delta never reloads, cold delta loads nothing, 20 concurrent reads = 1 load, failed load not
+  cached, invalidate-during-load, tenant scoping, EXPLAIN QUERY PLAN of the captured delta query uses the index).
+  Review fixes (after part B, suite 769): `GridServiceMapMergeTests` +1 (a merge drops the page-load snapshot, a
+  single-map gridUpdate keeps it), `WebpDirtyCellBackstopTests` +1 (a cell between Begin/EndProcessing is
+  neither re-enqueued nor counted as an attempt; gives up only after MaxAttempts of the backstop's own). Both
+  fail with their guarded line removed.
+- **Not verified live:** the JS changes (no browser run; throwaway stubbed-Leaflet harnesses only, deleted) —
+  dev check: DevTools EventStream shows `"cells"` on `mapRevision` after an upload, and `/map/tiles` refetches
+  only the changed tiles' chain (plus placeholders whose 30 s negative entry expired) ~500 ms later; a
+  wipeTile/setCoords bump or a reconnect gap still refreshes the whole view.
+- **Ops:** back up grids.db (the index builds at API start, a few seconds on ~0.5M rows). Expect `Batch complete`
+  tiles/requests ≈ 1-3 instead of 7, "Loading tiles from database" ≈ page loads after uploads (was 168 / 75 min),
+  and API `OperationCanceledException` ≈ real SSE disconnects only.
+
+### 2026-10-11: WebP pyramid gets its own durable queue; merge double-claims rejected; one map-delete teardown; missing-source repair
+
+**From the 10-10 integrity scan (27 drifted maps, 4 maps with contested cells, 26 tenants with orphan
+storage) and silkcloth's dark map 2813.** Two plan items (P2-C + P1-A PR-C), one migration
+(`AddDirtyWebpCells`). Suite 583 + Web 50; 610 + Web 50 after the same-day review fixes at the end.
+- **New `DirtyWebpCells` table** (migration `20261011011549_AddDirtyWebpCells`, CLI-generated, no seed
+  inside it): one row per 4x4 WebP zoom-0 cell (`TenantId, MapId, CellX, CellY, MarkedAt`; unique
+  `(TenantId, MapId, CellX, CellY)`, index `(TenantId, MarkedAt)`, FKs to Tenants and Maps with cascade
+  — deleting or merging away a map drops its marks; no tenant query filter, every query is explicit).
+  **Why:** the old backstop derived cells from zoom-1 `DirtyZoomTiles` rows, which the legacy PNG
+  rebuild (`ZoomTileRebuildService`) deletes on its own timer — two consumers of one durable queue, so
+  the share the WebP side saw swung 0-100% with timer phase; `CreatedAt` never moved forward, so a
+  second import flush into a cell regenerated between flushes looked fresh; and freshness was judged
+  on the z0 file only. **Rule: never feed a durable queue to two consumers — give each its own.**
+  - Written by BOTH dirty funnels in `TileService` (per-tile `MarkParentTilesDirtyAsync` on every
+    zoom-0 save, and `MarkParentTilesDirtyBatchAsync` for imports/merges/rebuilds), after the tile rows
+    are saved; `MarkedAt` is **bumped on re-mark**; floor division for negatives; own SaveChanges in
+    500-cell chunks with one retry (a concurrent insert, or the backstop deleting the row between our
+    read and update), separate from the DirtyZoomTiles save.
+  - **Single consumer `Services/WebpDirtyCellBackstop`** (scoped), run per active tenant from
+    `LargeTileGenerationService`'s 5-minute dirty scan in its own try/catch — no longer behind the
+    `HasDirtyZoomTiles` fast skip, and a failing gap-fill no longer skips it. Reads marks older than the
+    **5-minute settle** (the fast path owns younger ones), oldest first (5,000 per run). A mark is
+    consumed only once the cell's whole EXISTING z0..z6 chain is newer than `MarkedAt` and complete
+    (missing parents are fine; a missing z0 needs regeneration only when a row's source PNG exists);
+    otherwise the cell is enqueued on the ZoomQ fast path up to the shared headroom
+    (`ZoomTileQueueService.BulkEnqueueDepthLimit` = 3000, now one constant for every bulk producer;
+    the rest is deferred, its mark kept). Deletes are conditional (`MarkedAt <= the run's cutoff`), so
+    a re-mark that lands mid-run survives. Two guards against loops: a **dark or partly dark cell**
+    (all, or only some, of its rows' PNGs missing — classified per row) is consumed without
+    regenerating — a regeneration would REGEN-EMPTY-delete (dark) or redraw without those rows (partly
+    dark: the zoom-0 compose skips missing sources) the last WebP copy of what they showed; and a mark
+    still stale after **3 regenerations the processor actually handled** (counted per process; a
+    request DropOldest evicted unprocessed does not count — see the review fixes) is dropped with one
+    `BACKFILL [...] gave up on N cell(s)` warning (the drift scan reports the rest). One `[LargeTile] BACKFILL [tenant] enqueued N, cleared M, deferred K, gave up G` line per
+    tenant with work. `EnqueueStaleWebpCellsAsync` and the zoom-1-row `WebpDirtyCellPlanner.DeriveCells`
+    are gone; the planner is now pure `CellOf` / `Chain` / `InspectChain` / `NeedsRegeneration`.
+  - **Seeded at runtime, not in the migration:** once per process start (before Phase 1, retried each
+    cycle until it succeeds) `SeedFromLegacyDirtyRowsAsync` runs `INSERT OR IGNORE INTO DirtyWebpCells
+    … SELECT TenantId, MapId, CoordX >> 1, CoordY >> 1, MAX(CreatedAt) FROM DirtyZoomTiles WHERE
+    Zoom = 1 … GROUP BY` (SQLite's `>>` is an arithmetic shift = floor for negatives, verified;
+    dead-map rows skipped because OR IGNORE does not cover foreign keys). Idempotent: an existing mark
+    never moves, re-seeded already-fresh cells settle without an enqueue. Nothing pending at deploy is lost.
+  - **Gap-fill refreshes existing parents** of every tile it generated (it used to skip any existing
+    file, producing exactly the drift scan's "older than child" state); existing tests' counts went up
+    accordingly (a restored cell now rewrites its z3-z6 ancestors too). Every tile it writes is evicted
+    from the process caches and the touched maps are published (Web cache + map revision) — see the
+    review fixes; without that the refresh was undone by ZoomQ.
+  - `TenantDataPurgeService` purges `DirtyWebpCells` (`PurgeTenantDataResultDto.DirtyWebpCells`).
+- **Merge preflight (`GridService.ProcessGridUpdateAsync`):** before the insert loop, if an eligible
+  merge would put a shifted source grid on a target cell owned by a different grid id — the target's
+  stored grids, the unknown grids this matrix is about to plant, or a previously checked source — the
+  whole update is rejected: `GridUpdate REJECTED … merging map(s) X into Y would double-claim N
+  cell(s), e.g. …` + the empty response, mirroring the conflicting-offsets guard. Merges were the only
+  Grids writer without an occupied-cell check, and both maps' witnesses being internally consistent
+  hides a frame mix from the offset guard (the 2242/2448/2572 contested cells). A source's own
+  pre-existing duplicates are not counted against itself. A legitimate merge never double-claims.
+  The verdict is remembered for 5 minutes (see the review fixes).
+- **One map-delete teardown `IMapDeletionService.DeleteMapAsync(tenantId, mapId)`**, used by the
+  tenant-admin `DELETE /admin/maps/{id}` and the superadmin `DELETE /api/superadmin/tenants/{t}/maps/{id}`:
+  IgnoreQueryFilters + explicit tenant; one transaction child-before-parent (dirty marks, markers on its
+  grids, custom markers, roads, pings, overlays + offsets both ways, tiles of all zooms, grids, map);
+  then files — each deleted only when no LIVE-map tile row references it (both separators; the
+  merge/scan/purge rule; containment-checked to the tenant dir), the per-map dir unless a live row
+  points inside it, and `large/{id}` via `DeleteMapWebpTiles`; `RecalculateStorageUsageAsync` last.
+  **The superadmin delete removed only the Maps row before** (Tiles/Grids have no FK to Maps — they
+  stayed on the dead id and the next gridUpdate re-anchored to it); the tenant-admin delete never
+  removed `large/{id}` (58 dead trees in the 09-18 copy) and deleted files other maps still used. Both
+  endpoints also evict the Web cache (`SuperadminEndpoints.InvalidateWebMapTileCacheAsync`, now
+  internal) and both delete buttons post through `APIUpload` (file deletion can pass the default
+  client's 10 s timeout, whose retry would 404). `HmapImportService.CleanupFailedImportAsync` also
+  deletes `large/{id}` and recalculates the quota instead of decrementing only the PNGs it found.
+- **ZoomQ DropOldest no longer leaks dedup keys:** the bounded channel's `itemDropped` callback
+  releases the dropped request's key and counts it; at most one `[ZoomQ] Queue full: dropped N …`
+  warning per minute. Before, a dropped base coord could never be enqueued again and `PendingCount`
+  (every producer's headroom gauge) grew until a restart. `EnqueueZoomRegeneration` now returns
+  whether it queued anything (the backstop counts attempts by it).
+- **Missing-source repair (P1-A PR-C):** `POST /api/superadmin/integrity/tenants/{t}/repair-missing-sources`
+  (`{confirmTenantId, forgetUnrecoverable=false}`), re-derived server-side
+  (`MapIntegrityService.RepairMissingTileSourcesAsync`): a missing row whose cell has exactly one owner
+  grid with a pool PNG is repointed to it (File, size, Cache=now); the owner of a row without one is
+  re-armed (`NextUpdate` in the past); contested cells are skipped; rows with no owner stay. **Restore
+  keys** (`map M: tenants/t/N/0 (dead map) shift=(sx,sy) rows=R bytes=B`) are computed before anything
+  changes and written in the `SuperAdminRepairedMissingTileSources` audit's OldValue **before** the
+  opt-in forget (`ForgetMissingTileSourceRowsAsync`) deletes the unrecoverable rows — re-checking each
+  file first, so a file restored meanwhile keeps its row. Map Integrity → "Missing tile sources" has
+  per-tenant **Repair (non-destructive)** and **Forget unrecoverable rows** buttons (counts-explicit
+  confirms, `APIUpload`, rescan). `GridUpload`'s `AllowGridUpdates=false` guard now blocks only when
+  the existing row's file exists (`ITileService.HasRenderableTileAsync`), so a re-armed grid can heal
+  by re-walking on no-updates tenants; the client protocol is unchanged.
+  - **Deviation from the plan:** repointed cells are regenerated cell by cell (marks + fast queue +
+    both processes' map caches evicted), NOT with `RebuildMapWebpCoreAsync` — that deletes the map's
+    whole pyramid first, including the last WebP copy of areas that are still dark.
+- **Tests (+34):** `WebpDirtyCellBackstopTests` (9, real SQLite: legacy consumer runs first and the
+  cell is still enqueued then cleared once fresh; multi-flush re-enqueue; re-mark survives the
+  conditional delete; settle window + other tenants untouched; dark cell keeps its WebP; give-up after
+  3 attempts; headroom deferral; seed floors negatives / takes the newest mark / is idempotent; map
+  delete cascades the marks); `WebpDirtyBackstopTests` (marking: negative floors, re-mark bump,
+  zoom-0-only; planner: whole-chain freshness, missing z0, zero-length, dark); `ZoomTileQueueServiceTests`
+  (3); `GridServiceHardeningTests` +3 (double claim with a stored grid, with a second source, with a
+  grid the matrix plants — all rejected before any write); `LargeTileServiceTests` +1 (parent refresh);
+  `MapDeletionServiceTests` (4, real SQLite + temp dir, incl. no orphans in a rescan);
+  `MapIntegrityServiceTests` +4 (repair non-destructive, forget only still-missing unrecoverable rows,
+  unknown tenant, repair makes the grid requestable through `ProcessGridUpdateAsync`);
+  `TileServiceRenderableTileTests` (1); purge test asserts `DirtyWebpCells`.
+- **Ops:** back up grids.db (one migration); after deploy expect a `BACKFILL seeded N` line, then
+  `BACKFILL` lines after imports/merges/restarts and `DirtyWebpCells` small at steady state;
+  `GridUpdate REJECTED … would double-claim` lines are prevented corruption (frequent ones from one
+  tenant point at a client bug); `[ZoomQ] Queue full` should stay absent. The Global Maps delete
+  button is safe to use now. Order for dark maps: restore files first if a backup has them, then
+  Repair (non-destructive), and Forget only once backups are exhausted.
+- **Review fixes (same day, 10 findings).** Suite 583 → **610** (+27), Web 50, no new warnings, no migration.
+  - **Partly dark cells are never redrawn by the repair or the backstop.** Regeneration is per 4x4 cell
+    and `GenerateZoom0LargeTileAsync` silently skips rows whose file is missing, so redrawing a cell
+    that holds both a repointed (or present) row and a still-missing one overwrote the z0 — and, via
+    ZoomQ, z1-z6 — without the missing row: the last WebP copy of it, exactly what the dark-cell rule
+    protects. `CellSources` gained **`PartlyDark`** (`ClassifyCellSourcesAsync` counts present files
+    instead of `Any`), and `NeedsRegeneration` is false for Dark AND PartlyDark. The repair marks every
+    repointed cell durably but enqueues only cells with no row still missing
+    (`MissingTileSourcesRepairResultDto.RedrawBaseCoords`); the others are **`CellsHeldForRestore`**
+    — the backstop redraws them once nothing in them is missing (a forget in the same click, or a
+    restore within minutes), later than that the drift scan flags them stale for a rebuild.
+    `RegenerateWebpCellsAsync` now takes `markCoords` and `redrawCoords` separately.
+  - **Rebuild-all skips** maps listed under missing tile sources (its full-pyramid delete would take
+    their dark areas' last imagery with it; `RebuildAllDriftResultDto.SkippedMissingSources`, warning
+    snackbar) and maps whose only drift is empty files (`SkippedEmptyFilesOnly` — serving and the
+    batch regenerate those). The per-map rebuild stays available, but its confirm now names the
+    map's missing rows and dark/partly dark cells and reads "Rebuild anyway"; the rebuild-all confirm
+    counts what it will rebuild and lists what it skips.
+  - **Forget keeps every row rebuildable.** The restore keys are per (map, directory) aggregates, so
+    a forgotten row in a `shift=mixed` directory, or a pool-path row no grid owns, lost its
+    coordinate-to-file mapping. The repair now lists those rows one by one
+    (`UnkeyedRows`: `map M (x,y) {file} bytes=N`), and a forget writes them into the audit entry
+    before deleting anything. Single-shift per-map directories and pool PNGs named after their
+    cell's owner grid stay key-only.
+  - **Path-like grid ids.** Grid ids are client strings that become pool file names, and
+    `ValidatePath` only keeps a path inside the tenant: `"../5/0/1_1"` names another map's file. New
+    `TenantFilePathService.IsSafeGridId` (no separators, `..`, `:` or invalid file-name chars) /
+    `PoolRelativePath` (null when unsafe); `GetGridRelativePath`/`GetGridFilePath` throw
+    `UnauthorizedAccessException` for one (the merge re-home calls them inside its try → CopyFailed).
+    `ProcessGridUpdateAsync` treats such ids as holes (one warning with the count), `gridUpload`
+    answers 400, the scan/repair classify an unsafe owner as "no grid" (never repointed or re-armed),
+    and `MapDeletionService` builds no pool candidate for one and compares candidates and live
+    references in **canonical form** (`..` resolved) — the raw string compare let
+    `tenants/t/grids/../2/0/0_0.png` delete a file a live map's row named `tenants/t/2/0/0_0.png`.
+  - **Gap-fill writes reach every cache.** The parent refresh rewrote z1-z6 files without evicting the
+    static `_tileCache`; ZoomQ's `ForceRegenerate` composes children through that cache, so the next
+    upload in the footprint baked the stale cached sibling back into z2-z6 with a fresh mtime (the
+    backstop had already settled the mark, and the derivation rule cannot see it). Now every tile the
+    batch writes is `InvalidateCacheEntry`'d (positive + negative), `GenerateMissingTiles[ForMaps]Async`
+    report the maps they wrote (`writtenMapIds`), and `LargeTileGenerationService.PublishWrittenMapsAsync`
+    evicts the Web cache per map (stops at the first unreachable Web — startup) and bumps + broadcasts
+    the map revision, as ZoomQ does. Both import endpoints also evict both processes' caches of the
+    affected maps when they finish (a new area's cached 404 would otherwise outlive the import).
+    `SuperadminEndpoints.InvalidateWebMapTileCacheAsync` now returns whether the Web was reached.
+  - **Backstop attempts count only processed regenerations.** An attempt was counted on enqueue, so a
+    request DropOldest evicted still used one of the 3 and a cell could be given up without ever being
+    regenerated. The attempt state keeps the queue's `DroppedCount` at enqueue; the attempt counts once
+    the request has left the queue (`ZoomTileQueueService.IsQueued`, new) with no drop since. Under
+    sustained drops nothing accrues, so the backstop keeps trying. And `GridService
+    .EnqueueWebpRegenerationForCells` (merges, wipes) now respects `BulkEnqueueDepthLimit` — 1500 merge
+    cells on top of a backstop-filled queue overflowed the 4096 channel.
+  - **Merge rejections are remembered** (`Services/MergeRejectionCache`, Api singleton, 5-min TTL, keyed
+    by tenant + target + each source with its shift). A double-claim rejection changes nothing, so the
+    same frames came back on every gridUpdate of every client walking the area, each time loading the
+    whole source map + the target's bounding box and logging the full matrix. A remembered verdict
+    rejects without queries (Debug line); the next recomputation logs one WARNING with the count of
+    identical rejections it stood for. A repair is seen at the latest after 5 minutes. `GridService`
+    takes the cache as a constructor argument (per-test instances — a static would leak verdicts
+    across tests that reuse tenant and map ids).
+  - Scan DTO `MissingTileSourcesDto` gained `PartlyDarkCells`, `RowsWithoutGrid` and `RepairHeldCells`
+    (the repair's classification, shared via `ClassifyMissingRow`), so the panel's repair confirm says
+    how many grids are re-armed vs rows that have no grid, and how many cells are held; new "Partly
+    dark" column.
+  - Tests: `MergeRejectionCacheTests` (3), `TenantFilePathServiceGridIdTests` (14), backstop +2
+    (partly dark kept; a dropped request is not an attempt), planner PartlyDark, `GridServiceHardeningTests`
+    +2 (repeated rejection = one warning; path-like ids are holes), `GridServiceMapMergeTests` +1 (merge
+    at headroom enqueues nothing), `MapIntegrityServiceTests` +3 (scan predicts the repair; only clear
+    cells redrawn; path-like owner never repointed/re-armed) and the zoo test asserts held cells and
+    unkeyed rows, `MapDeletionServiceTests` +1 (path detours), `LargeTileServiceTests` +1 (batch evicts
+    the refreshed parent and the new tile's cached 404, reports the map).
+- **Still open:** when the fast path (an upload or a merge enqueue) reaches a dark or partly dark cell,
+  `ForceRegenerate` still rewrites a partly dark z0 (and its ancestors) without its missing rows and
+  REGEN-EMPTY-deletes a fully dark one — only the backstop and the repair skip them; merges still drop
+  source tile rows without a grid row (public-import "Option F" tiles).
+
+### 2026-10-11: Zero-length WebP files and missing tile sources — readers validate, the batch never holes a parent, dark areas are reported
+
+**From the 2026-10-10 export: 9 "Failed to load child tile from file" warnings at API start (an
+`ArgumentNullException('pointer')` = a 0-byte file) on 5 maps of 3 tenants (feather-quail 2538 "WORLD",
+2604, 2700; sketchbook 2608; hemp 1984), and silkcloth map 2813's batch reporting `failed=471` every
+5 minutes with no explanation.** Two problems, one pass over the WebP pyramid's readers.
+- **Zero-length/truncated pyramid files (P2-B).** Builds before the atomic writes (ec31a13) overwrote
+  tiles in place; a write that failed half-way (most likely a full disk) left a 0-byte file, and every
+  reader trusted any existing file: served it as an empty `200 immutable`, composited it as a
+  transparent quarter (the decode error was swallowed), or — when it was a parent's only child — read
+  "no sources" so that `ForceRegenerate` deleted the valid parent (REGEN-EMPTY), cascading up through
+  ZoomQ. The batch skipped any existing file, so it never healed. New **`Services/WebpTileFile`**
+  (`IsComplete`: 12-byte RIFF/WEBP header + the RIFF size fits the length — no decode, zero false
+  positives on 103,805 prod tiles; `TryReadAsync`: a file that vanished after `File.Exists` reads as
+  missing instead of throwing). **Rule: a pyramid file that is not a complete WebP counts as missing
+  everywhere.**
+  - Serving (`GetOrGenerateCoreAsync`): an incomplete file is discarded (`DiscardCorruptTile` — this
+    tile only, one `CORRUPT` warning, skipped if the file was meanwhile replaced) and regenerated through
+    the coalesced path; empty bytes are never served or cached. Ancestors are never deleted from the hot
+    path: ones composed without the child are caught by the drift scan's derivation rule.
+  - Compose paths (on-demand, `ForceRegenerate`, batch `GenerateZoomNFromFilesAsync`) no longer swallow
+    child decode errors: `LoadChild` discards an incomplete/undecodable child and throws, so the parent
+    fails (503 on view, kept by `ForceRegenerate`, left missing by the batch) instead of a hole or a
+    deletion; the next attempt regenerates the child.
+  - Batch: `HasUsableTileFile` (stat-only) treats files < 12 bytes as missing, so the same bottom-up pass
+    rebuilds them and their missing ancestors; a **per-level failed-coordinate set** means a parent is
+    never composed around a failed child (the file compose reads a missing child as empty space —
+    previously any child failure was baked into the parent); `GenerateLargeTileWithPreloadAsync` errors
+    propagate (they used to read as "empty"); one tile's error is logged with coordinates and no longer
+    aborts the tenant. **`BATCH-COMPLETE` now reads `generated= skipped= empty= failed= missingSources=`**
+    — `failed` = generation errors (each also an ERROR line) plus the parents left missing above them;
+    cells with nothing renderable (dark cells and their parents) are `empty`.
+    Any log query parsing it needs adjusting.
+  - Drift scan: files shorter than a header count as `CorruptFiles` ("Empty files" column; the daily
+    `[IntegrityCheck]` line says `… stale / N empty`); Rebuild-all skips maps whose only drift is empty
+    files (they heal on serve and in the batch), and rebuilds the others.
+- **Missing tile sources (P1-A PR-B, detection for the merge data loss below).** A "dark" cell has
+  zoom-0 rows but none of their source PNGs on disk — nothing can draw it, and a rebuild cannot help.
+  - Batch: preload, on-view footprint check and zoom-0 query filter `File != ""` (wipe tombstones are
+    not sources — matches the backfill and the rebuild); dark z0 cells are counted, and **one
+    `SOURCES-MISSING` warning per map whenever the dark-cell count changes** (static per-process
+    throttle, so once per damaged map after each deploy) names the map, cells and rows.
+  - Integrity scan: new **`MissingTileSources`** category (`MissingTileSourcesDto`, feeds `IsClean`, the
+    daily WARNING — `N map(s) with missing tile source files (rows, dark cells)` — and a Map Integrity
+    table): live-map zoom-0 rows whose file is missing, dark 4x4 cells, a per-directory breakdown with
+    the merge shift (row coord − file-name coord) and a `(dead map)` marker, rows recoverable from the
+    grid pool (single owner grid with a pool PNG) and ambiguous (contested) rows. Source files are
+    checked from **one directory listing per directory** (a stat confirms only the misses), not a stat
+    per row — a tenant pool holds ~100k PNGs. Dead-map rows stay orphan storage. Report only: the rows
+    are the restore key (path + `FileSizeBytes`); nothing deletes or rewrites them (repair = PR-C).
+  - Corrected docs: missing zoom-0 WebP files heal on view **only where their source PNGs exist**.
+  - Ops: restore the files to the exact paths first, THEN "Rebuild WebP tiles" — a rebuild before the
+    restore also deletes whatever the old pyramid still shows of the dark area (the panel says so).
+- **Tests (549 + Web 50):** `WebpTileFileTests` (4); `LargeTileServiceTests` +10 (zero-length served →
+  regenerated; zero-length without sources → deleted + 404; only-child zero-length rebuilds the parent
+  instead of deleting it; zero-length sibling → no hole; batch rebuilds a zero-length z0/z5 tile with its
+  missing ancestors; truncated child fails parent and grandparent, next scan heals; z0 write error never
+  holes its parent; `SOURCES-MISSING` once + `missingSources=1` + tombstones ignored; tombstone-only
+  footprint) — the fake `{1,2,3}` WebP fixture is a real tiny WebP now; `LargeTileServiceQueryCostTests`
+  (12, see the 2026-10-10 follow-up); `MapIntegrityServiceTests` +3 (empty files; missing sources with
+  dead-dir shift, recoverable, ambiguous, tombstone and dead-map exclusions; all-present = nothing).
+- **Not done:** `ForceRegenerate` of a dark zoom-0 cell still takes the "no sources" branch and deletes
+  an existing z0 WebP (the last copy of that imagery) — the backstop now never enqueues a dark or
+  partly dark cell (see the DirtyWebpCells entry above); the non-destructive repair shipped there too
+  (PR-C), and Rebuild-all now skips maps that have missing sources (its review fixes).
+
+### 2026-10-11: Circuit/JS robustness — per-circuit API identity, a poll that never gives up, /map in hidden tabs, no JS after the circuit is gone
+
+**From the 2026-10-10 export: every /map circuit that reconnected got 401s on the marker poll exactly 60 s
+later and stopped it for good ("Marker updates stopped"); 2 of 9 map inits hung for the 2-minute interop
+timeout in hidden tabs and logged two CRITICAL records each (the map stayed dead until a reload); ~1,600
+swallowed Web exceptions came mostly from JS calls made after the circuit was already gone; and every map
+load logged a `toggleRoads` JSException.** Rules now in Key Implementation Details → "Blazor circuit and JS
+interop rules".
+- **Web→API identity (P1-B).** Root cause: `AuthenticationStateCache` is scoped, but
+  `AuthenticationDelegatingHandler` is resolved by IHttpClientFactory in ITS OWN handler scope, shared by every
+  user for the 2-minute handler lifetime. The handler used the current HttpContext — which a Timer keeps only
+  while the circuit's original WebSocket request lives — and otherwise fell back to that shared cache: empty
+  after a reconnect (the 401s), or another user's cookie/IP (a latent cross-user/tenant request; the handler's
+  writes into that cache were already deleted as a stop-gap before this change). Now Microsoft's "access
+  server-side Blazor services from a different DI scope" pattern:
+  - `CircuitServicesAccessor` (singleton, static AsyncLocal of a per-circuit `CircuitServicesHolder`) is set by
+    `ServicesAccessorCircuitHandler.CreateInboundActivityHandler` around every inbound circuit activity — on
+    ASP.NET Core 10 that wraps component init (first UpdateRootComponents, resume), events, JS interop and
+    navigation, NOT `OnConnectionUp/Down`. Execution contexts captured inside (the Map timers created in
+    `OnInitializedAsync`, Task.Run, continuations) keep it across reconnects; `OnCircuitClosedAsync` clears the
+    holder so a stale timer resolves nothing instead of a disposed scope.
+  - `AuthenticationCaptureCircuitHandler` (was the misnamed CircuitHandler `CircuitServicesAccessor`) captures
+    user, `HnH.Auth` cookie AND `ClientOrigin` into the circuit's own cache on every connect; a connect without
+    HttpContext keeps the previous state (it used to wipe the cookie); the dead legacy `HnHMapper.Auth` name is
+    gone. Logs: Debug when captured (anonymous included), Warning only for an authenticated circuit without the
+    cookie or a connect without HttpContext. Serilog override key renamed accordingly in `appsettings.json`.
+  - `AuthenticationDelegatingHandler` is stateless: circuit cache (authoritative, incl. "no cookie" for an
+    anonymous circuit, whose origin is still forwarded) → else the current request's HttpContext (SSR,
+    prerender, the minimal-API proxies) → else nothing. It owns `Cookie` / `X-Forwarded-For` /
+    `X-Forwarded-Proto` (caller values dropped; only `HnH.Auth` is forwarded). **One Warning per failed call**:
+    "no circuit services and no HttpContext" (then no 401 line) or "API auth failure" with `AuthSource`;
+    the per-request line is Debug. One change fixes all ~170 `CreateClient("API"/"APIUpload")` sites,
+    including MapManagement's status poll, GlobalPublicMapsViewer's timer and the long-running import readers.
+  - Map's marker poll: one-shot timer re-armed after every tick from `Services/Map/MarkerPollBackoff`
+    (2/4/8 s, then 60 s forever; ticks never overlap). Fast retries log Debug; the first slow-mode failure logs
+    ONE Warning and shows "Marker updates are failing; retrying every minute." once per streak; recovery logs
+    Information + "Marker updates resumed.". No re-arm while disconnected; `HandleCircuitUp` resets the fast
+    retries and ticks 2 s after the reconnect. Interactive `OnInitializedAsync` warns once if the accessor is
+    empty (a framework change would silently bring the 401s back). The unused
+    `PersistentAuthenticationStateProvider.cs` is deleted.
+- **/map in hidden tabs (P1-E).** Browsers do not run `requestAnimationFrame` in hidden tabs; `initializeMap`
+  awaited one (leaflet-interop.js fixed in the live-connection change above) and `initializePublicMap` did too,
+  with a catch that resolved on error. Both create Leaflet synchronously now; a Leaflet error rejects as a
+  JSException. `MapView.InitializeMapAsync`: one attempt; Debug when disposed / circuit gone / OnMapReady already
+  arrived; Warning for a TaskCanceledException (call or reply lost with a dropped connection); one Error
+  otherwise; logs the elapsed ms on the "call completed" Information line; on failure raises
+  `OnMapInitialized(false)` → Map shows a persistent "The map failed to load." snackbar with a Reload action
+  (`RequireInteraction`; a 5 s toast would expire unseen in a hidden tab — the dwell timer runs on the server).
+  The duplicate unguarded `changeMap` in `MapView.OnAfterRenderAsync` (sent on every successful init) is gone.
+  `circuit-pause.js` also arms the 5-minute pause for a page that LOADS hidden (no visibilitychange fires) —
+  such tabs now fully initialize, so they must be reclaimable. The `JSInteropDefaultCallTimeout` comment no
+  longer claims map init needs 2 minutes (the value stays: downloads use it).
+- **No JS after the circuit is gone (P2-D).** .NET 10 runs the circuit handlers (→ `ReconnectionState` false)
+  before it disposes components and marks JS permanently disconnected. `HandleCircuitDown` now only pauses both
+  timers (its `disconnectSseUpdates` call was never delivered — +2 TaskCanceled two minutes later — and its
+  snackbar/render flushed only after the reconnect, next to "Reconnected successfully"). `UpdateMarkers` and
+  `CheckForMapPermission` return early while disconnected; `HandleCircuitUp` resumes both. Map, MapView,
+  NotificationCenter and PublicMapView skip their JS teardown when `IsConnected` is false; every disposal step
+  keeps a broad catch (Debug for expected interop failures, Warning otherwise); timers and
+  DotNetObjectReferences are always disposed; `BrowserViewportService.UnsubscribeAsync` only if subscribed.
+  `SafeJsInterop` (now takes `ReconnectionState`) skips calls while disconnected, never calls `console.*`
+  through JS from its catch blocks, and logs a cancellation as Warning only while connected (a hang or a call
+  lost across a reconnect), else Debug. Map's `OnInitializedAsync` returns early in static prerender (the
+  `HttpContext != null` idiom): no more double fetch of config/markers/maps/custom markers/timers per load, and
+  a `permissionResolved` flag shows "Loading map..." instead of flashing the "Waiting for Map Access" lock screen.
+  A failed `OnInitializedAsync` (config/markers/maps call) now replaces the spinner with "The map failed to load"
+  + a Reload button (`loadFailedMessage`) — it used to spin forever behind a 5 s toast.
+- **Init sequence vs SPA navigation away.** `HandleMapInitialized` checks `disposed` after every phase, and
+  `InitializeBrowserSseAsync` checks it again after its module import (a disposal during the import found no
+  module to tear down; the stream would have opened bound to the dead page, holding its DotNetObjectReference,
+  until the next /map visit). `MapView.OnMapReady` ignores a Leaflet `load` that arrives after disposal (its
+  `dotnetRef` lives until the module-dispose round trip ends); `RefreshRoadsAsync` never re-imports the module
+  after a disposal. PublicMapView's disposal logs expected interop failures at Debug like the others.
+- **`toggleRoads` (P3-A).** `InvokeAsync<bool>` against a JS function returning `undefined` threw on every map
+  load after all toggles were applied (regression from e03235b). Now `InvokeVoidAsync`, as are the 13 other
+  ignored-result bool calls; `RoadManager.toggleRoads` returns an explicit boolean like its siblings.
+- **Tests:** new project **`HnHMapperServer.Web.Tests`** (xUnit + bUnit 2.9.0 + Moq, references Web, in the
+  solution so CI's root `dotnet test` runs it; `InternalsVisibleTo` from Web) — 50 tests:
+  `AuthenticationDelegatingHandlerTests` (9, real factory pipeline: circuit identity without HttpContext; a
+  timer created inside a circuit activity keeps auth after the request ends, with the HttpContext=null
+  precondition asserted; never another user's cookie/IP on the same pooled handler; anonymous circuit;
+  only HnH.Auth forwarded and caller headers replaced; no source → nothing + exactly one Warning even on 401;
+  closed circuit / disposed scope send nothing and do not throw), `ServicesAccessorCircuitHandlerTests` (3:
+  the accessor never leaks to the caller flow, close releases captured flows), `AuthenticationCaptureCircuitHandlerTests`
+  (8), `MarkerPollBackoffTests` (7), `MapViewInitializationTests` (9, bUnit: changeMap exactly once when
+  ready arrives mid-init, timeout = 1 Warning + `OnMapInitialized(false)`, JSException = 1 Error, disposed
+  while pending = no changeMap / no failure, ready after disposal = no `OnMapInitialized`, JSDisconnected and
+  lost changeMap reply after ready = Debug only, disconnected disposal skips JS), `SafeJsInteropTests` (8), `ReconnectionStateTests` (4),
+  `MapNavigationServiceTests` (2, `SetMapRevision` returns false only for duplicates). Re-adding the old
+  changeMap or dropping the circuit branch from the handler fails 6 of them. Service suite unchanged at 520.
+- **Not unit-tested:** the JS changes and Map.razor.cs (≈20 injected services) — manual checks: `/map` opened
+  with Ctrl+click and left hidden >2 min works on first look; `Blazor._internal.forceCloseConnection()` on /map
+  → a markers call ~2 s after "connection restored", then every 60 s, all 200; stopping the API → 2/4/8 s
+  retries, one "failing" snackbar, then "resumed" after restart without reload.
+- **Ops:** the 18:05:06 / 18:06:26 drops of all circuits within 7 ms look like a Caddy reload; consider
+  `stream_close_delay` on the websocket/SSE proxies (separate change, VPS Caddyfile).
+
+### 2026-10-11: Live map connection — named SSE heartbeat, manual reconnect, polling fallback removed, JS-owned revisions
+
+**From the 2026-10-10 export: the browser itself closed every `/map/updates` stream about every 17 s (270
+streams, all 200, p50 17.0 s, 268 ending on the client watchdog's 8 s lattice), one tab sat in the polling
+fallback for 13 minutes (a poll every 3 s), and 95.7% of all inbound JS→.NET calls (32,265 in 75 min) were
+`OnSseMapRevision` — 97.6% of them duplicates.** Root cause: the API's keep-alive was an SSE *comment*
+(`: keep-alive`), which EventSource never surfaces to JavaScript, while the watchdog (8 s tick / 12 s timeout)
+counted only `onopen` and unnamed messages. Every quiet stream looked dead; each reconnect lost ~1 s of events
+and replayed snapshot + tiles + every revision.
+- **Heartbeat contract (server, `MapEndpoints.WatchGridUpdates`).** `Core/Constants/SseFrames.Heartbeat` =
+  `event: heartbeat\ndata: {}\n\n`, sent once right before the live loop (inside the try: flushes the headers
+  when the snapshot wrote nothing; not before the snapshot, which would commit the 200 before a snapshot failure)
+  and then every 10 ticks (5 s) **unconditionally**, not only when idle. **It is a named event and never a
+  comment, and it carries a data line** — neither a comment nor a data-less event is dispatched to JS.
+  `Cache-Control: no-cache, no-transform` + `X-Accel-Buffering: no`. The notification stream keeps its comment
+  keep-alive (notification-center.js has no watchdog).
+- **Long-lived streams: subscribe first, bounded lifetime.** Two things the 17 s churn had been healing.
+  (1) The hub subscriptions are now taken **before** the tile / revision / character snapshot reads; an event
+  published in between used to be lost until the next reconnect, and on an hours-long stream that meant a ghost
+  character (cleanup deletions are published once) or viewers stuck on an old `?v=` (served from the immutable
+  browser cache). Landing in both is harmless: the snapshot replaces, revisions dedupe in JS, deltas upsert and the
+  per-tick coalescing keeps their order; the channels are bounded (DropOldest). (2) Authorization (TenantMapAccess,
+  Pointer, tenant) is evaluated only at connect and nothing bumps the security stamp, so a revoked Map/Pointer
+  permission never reached an open /map once streams stayed up. The loop now ends the stream after
+  `StreamMaxLifetime` (15 min, ±20% jitter so tabs opened together don't rotate together) by `break` — **never by
+  cancelling `cts`**, which would land in the Error catch — sending any pending tile batch first. The client sees a
+  healthy stream end and reconnects after ~1 s (backoff reset, `?since=` rebuilt) through a fresh authorization
+  against the API principal (rebuilt from the DB every 10 s), and gets a characters snapshot + revision replay.
+  Revocation therefore lands within ≤18 min. Non-replayed events (markers, pings, roads, timers…) published during
+  that ~1 s gap are lost, as on any reconnect.
+- **Client (`map-updates.js`, rewritten).** Every heartbeat, tile batch and named event refreshes liveness. The
+  watchdog is armed at connect, ticks every 5 s and reconnects after 20 s without an event **plus the tick's own
+  lateness** (hidden tabs clamp timers to ~1/min and frozen tabs run nothing; events queued meanwhile dispatch
+  after the tick, so the stream is not blamed). **Reconnects are always manual** — any `onerror` (any readyState)
+  or stale tick closes the stream — with exponential backoff 1 s → 30 s, ±20% jitter, retried forever, and the
+  URL (`?since=`) rebuilt on every attempt (the browser's native retry would replay the stale one). A connection
+  is **healthy** only after a heartbeat AND 20 s alive; only then do the backoff and the unhealthy streak reset
+  (never at `onopen` — a stream dying in its snapshot phase or behind a buffering proxy still escalates). After
+  3 unhealthy connections in a row JS calls `OnLiveUpdatesReconnecting(true)` once → Map shows a small persistent
+  "Live updates reconnecting…" chip (where the polling chip was); `false` on the next healthy stream.
+  `initializeSseUpdates` **always opens a fresh stream** (snapshot and revision replay are sent only at connect;
+  it used to reuse an OPEN stream after a circuit reconnect/resume, leaving the rebuilt component without
+  characters — the 17 s churn had been hiding that). `disconnectSseUpdates` stops everything it started (stream,
+  watchdog, pending reconnect) and drops `dotnetRef`; `lastTileCache` is kept so re-entry asks for the delta.
+  Events of a replaced stream are ignored (`es !== eventSource`).
+- **Polling fallback removed (user decision).** It came in 38d5555 together with the watchdog that caused the
+  drops, every one of the ~273 switches to polling in the export was triggered by that watchdog, it never went
+  back to SSE, it re-sent all tenant revisions + a characters snapshot every 3 s, and polling-mode characters
+  bound flat X/Y and rendered at 0,0. Deleted: `Api/Endpoints/PollingEndpoints.cs` + registration,
+  `Core/DTOs/PollResponseDto.cs`, the Web `/map/api/v1/poll` dev proxy, the JS poll loop / `switchToPollingMode`
+  / `retrySseConnection` and the initial HTTP fetch (`fetchInitialData` also used `/poll`; the first stream now
+  sends the full tile list in 2k chunks, as it always could), `OnConnectionModeChanged` / `connectionMode` and
+  the "Polling Mode" chip, and the dead, never-registered `Web/Services/MapUpdateService.cs`. Residual risk: a
+  network that buffers streaming responses gets no live updates — now visible (the chip), not silently degraded.
+  Tabs still running old JS get a 404 on `/poll` until the Web deploy's forced reload — harmless.
+- **Revisions are JS-owned.** map-updates.js hands every `mapRevision` to `window.hnhMapper.setMapRevision`
+  (registered by `initializeMap` next to `applyTileUpdates` — a bridge, not a second import: a second versioned
+  instance of leaflet-interop.js would split the store). Exact duplicates are dropped; any other value is applied
+  (an out-of-band import revision may be lower). .NET only seeds, in ONE call (`seedMapRevisions`: page init — was
+  one awaited call per map, ~4.4 s for 94 maps — a newly created map, a map-list refetch), applied **only when the
+  map is unknown or the value is greater**, so a GET snapshot never rolls back a live revision. `[JSInvokable]
+  OnSseMapRevision` stays as a deduped fallback (`MapNavigationService.SetMapRevision` now returns `bool`) and no
+  longer calls `StateHasChanged` (no markup shows a revision). The store is `SmartTileLayer.prototype.mapRevisions`
+  — server-global like `cache`, deliberately kept across `initializeMap` re-entry.
+- **Per-layer refresh scheduling (`smart-tile-layer.js`).** Pending-refresh state is per instance
+  (`addInitHook`): the old prototype `revisionDebounce` was shared, so the overlay layer's call cleared the main
+  layer's timer and the refresh never ran. When the timer fires: liveness re-check (`_map`, `mapId`, container
+  connected); **no refresh while `document.hidden`** — every bump coalesces into one run on `visibilitychange`
+  (it used to queue one rAF burst per bump); a newer run supersedes an older one's remaining batches; tiles whose
+  preload failed are remembered (≤256) and merged into the next run (subsumed while every run covers the whole
+  view; load-bearing once runs are narrowed to changed cells). Revision refreshes now build URLs with the overlay
+  offset (`_serverCoords`) — required, since the overlay now really refreshes; nodes pruned mid-run are skipped
+  instead of forcing a full `redraw()`. Still one full-viewport refresh per bump — changed-cell refresh is a later step.
+- **Circuit pause / readiness.** `circuit-pause.js` calls `window.mapUpdates.suspend()` (= `disconnectSseUpdates`)
+  after a successful pause — the stream otherwise kept an API connection open feeding a dead `dotnetRef`; the
+  resumed Map re-initialises it. An early `charactersSnapshot` now waits (≤10 s) for circuit readiness instead of
+  being dropped ("another snapshot will arrive soon" was only true because of the churn). `HandleCircuitUp`
+  clears the chip before re-initialising (JS forgets it too; a still-failing stream raises it again).
+- **Web dev proxy (`/map/updates`):** per-connection Warning/Error lines → Debug, `catch (OperationCanceledException)
+  { return Results.Empty; }` before the generic catch, no 500 once streaming started. No Caddy change: a 502
+  during an API restart is just a failed connect that the client retries with backoff.
+- **Deploy order: API with or before Web.** New JS + old API sees no heartbeat: every idle map reconnects every
+  ~20 s and shows the chip. Old JS + new API is harmless (it ignores `heartbeat` and keeps its old churn until
+  reloaded). CI pushes the API image first; check it on a manual partial deploy.
+- **Tests (520):** `SseFramesTests` (3 — a WHATWG event-stream parser: the heartbeat dispatches exactly one named
+  event (so never `message`), `: keep-alive` dispatches nothing, a following unnamed tile batch still is
+  `message`) and `SseWireContractTests` (3 — text tripwires on comment-stripped copies of `MapEndpoints.cs` /
+  `map-updates.js`, see the csproj: the API sends `SseFrames.Heartbeat` and no comment keep-alive; every hub
+  subscription in `WatchGridUpdates` precedes the three snapshot reads; the JS declares
+  `HEARTBEAT_EVENT = 'heartbeat'` AND registers a listener on it — the name alone passed with the listener deleted —
+  and never calls `/map/api/v1/poll`). The JS state machine has no harness — verified manually.
+
+### 2026-10-11: Telemetry hygiene — secrets out of logs/traces, a log-level policy, no span per SignalR message
+
+**From the 2026-10-10 production export (75 min): 22,678 API log records and 9,995 server spans carried a
+full client token (`/client/{tenant}_{secret}`), 19,961 API Warnings were the `DIAGNOSTIC:` middleware
+(path + player IP, twice per `/client` request), 97% of 122,744 Web records were Debug (~84k SignalR
+"Received hub invocation" lines incl. circuit secrets), and 84,413 of 99,377 traces were one span per Blazor
+hub message (p50 0.02 ms).** One change, three parts; policy and rules now live in Configuration →
+"Logging levels and telemetry rules".
+- **Secrets (P1-D).** `DIAGNOSTIC` middleware deleted; player names dropped (`SSE: First character` block,
+  PositionUpdate lines); `DiscordWebhookService` no longer logs the signed preview URL (a 48 h credential).
+  What the protocol makes unavoidable is masked by one list, `ServiceDefaults/Telemetry/SensitiveUrlRedactor`
+  (`/client/{t}_***` keeps the tenant prefix for 401 attribution; invite validate/redeem, `/invite/{code}`,
+  token revoke, `discord.com/api/webhooks/{id}/***`; a match ends at `/ ? #`, whitespace, quotes/backtick
+  or `< > , ; ) ]`; `{...}` route templates are left alone, `/client//token` is still masked). Two adapters:
+  `SensitiveUrlRedactionEnricher` — Serilog root enricher registered LAST in both `UseSerilog` lambdas through
+  the shared `ApplyServiceDefaults()` (ServiceDefaults `Extensions`, also FromLogContext), so it
+  also sees MEL scope properties (hosting `RequestPath`, IHttpClientFactory's `Scope` sequence + `Uri`) and
+  covers Console, File and OTLP; walks string/Uri scalars and sequences, allocates nothing when clean — and
+  `SensitiveUrlRedactionProcessor` (`OnEnd` masks `url.path`/`url.full`/legacy tags on every span, server and
+  HttpClient incl. API→Discord; added before `UseOtlpExporter`'s processor, which goes last). ServiceDefaults
+  gained `Serilog 4.3.0` (the version Serilog.AspNetCore 10 resolves).
+- **Levels (P2-E).** Web `appsettings.json` lost its four Debug overrides (Map/MapView Debug moved to
+  `appsettings.Development.json`; SignalR/Http.Connections Debug only via env var). Request logging uses
+  Serilog's default `GetLevel` in both services (the custom one made every 4xx — tile 404s, scanner probes,
+  stale-token 401s — a Warning). `OnRejected` logs one Warning per 429 (category
+  `HnHMapperServer.Api.RateLimiting`, policy + route template); its old log was dead code (gated on
+  `Items["TenantId"]`, which the limiter runs before). Routine lines → Debug: SSE lifecycle in
+  `WatchGridUpdates` (a client disconnect is `catch (OperationCanceledException) when RequestAborted`; any
+  other cancellation now reaches the Error branch), `/map/api/config` permissions line (now UserId, was
+  username, was Information), PositionUpdate unknown GridID, MarkerUpdate per-marker lines, repaired marker
+  payloads, every `TenantContextMiddleware` token rejection (the duplicate "Invalid token for tenant" line is
+  gone; 401s stay countable per route in `http.server.request.duration`; P3-B later adds a rejection
+  tracker), background-service per-tick heartbeats, GridService "Client in map" / existing-map response,
+  `CharactersSnapshot`, per-retry marker-timer auth lines, failed-markers fetch (the handler and caller already
+  log). Circuit "connection down"/"closed" → Information. `Console.WriteLine` → `ILogger` in NotificationCenter,
+  EventsPanel, CreateTimerDialog (new `UiLog.FailureLevel`), MapView (except the init catch) and the Map ping
+  handlers. EventsPanel: a 404 for a custom marker is Debug and the id is remembered per panel instance —
+  `TimerHistory` has no FK to `CustomMarkers` (Timers do, SetNull), so a deleted marker's id stays in the
+  history and was refetched on every panel open. `ENV ASPNETCORE_URLS` removed from `docker/api|web.Dockerfile` and the legacy root `Dockerfile`
+  (it duplicated the base image's `ASPNETCORE_HTTP_PORTS` and warned at every start).
+- **Traces (P2-F).** `EnableAspNetCoreSignalRSupport = false` in the `AddAspNetCoreInstrumentation` lambda
+  (Filter only sees HTTP requests; our only hub is Blazor's ComponentHub). HTTP spans, Blazor Route/Event and
+  Circuit spans stay at 100%. Accepted: ~144 lifecycle hub spans per 75 min are gone, and work started inside
+  a hub call (JS-interop Web→API calls, timers created in `OnInitializedAsync`) now forms its own root traces
+  instead of hanging off — and growing — a 15-minute page-load trace. A sampler was rejected: the runtime hands
+  `Activity.Current` to it as parent, so ParentBased would also drop Blazor Event spans and JS-interop HTTP
+  traces. **Re-enable the flag if a custom SignalR hub is ever added.**
+- **Tests (514):** `SensitiveUrlRedactorTests` (49 cases incl. templates, delimiters, Discord, idempotence),
+  `SensitiveUrlRedactionTests` (enricher: template props + rendered message, Uri props, HttpClient `Scope`
+  sequence, hosting `RequestPath`, no realloc; span processor), `ServiceDefaultsTelemetryTests` (non-parallel
+  collection — ActivityListeners are process-global: subscribed sources pinned, no SignalR; redaction before a
+  later exporter; the real Serilog → OpenTelemetry logger pipeline with `IncludeScopes`; and the real
+  `UseOtlpExporter` against a local OTLP/HTTP receiver — no secret in any exported byte. Three of them fail
+  with the processor and flag reverted), `LoggingConfigurationTests` (base and base+Production Serilog levels
+  ≥ Information for Api and Web; Web Development keeps Map Debug, not SignalR; both `Program.cs` still end their
+  `UseSerilog` lambda with `ApplyServiceDefaults()`). The pipeline tests call `ApplyServiceDefaults()` itself, so
+  they run the production enrichers. The test project now references ServiceDefaults +
+  `Serilog.Extensions.Hosting` and copies both services' `appsettings*.json` and `Program.cs` (as text — it
+  cannot reference Api/Web) to `config/`.
+- **Ops after deploy:** purge the dashboard store (persistence mode Resume, volume `dashboard_data`), the old
+  docker json logs and `/app/logs`, and the export zip; tokens are not rotated by default (operator-only
+  exposure). Check the hand-copied compose sets no `ASPNETCORE_URLS` / `Serilog__MinimumLevel__*`.
+
+### 2026-10-11: Map merges deleted imported zoom-0 PNGs their copied rows still pointed to (fixed)
+
+**Data loss, found from production telemetry (silkcloth map 2813: the 5-minute WebP batch reported
+`failed=471` on every scan, all cells with tile rows but no source files).** `.hmap` and public-map
+imports write zoom-0 PNGs into the importing map's OWN directory (`tenants/{t}/{mapId}/0/{x}_{y}.png`);
+client uploads use the grid-id pool (`tenants/{t}/grids/{gridId}.png`). `GridService.MergeMapsAsync`
+copied the source's zoom-0 rows to the target with `File` unchanged and then (since 7090e37, 2026-08-22)
+deleted `tenants/{t}/{src}/` recursively — the very files those rows named. The target could then never
+build its pyramid for that area (dark at every zoom, silently counted as batch `failed`), re-importing
+the .hmap does not help (existing grid ids are skipped), and only a re-walk healed a cell. Proven on the
+dev copy too (meat-quail 2246 → 2242, 2026-09-03: 15 rows, all files gone). **The rows still hold the
+exact original path + `FileSizeBytes`, so restoring the PNGs to those paths from a backup heals them.**
+- **Re-home into the pool (PR-A):** each moved zoom-0 row whose File is a per-map zoom-0 path (any map
+  id, either separator) is copied to `ITenantFilePathService.GetGridRelativePath(t, gridId)` before the
+  directory goes — copy (temp file + no-overwrite rename), never a move, because a merge is not
+  transactional. An existing pool PNG wins and is never overwritten; a source file that is already
+  missing leaves the row UNCHANGED (restore key) and re-arms the grid's `NextUpdate` so the next client
+  re-uploads it; a copy failure keeps the old path. **A contested source cell (several grids on one
+  cell — corrupted DBs) is re-homed nowhere:** the per-map file is coord-keyed, so it cannot be
+  attributed to any one of them, and copying it would put another grid's terrain under
+  `grids/{id}.png`; the row moves unchanged and the directory guard keeps the file. One summary line
+  per source map that had such rows (`Merge of map X into Y: N … re-homed …`; Warning when any row is
+  missing/failed/contested). `GridService` gained the `ITenantFilePathService` constructor dependency
+  (already registered in Api DI).
+- **Directory guard:** `large/{src}` is always deleted; `tenants/{t}/{src}/` only when no LIVE-map row
+  (every map of the tenant except the retired source; `File != ""`) references a file inside it — new
+  `ITileService.AnyLiveTileReferencesDirectoryAsync`, the same rule as `MapIntegrityService`'s reference
+  set, so merge, integrity scan and orphan purge agree. Otherwise the directory is kept with a
+  `Kept directory of merged map …` warning. After the re-home this fires only for missing/failed/contested
+  rows.
+- **Tests (448):** `GridServiceMergeImportedTilesTests` (6, real SQLite: re-home + target WebP builds and
+  shows the merged imagery; pool PNG wins untouched; dir kept for a live cross-map reference stored with
+  backslashes; dir deleted when only dead-map rows reference it; missing source keeps the row + re-arms
+  the grid; contested cell copies into no pool file and keeps its row). Existing merge/hardening
+  fixtures only gained the constructor argument.
+- **Detection shipped** (PR-B — see "Zero-length WebP files and missing tile sources" above) and the
+  non-destructive repair (PR-C — Map Integrity → "Repair (non-destructive)", see the DirtyWebpCells
+  entry above). Restoring the files from a backup is still the only way to bring imported imagery back.
+
+### 2026-10-10: Tile generation — negative-cache race, failures saved as holes, empty-area recursion (fixed)
+
+**Found in the first production telemetry export: 1,197 tile-generation errors in 75 minutes on
+the Web, all thrown from `LargeTileService.EvictExpiredNegativeCacheEntries`** (1,024
+`ArgumentNullException`, 173 `ArgumentException`), on zoom-1 tiles while serving zoom-5/6 requests.
+Three layers, each fixed (commit 8f37328):
+- **Empty-area recursion (why it fired constantly).** A zoomed-out tile over an unexplored area is
+  never on disk, so every request regenerated it, and `GenerateZoomNLargeTileAsync` recursed through
+  all descendants without checking for data: up to 4,096 zoom-0 queries and 5,461 negative-cache
+  entries per zoom-6 tile. The 10,000-entry negative cache thrashed. **Fix:** one indexed `AnyAsync`
+  over zoom-0 `Tiles` in the tile's footprint before recursing (uses `IX_Tiles_MapId_Zoom_CoordX_CoordY`;
+  ≤2 ms worst case on the 73k-tile map). It also stops stale child files being composited where the
+  DB has no data.
+- **The race.** At the cap, each add evicted with LINQ `OrderBy` straight over the live
+  `ConcurrentDictionary`. LINQ buffers via `ICollection<T>.Count` then `CopyTo` (two separate lock
+  acquisitions): an add in between overflows the buffer (`ArgumentException`), a remove in between
+  leaves default entries whose null keys sort first and reach `TryRemove(null)`
+  (`ArgumentNullException`). **Fix:** `Services/NegativeTileCache` — eviction works on `ToArray()`
+  (copied under all locks), runs single-flight, drops expired then soonest-to-expire down to 90%,
+  value-matched removals. The positive tile cache snapshots too. **Rule: never run LINQ directly over
+  a `ConcurrentDictionary` other threads mutate — `ToArray()` it first.**
+- **Failures treated as "empty" (the damage).** `GenerateLargeTileAsync` caught every exception and
+  returned null, so a failed tile was negative-cached, its parent was composed without that quarter
+  and written to disk with a hole, and the endpoint answered a 404 that browsers cache.
+  `ForceRegenerateLargeTileAsync` also negative-cached on failure, hiding the still-valid file.
+  **Fix:** the recursion (`GetOrGenerateCoreAsync`) throws; public `GetOrGenerateLargeTileAsync` logs
+  once and rethrows; the Web `/map/tiles` and API `ServeGridTileWebP` endpoints answer
+  **503 + `Cache-Control: no-store`**; failed tiles are never negative-cached. Coalescing registers a
+  `Lazy<Task>` before starting, so a request that loses the race no longer launches a duplicate.
+- **Also:** `positionUpdate`, `gridUpdate` and `overlayUpload` answer 400 (not 500) to an empty or
+  malformed body via `ClientEndpoints.ReadJsonBodyAsync<T>` (clients cut off mid-request around
+  restarts post an empty body).
+- **Tests:** `NegativeTileCacheTests` (TTL, removal, eviction order, concurrent stress) and four
+  `LargeTileServiceTests` (child failure fails the parent with nothing saved; empty footprint doesn't
+  negative-cache children; negative-coordinate footprints; failed regeneration doesn't hide the file).
+- **Follow-up 2026-10-11 — pyramid-bounds guard.** Nothing checked zoom/x/y, and the footprint maths
+  wraps outside the pyramid: `4 << zoom` masks the shift to 5 bits (zoom -4 spans a whole quadrant —
+  up to 14,189 queries on the 73k-tile map; zoom 36 aliases zoom 4 past the negative cache), zooms 7+
+  wrote real composites under `large/{map}/7..29/`, and z6 x ≥ 2^24 overflowed onto a real footprint
+  (renders the data at x=0 and writes a duplicate pyramid). Any Map-permission member could send it.
+  `LargeTileService.IsInPyramid` (zoom 0..`MaxZoom`=6, footprint inside int) guards both entry points:
+  `GetOrGenerateLargeTileAsync` returns null (404, not 503), `ForceRegenerateLargeTileAsync` throws
+  `ArgumentOutOfRangeException` instead of falling into its file-deleting "no sources" branch.
+  Children of an in-pyramid tile are always in range, so only the entry points check.
+  `PublicTileCacheService.EvictTo` sorted the live dictionary (same bug class as the 500) — it sorts a
+  `ToArray()` snapshot now, with value-matched removals. `LargeTileServiceQueryCostTests` (real SQLite +
+  command-counting interceptor) pin the cost model: empty z6 = 1 query then 0, z6 on disk = 0, sparse
+  cold z6 = 25 (only the populated branch), out-of-range zoom/x/y = 0 queries and no files,
+  ForceRegenerate out of range throws and deletes nothing. Deliberately not done: a cancellation token
+  (generations are shared through the Lazy registry and run on the initiator's scoped DbContext),
+  parallel child generation, warm-up — the numbers don't justify them.
 
 ### 2026-08-28: Cookbook panels/Favorites — catalog table design + sortable headers
 
@@ -667,7 +1567,7 @@ instead:
   per-panel independence, computed header styles byte-equal to the catalog table's
   (`rgb(44,62,80)`/600/`6px 24px 6px 16px`); bars: segment widths sum to 100%, hatch pseudo
   renders, "+2" shown on wide tier-2 segments and suppressed under 14%; no new console errors.
-  Suite untouched (UI-only; no bUnit harness). **Dev-cache footnote:** a rebuild that changes only a `.razor.css` does not
+  Suite untouched (UI-only; no bUnit harness then — Web-level tests now live in `HnHMapperServer.Web.Tests`). **Dev-cache footnote:** a rebuild that changes only a `.razor.css` does not
   touch the assembly, so `?v=` (assembly mtime) stays and browsers keep the old immutable-cached
   bundle — hard-refresh locally, or touch a .cs/.razor file; production's BUILD_COMMIT stamp is
   unaffected.
@@ -728,8 +1628,8 @@ Three user-decided changes on top of the value work below.
   `AccountOverviewServiceTests`). Every call is gone and file-based test databases now use
   `;Pooling=False`, which also lets the temp file actually delete. 5 consecutive full runs
   green at 410. **Rule: never call `ClearAllPools()` in a test.**
-- **Not unit-tested:** the facet logic lives in `Cookbook.razor`'s `@code` and the project
-  has no bUnit harness; the Core halves (`wtotal`/`weff` parsing and evaluation) are covered.
+- **Not unit-tested:** the facet logic lives in `Cookbook.razor`'s `@code` and there was no bUnit
+  harness then (now: `HnHMapperServer.Web.Tests`); the Core halves (`wtotal`/`weff` parsing and evaluation) are covered.
 
 ### 2026-08-26: Cookbook values come from the game client, not the wiki (+ quality exponents)
 
@@ -1183,9 +2083,11 @@ workload headlessly (login → /cookbook → 49k-row Ungrouped view → three fa
     comes back at its defaults (cookbook filters reset). Annotating that state is the follow-up that
     would let the delay drop.
 - **ImageSharp allocator capped** in both services (`MaximumPoolSizeMegabytes = 32`,
-  `AllocationLimitMegabytes = 256`). Its pools live outside the GC heap — invisible to the heap
-  limit, very visible to the container limit the kernel OOM-kills on. Tile serving re-verified at
-  z0/z1/z2/z4/z6 (200, 13–16 ms).
+  `AllocationLimitMegabytes = 256`). *(Corrected 2026-10-11:)* the cap covers only ImageSharp's
+  unmanaged pool, which serves buffers larger than 1 MiB. Everything up to 1 MiB — including each
+  400x400 tile frame (640,000 B, a pooled 1 MiB LOH array) — comes from `ArrayPool<byte>.Shared` on the
+  managed heap and is uncapped; `AllocationLimitMegabytes` is a per-allocation ceiling and
+  `MaxDegreeOfParallelism` is per operation. Tile serving re-verified at z0/z1/z2/z4/z6 (200, 13–16 ms).
 - **Web→API requests gzip** (`AutomaticDecompression` on the `APIUpload` client): the bulk body is
   **36 MB raw / 3.4 MB gzipped**; the API already had response compression with SSE excluded.
 - **Observability:** ServiceDefaults now subscribes to the .NET 10 Blazor meters
@@ -1326,9 +2228,10 @@ Suite 303/303.
   container) — a valid link always permits registration. Sets `RegistrationSource=Password`, audit
   `UserRegistered`. New IP rate-limit policies `Register` 5/h, `Login` 20/min, `TenantCreate` 3/h,
   `InviteRedeem` 10/min, `InviteValidate` 30/min. **Client IP through the Web hop:**
-  `AuthenticationDelegatingHandler` forwards `X-Forwarded-For`/`-Proto` (cached in
-  `AuthenticationStateCache.ClientOrigin` for circuit threads) — without it every web user shared the web
-  container's bucket and audit IP.
+  `AuthenticationDelegatingHandler` forwards `X-Forwarded-For`/`-Proto` — from the circuit's own
+  `AuthenticationStateCache.ClientOrigin` (captured per circuit by `AuthenticationCaptureCircuitHandler`, read
+  through `CircuitServicesAccessor`; since 2026-10-11) for circuit work, from the current HttpContext for HTTP
+  requests — without it every web user shared the web container's bucket and audit IP.
 - **Self-service tenants:** `ITenantProvisioningService.CreateOwnedTenantAsync(userId, name?)` — settings
   (SuperAdmin → Sign-in; deployment config only seeds): enabled (kill switch), quota (1024 MB; never
   client-supplied), owned-tenant cap (3, counts TenantAdmin memberships in active tenants), and
@@ -1580,7 +2483,9 @@ ghost the old imagery. Fixes (221/221 tests):
   `ZoomTileProcessorService` now walks the z1–6 parent chain even when z0 regen returns null, so
   wiped cells stop ghosting at far-out zooms. `InvalidateTenantCache` (was a no-op) and new
   `InvalidateMapCache`/`DeleteMapWebpTiles` do real prefix eviction of the static caches.
-- **Durable backstop:** the 5-min dirty scan (`LargeTileGenerationService`) now also derives WebP
+- **Durable backstop** (superseded 2026-10-11 by the `DirtyWebpCells` table and its single consumer —
+  reading a queue the legacy rebuild also deletes from lost marks): the 5-min dirty scan
+  (`LargeTileGenerationService`) now also derives WebP
   cells from zoom-1 `DirtyZoomTiles` rows (`WebpDirtyCellPlanner`, pure) and re-enqueues any cell
   whose z0 file is older than its newest mark or missing-with-rows — freshness = file mtime vs row
   CreatedAt, so nothing loops; rows are still consumed by the legacy `ZoomTileRebuildService`.
@@ -1632,7 +2537,8 @@ ghost the old imagery. Fixes (221/221 tests):
   (X,Y) covers base [X·4·2^z, (X+1)·4·2^z) — footprint with NO rows → **ghost** (renders
   deleted/moved terrain), file mtime + 30-min slack older than the newest row in footprint →
   **stale** (missing newer content); missing z0 files are informational only (on-view generation
-  heals them). Per-zoom newest-data aggregates are built by halving cell dictionaries upward; ~1
+  heals them — *corrected 2026-10-11: only where their source PNGs still exist; cells whose sources
+  are gone are reported as `MissingTileSources`*). Per-zoom newest-data aggregates are built by halving cell dictionaries upward; ~1
   DB query per tenant + one dir enumeration per map. **`Tiles.Cache` is unix MILLISECONDS on
   upload/merge/zoom paths but SECONDS on the hmap-import path** — `CacheToUtc` normalizes
   (< 10^12 → seconds); don't compare Cache values without it. Only ghost/stale maps are reported
@@ -1791,8 +2697,8 @@ all in `Web/wwwroot/js/map/overlay-layer.js`:
 Follow-up (not built): a per-map "grids that have overlay data" index endpoint would make low-zoom
 overlay rendering affordable and let empty maps answer with one response instead of N batches.
 Separate issue spotted, not fixed here: maps missing webp zoom tiles (e.g. map 1896 z5/6) re-404
-the whole viewport after every `mapRevision` bump because `SmartTileLayer.setMapRevision` clears
-the map's entire negative cache before refreshing.
+the whole viewport after every `mapRevision` bump because the revision refresh (since 2026-10-11
+`SmartTileLayer._runRevisionRefresh`) clears the map's entire negative cache before refreshing.
 
 ### 2026-08-15: Cookbook toolbar/panels no longer sticky (user request)
 
@@ -1853,7 +2759,8 @@ never expiring) to a live, actionable, coalescing digest with a stat preview.**
   on menu open (`MudMenu OpenChanged`), list capped at 50, Restaurant icon + Success toast severity,
   click → `/cookbook?highlight={ids}&hlworld={genus}`. **Stat preview** on digest rows: real food icons
   (shared `FoodIcons` helper — local `wwwroot/gfx/invobjs/*.png` (~2000 ship) with
-  havenandhearth.com/mt/r fallback, same as the cookbook table; the bell uses `RemoteFallbackOrHide`,
+  havenandhearth.com/mt/r fallback, same as the cookbook table; since 2026-10-11 `Core/Cookbook/FoodIcons`
+  sends icons the `ShippedIcons` manifest says do not ship straight to the renderer; the bell uses `RemoteFallbackOrHide`,
   which hides the img when both sources fail instead of showing a broken glyph. The remote fallback
   needed `https://www.havenandhearth.com` added to the CSP `img-src` in deploy/Caddyfile{,.example} —
   it had been silently CSP-blocked in prod for the cookbook table too) + FEP pills colored via **`FepPalette`
@@ -1932,8 +2839,8 @@ creation event on the wire, and JS `changeMap` cleared characters/markers/roads 
   (IsMainMap desc, Priority desc, Name asc) used by `SetMaps`/`AddOrUpdateMap` — live updates used to
   drop the main-map-first ordering.
 - **Belt-and-braces**: opening the Maps sidebar panel fires a background `GET /map/api/maps` refetch
-  (`RefreshMapListAsync`) — covers the polling fallback (`/map/api/v1/poll` carries no map list) and
-  any missed SSE window; if the current map vanished meanwhile it behaves like a live deletion.
+  (`RefreshMapListAsync`) — covers any missed SSE window (the polling fallback it was also written for
+  is gone since 2026-10-11); if the current map vanished meanwhile it behaves like a live deletion.
 - **Races/init**: `MapView.ChangeMapAsync` queues `pendingMapId` when Leaflet hasn't fired `load` yet
   and applies it in `OnMapReady` (was a silent no-op → C#/JS desync); `/map?map=N` without x/y/z no
   longer snaps back to `Maps[0]` (respects `?map=` > MainMapId > first).
@@ -1947,14 +2854,16 @@ creation event on the wire, and JS `changeMap` cleared characters/markers/roads 
   Alt+M keydown handler is replaced instead of stacking (each stale copy fired an extra ping).
   **Rule going forward: any module-level JS state consumed by `initializeMap`-style re-entry points
   must be reset there — Blazor SPA navigation does not reload JS modules.** (`map-updates.js` was
-  already re-entry-safe: it re-binds `dotnetRef` and Map.razor's `DisposeAsync` closes the
-  EventSource, so re-entry reconnects and gets a fresh snapshot.)
+  re-entry-safe for SPA navigation only — not for circuit pause/resume or reconnect, where its old
+  stream, timers and polling kept running against a dead `dotnetRef`. Since 2026-10-11
+  `initializeSseUpdates` always opens a fresh stream and `disconnectSseUpdates` stops everything.)
 - **Tests**: `GridServiceMapMergeTests` +2 — merge broadcasts with the real tenant (regression: the
   no-tile merge case that used to yield `""`) + `NotifyMapDeleted`, and the new-map branch notifies
   with `TenantId` set. No test host exists for the SSE endpoint/Blazor handlers.
-- **Known gaps (flagged, not fixed here)**: polling-mode characters bind flat `X/Y` into nested
-  `Position` (render at 0,0); merge orphans map-scoped rows (CustomMarkers/Roads/OverlayData keep the
-  deleted source MapId); `MapCleanupService` still disabled in Program.cs and tenant-blind.
+- **Known gaps (flagged, not fixed here)**: polling-mode characters bound flat `X/Y` into nested
+  `Position` (rendered at 0,0 — moot since the polling fallback was removed 2026-10-11); merge
+  orphans map-scoped rows (CustomMarkers/Roads/OverlayData keep the deleted source MapId);
+  `MapCleanupService` still disabled in Program.cs and tenant-blind.
 
 ### 2026-08-14: Cookbook bulk world assignment (tenant-admin)
 

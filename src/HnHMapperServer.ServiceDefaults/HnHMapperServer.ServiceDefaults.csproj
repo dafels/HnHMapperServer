@@ -17,6 +17,8 @@
     <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.18.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.18.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.18.0" />
+    <!-- Same version Serilog.AspNetCore 10.0.0 resolves in Api/Web (no NU1605): SensitiveUrlRedactionEnricher -->
+    <PackageReference Include="Serilog" Version="4.3.0" />
   </ItemGroup>
 
 </Project>

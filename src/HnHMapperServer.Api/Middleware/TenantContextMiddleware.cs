@@ -1,7 +1,7 @@
-using HnHMapperServer.Infrastructure.Data;
-using Microsoft.EntityFrameworkCore;
-using System.Security.Cryptography;
-using System.Text;
+using HnHMapperServer.Core.Enums;
+using HnHMapperServer.Services.Services;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Routing;
 
 namespace HnHMapperServer.Api.Middleware;
 
@@ -13,18 +13,24 @@ namespace HnHMapperServer.Api.Middleware;
 /// </summary>
 public class TenantContextMiddleware
 {
+    /// <summary>Tag added to http.server.request.duration for every 401 this middleware answers.</summary>
+    public const string RejectionMetricTag = "hnhmapper.client_token.rejection";
+
     private readonly RequestDelegate _next;
     private readonly ILogger<TenantContextMiddleware> _logger;
+    private readonly ClientTokenRejectionTracker _rejections;
 
     public TenantContextMiddleware(
         RequestDelegate next,
-        ILogger<TenantContextMiddleware> logger)
+        ILogger<TenantContextMiddleware> logger,
+        ClientTokenRejectionTracker rejections)
     {
         _next = next;
         _logger = logger;
+        _rejections = rejections;
     }
 
-    public async Task InvokeAsync(HttpContext context, ApplicationDbContext db)
+    public async Task InvokeAsync(HttpContext context, ClientTokenValidator validator)
     {
         string? tenantId = null;
 
@@ -35,39 +41,29 @@ public class TenantContextMiddleware
             var pathParts = context.Request.Path.Value?.Split('/', StringSplitOptions.RemoveEmptyEntries);
             if (pathParts != null && pathParts.Length >= 2)
             {
-                var fullToken = pathParts[1];
-
-                // Extract tenant ID from token (format: tenantId_secret)
-                var underscoreIndex = fullToken.IndexOf('_');
-                if (underscoreIndex > 0)
+                // Token must be in format {tenantId}_{secret}
+                if (!ClientToken.TrySplit(pathParts[1], out var extractedTenantId, out var secret))
                 {
-                    var extractedTenantId = fullToken.Substring(0, underscoreIndex);
-                    var secret = fullToken.Substring(underscoreIndex + 1);
-
-                    // Validate token
-                    var (valid, validatedTenantId) = await ValidateTokenAsync(db, extractedTenantId, secret);
-
-                    if (valid)
-                    {
-                        tenantId = validatedTenantId;
-                        _logger.LogDebug("Tenant context resolved from token: {TenantId}", tenantId);
-                    }
-                    else
-                    {
-                        _logger.LogWarning("Invalid token for tenant {TenantId}", extractedTenantId);
-                        context.Response.StatusCode = 401;
-                        await context.Response.WriteAsJsonAsync(new { error = "Invalid token" });
-                        return;
-                    }
-                }
-                else
-                {
-                    // Token must be in format {tenantId}_{secret}
-                    _logger.LogWarning("Invalid token format. Expected: {{tenantId}}_{{secret}}");
+                    OnRejected(context, ClientTokenRejectionReason.MalformedToken, string.Empty, tokenHash: null, attributable: false);
                     context.Response.StatusCode = 401;
                     await context.Response.WriteAsJsonAsync(new { error = "Invalid token format. Tokens must include tenant prefix." });
                     return;
                 }
+
+                var validation = await validator.ValidateAsync(extractedTenantId, secret);
+                if (!validation.IsValid)
+                {
+                    // Attributed to the tenant only when the tenant exists and the secret has the
+                    // shape we generate — anything else is noise, pooled without a tenant name.
+                    OnRejected(context, validation.Rejection!.Value, extractedTenantId, validation.TokenHash,
+                        attributable: validation.TenantExists && ClientToken.IsCanonicalSecret(secret));
+                    context.Response.StatusCode = 401;
+                    await context.Response.WriteAsJsonAsync(new { error = "Invalid token" });
+                    return;
+                }
+
+                tenantId = extractedTenantId;
+                _logger.LogDebug("Tenant context resolved from token: {TenantId}", tenantId);
             }
         }
         // Strategy 2: Extract from claims (web UI)
@@ -87,7 +83,7 @@ public class TenantContextMiddleware
         }
         else
         {
-            _logger.LogWarning("User is not authenticated for request: {Path}", context.Request.Path);
+            _logger.LogDebug("User is not authenticated for request: {Path}", context.Request.Path);
         }
 
         // Store tenant ID in context for downstream use
@@ -104,73 +100,65 @@ public class TenantContextMiddleware
     }
 
     /// <summary>
-    /// Validates a token by checking if the hash matches and the tenant matches
+    /// Counts and logs one rejected /client request. Every request: a fixed-value metric tag on
+    /// http.server.request.duration (exact counts per route and reason) and a Debug line. Warnings
+    /// only when the tracker says so — first sighting of a (tenant, token) and a summary per
+    /// interval while it keeps coming. No log line ever carries the token, its hash or the client IP;
+    /// the tenant id is named only for attributable rejections (an existing tenant, a canonical secret).
     /// </summary>
-    /// <param name="db">Database context</param>
-    /// <param name="tenantId">Extracted tenant ID from token prefix</param>
-    /// <param name="secret">Secret portion of the token</param>
-    /// <returns>Tuple of (isValid, tenantId)</returns>
-    private async Task<(bool isValid, string? tenantId)> ValidateTokenAsync(
-        ApplicationDbContext db,
-        string tenantId,
-        string secret)
+    private void OnRejected(HttpContext context, ClientTokenRejectionReason reason, string tenantId, string? tokenHash, bool attributable)
     {
-        if (string.IsNullOrWhiteSpace(secret))
+        context.Features.Get<IHttpMetricsTagsFeature>()?.Tags.Add(new(RejectionMetricTag, MetricTagValue(reason)));
+
+        // Routing ran before this middleware (WebApplication adds UseRouting first), so the matched
+        // endpoint's template — "/client/{token}/positionUpdate", never the token itself — is known.
+        var route = (context.GetEndpoint() as RouteEndpoint)?.RoutePattern.RawText ?? "(unmatched)";
+
+        _logger.LogDebug("Client token rejected ({Reason}) for tenant prefix {TenantId} on {Route}",
+            reason, tenantId.Length > 64 ? tenantId[..64] : tenantId, route);
+
+        if (attributable && tokenHash != null)
         {
-            _logger.LogWarning("Token validation failed: empty secret");
-            return (false, null);
+            var decision = _rejections.RecordAttributed(tenantId, tokenHash, reason);
+            switch (decision.Action)
+            {
+                case RejectionLogAction.First when decision.Folded:
+                    _logger.LogWarning(
+                        "Game clients of tenant {TenantId} send more than {Cap} distinct rejected tokens ({Reason}, on {Route}); further ones are counted together, summarized every {SummaryMinutes} min",
+                        tenantId, _rejections.Options.PerTenantCap, reason, route, _rejections.Options.SummaryInterval.TotalMinutes);
+                    break;
+                case RejectionLogAction.First:
+                    _logger.LogWarning(
+                        "Game client of tenant {TenantId} sends a rejected token ({Reason}) on {Route} - the client needs its member's current Mapper URL; repeats are summarized every {SummaryMinutes} min",
+                        tenantId, reason, route, _rejections.Options.SummaryInterval.TotalMinutes);
+                    break;
+                case RejectionLogAction.Summary:
+                    _logger.LogWarning(
+                        "Game client of tenant {TenantId} still sends a rejected token ({Reason}): {Count} requests since {Since:o}, last on {Route}",
+                        tenantId, reason, decision.Count, decision.Since, route);
+                    break;
+            }
         }
-
-        // Hash the secret portion
-        var hash = ComputeSha256(secret);
-
-        // Look up token by hash and verify tenant ID matches
-        // IMPORTANT: IgnoreQueryFilters() is required because we're establishing tenant context
-        // The global query filter would block this query since tenant context doesn't exist yet
-        var token = await db.Tokens
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .FirstOrDefaultAsync(t => t.TokenHash == hash && t.TenantId == tenantId);
-
-        if (token == null)
+        else
         {
-            _logger.LogWarning("Token validation failed: no matching token found for tenant {TenantId}", tenantId);
-            return (false, null);
+            var decision = _rejections.RecordUnattributed(reason);
+            if (decision.Action != RejectionLogAction.None)
+            {
+                _logger.LogWarning(
+                    "{Count} game-client request(s) rejected ({Reason}) since {Since:o}, last on {Route} (not attributed to a tenant)",
+                    decision.Count, reason, decision.Since, route);
+            }
         }
-
-        // Check if token is expired
-        if (token.ExpiresAt.HasValue && token.ExpiresAt.Value < DateTime.UtcNow)
-        {
-            _logger.LogWarning("Token validation failed: token expired for tenant {TenantId}", tenantId);
-            return (false, null);
-        }
-
-        // Check if tenant is active
-        // IMPORTANT: IgnoreQueryFilters() not strictly needed for Tenants table, but added for consistency
-        var tenant = await db.Tenants
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .FirstOrDefaultAsync(t => t.Id == tenantId);
-
-        if (tenant == null || !tenant.IsActive)
-        {
-            _logger.LogWarning("Token validation failed: tenant {TenantId} is inactive or does not exist", tenantId);
-            return (false, null);
-        }
-
-        // Note: LastUsedAt update is handled by existing ClientTokenHelpers.HasUploadAsync
-        // This middleware only validates tenant context
-
-        return (true, tenantId);
     }
 
-    /// <summary>
-    /// Computes SHA-256 hash of a string
-    /// </summary>
-    private static string ComputeSha256(string input)
+    /// <summary>A fixed set: never derive a tag value from the request (attacker-controlled cardinality).</summary>
+    private static string MetricTagValue(ClientTokenRejectionReason reason) => reason switch
     {
-        var bytes = Encoding.UTF8.GetBytes(input);
-        var hash = SHA256.HashData(bytes);
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
+        ClientTokenRejectionReason.MalformedToken => "malformed",
+        ClientTokenRejectionReason.EmptySecret => "empty_secret",
+        ClientTokenRejectionReason.NotFound => "not_found",
+        ClientTokenRejectionReason.Expired => "expired",
+        ClientTokenRejectionReason.TenantInactive => "tenant_inactive",
+        _ => "other"
+    };
 }

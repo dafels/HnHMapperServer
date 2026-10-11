@@ -1,8 +1,10 @@
 namespace HnHMapperServer.Web.Services;
 
 /// <summary>
-/// Singleton service that tracks SignalR circuit connection state.
-/// Allows components to react to disconnects/reconnects.
+/// Per-circuit (scoped) record of whether the circuit's SignalR connection is up, kept by
+/// ReconnectionCircuitHandler. The framework runs the circuit handlers before it disposes components, so during
+/// circuit teardown IsConnected is already false: never start JS interop while it is false (the call cannot be
+/// delivered and is not replayed after a reconnect). Components also subscribe to OnDown/OnUp to pause work.
 /// </summary>
 public class ReconnectionState
 {

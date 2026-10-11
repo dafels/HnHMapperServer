@@ -10,7 +10,7 @@ namespace HnHMapperServer.Services.Services;
 /// <summary>
 /// One-time repair of every tenant's canonical food values.
 ///
-/// Until 2026-08-26 the bundled wiki dump outranked the game client when a food row was
+/// Previously the bundled wiki dump outranked the game client when a food row was
 /// created, so most foods carried wiki numbers even in tenants whose entire catalog came
 /// from client uploads — the client's real values went to FoodVariants and nothing ever
 /// promoted them. New uploads fix a food when it is next reported, but a food nobody

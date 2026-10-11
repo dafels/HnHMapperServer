@@ -170,36 +170,28 @@ export async function initializeMap(mapElementId, dotnetReference) {
     mapHasInitialView = false;
     currentMapId = 0;
 
-    // Ensure DOM element is ready before Leaflet touches it
-    // Return a promise that resolves after requestAnimationFrame
-    await new Promise(resolve => {
-        requestAnimationFrame(() => {
-            try {
-                console.log('[Leaflet] Creating Leaflet map instance...');
+    // Create the map synchronously. Blazor calls this after render, so the element exists; the old
+    // requestAnimationFrame wait never ran in a hidden tab (browsers pause rAF there), which left the
+    // interop call pending until the 2-minute timeout and the map dead. A Leaflet error now rejects
+    // this call and reaches .NET as a JSException.
+    console.log('[Leaflet] Creating Leaflet map instance...');
 
-                // Create map with smooth animations enabled for better visual experience
-                mapInstance = L.map(mapElementId, {
-                    minZoom: HnHMinZoom,
-                    maxZoom: HnHMaxZoom,
-                    crs: HnHCRS,
-                    attributionControl: false,
-                    inertia: true,              // Enable momentum scrolling for smooth panning
-                    inertiaDeceleration: 2000,  // Smooth deceleration
-                    inertiaMaxSpeed: 1500,      // Cap max speed for control
-                    zoomAnimation: true,        // Enable smooth zoom transitions
-                    fadeAnimation: true,        // Smooth tile fade-in
-                    zoomAnimationThreshold: 4,  // Disable animation for large zoom jumps
-                    markerZoomAnimation: false  // Disabled for performance (no marker animations during zoom)
-                });
-
-                console.log('[Leaflet] Map instance created successfully');
-                resolve();
-            } catch (error) {
-                console.error('[Leaflet] CRITICAL ERROR creating map instance:', error);
-                throw error;
-            }
-        });
+    // Create map with smooth animations enabled for better visual experience
+    mapInstance = L.map(mapElementId, {
+        minZoom: HnHMinZoom,
+        maxZoom: HnHMaxZoom,
+        crs: HnHCRS,
+        attributionControl: false,
+        inertia: true,              // Enable momentum scrolling for smooth panning
+        inertiaDeceleration: 2000,  // Smooth deceleration
+        inertiaMaxSpeed: 1500,      // Cap max speed for control
+        zoomAnimation: true,        // Enable smooth zoom transitions
+        fadeAnimation: true,        // Smooth tile fade-in
+        zoomAnimationThreshold: 4,  // Disable animation for large zoom jumps
+        markerZoomAnimation: false  // Disabled for performance (no marker animations during zoom)
     });
+
+    console.log('[Leaflet] Map instance created successfully');
 
     // Main tile layer using 400x400 WebP tiles for better performance
     // - 16x fewer HTTP requests (400x400 tiles contain 4x4 original 100x100 tiles)
@@ -492,9 +484,14 @@ export async function initializeMap(mapElementId, dotnetReference) {
     //   With large bursts this creates long main-thread tasks and can freeze the UI for tens of seconds.
     // - By exposing `applyTileUpdates` we allow the SSE module to update Leaflet directly (JS->JS)
     //   and we batch/time-slice the work across frames to keep the UI responsive.
+    // - `setMapRevision` is the same kind of bridge for SSE mapRevision events: it used to go
+    //   JS -> .NET -> JS (one SignalR round trip + a re-render per event, ~97% of them duplicates).
+    //   The bridge (not a second import) is how map-updates.js reaches THIS module instance: a
+    //   versioned module imported twice would be two instances with two revision stores.
     try {
         window.hnhMapper = window.hnhMapper || {};
         window.hnhMapper.applyTileUpdates = applyTileUpdates;
+        window.hnhMapper.setMapRevision = setMapRevision;
     } catch { /* ignore - non-browser/unsupported environment */ }
 
     // Don't set initial view here - Blazor will call setView after changeMap
@@ -1117,14 +1114,67 @@ export function refreshTile(mapId, x, y, z, timestamp) {
     return true;
 }
 
-// Update map revision for cache busting
-export function setMapRevision(mapId, revision) {
-    if (mainLayer) {
-        mainLayer.setMapRevision(mapId, revision);
+// -----------------------------------------------------------------------------
+// Map revisions (tile cache busting: the `?v=` of every tile URL)
+// -----------------------------------------------------------------------------
+//
+// The browser owns them. map-updates.js hands every SSE mapRevision straight to setMapRevision through
+// `window.hnhMapper.setMapRevision` (no .NET hop); .NET only seeds the store, once per batch
+// (seedMapRevisions: page init, a newly created map, a map-list refetch), plus a deduped [JSInvokable]
+// fallback for pages whose SSE module predates the bridge.
+//
+// The store is SmartTileLayer.prototype.mapRevisions: server-global data like `cache`, deliberately kept
+// across initializeMap re-entry (SPA navigation) - it is not flow state. The refresh scheduling it drives
+// is per layer instance and dies with the layer.
+
+/**
+ * Apply a live revision. Exact duplicates are dropped (every SSE connect replays all of the tenant's
+ * revisions). Any other value is applied as-is - also a lower one: a revision written out of band (the
+ * public-map import) can legitimately move it, and refusing it could freeze later bumps.
+ *
+ * `changedCells` ([[x, y], ...] WebP zoom-0 cells, sent by ZoomQ bumps only) narrows the refresh to
+ * those cells and their ancestors - but only when this revision follows the one held by exactly 1
+ * (MapRevisionCache increments by 1): any other step means a bump was missed (reconnect gap, dropped
+ * event, another writer), so everything in view is refreshed, as for bumps without cells.
+ * @returns {boolean} true if the revision changed
+ */
+export function setMapRevision(mapId, revision, changedCells = null) {
+    if (!Number.isInteger(mapId) || mapId <= 0 || !Number.isInteger(revision)) return false;
+
+    const revisions = SmartTileLayer.prototype.mapRevisions;
+    const previous = revisions[mapId];
+    if (previous === revision) return false;
+    revisions[mapId] = revision;
+
+    const cells = Array.isArray(changedCells) && previous !== undefined && revision === previous + 1
+        ? changedCells
+        : null;
+    mainLayer?.scheduleRevisionRefresh(mapId, cells);
+    overlayLayer?.scheduleRevisionRefresh(mapId, cells);
+    return true;
+}
+
+/**
+ * Seed revisions from a GET snapshot ({ "mapId": revision, ... } - JSON object keys are strings).
+ * A value is applied only when the map is unknown or the snapshot is NEWER: a snapshot fetched before a
+ * live bump must never roll the live value back, while a stale value kept across SPA re-entry is still
+ * brought forward.
+ * @returns {number} how many maps changed
+ */
+export function seedMapRevisions(revisionsById) {
+    const revisions = SmartTileLayer.prototype.mapRevisions;
+    let changed = 0;
+    for (const [key, value] of Object.entries(revisionsById || {})) {
+        const mapId = Number(key);
+        const revision = Number(value);
+        if (!Number.isInteger(mapId) || !Number.isInteger(revision)) continue;
+
+        const current = revisions[mapId];
+        if ((current === undefined || revision > current) && setMapRevision(mapId, revision)) {
+            changed++;
+        }
     }
-    if (overlayLayer) {
-        overlayLayer.setMapRevision(mapId, revision);
-    }
+    return changed;
 }
 
 // Character Management - Delegate to CharacterManager

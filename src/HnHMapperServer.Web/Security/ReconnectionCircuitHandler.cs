@@ -33,7 +33,7 @@ public class ReconnectionCircuitHandler : CircuitHandler
     /// </summary>
     public override Task OnConnectionDownAsync(Circuit circuit, CancellationToken cancellationToken)
     {
-        _logger.LogWarning("Circuit {CircuitId} connection down - client disconnected or connection lost", circuit.Id);
+        _logger.LogInformation("Circuit {CircuitId} connection down - client disconnected or connection lost", circuit.Id);
         _state.MarkDisconnected();
         return Task.CompletedTask;
     }
@@ -53,7 +53,7 @@ public class ReconnectionCircuitHandler : CircuitHandler
     /// </summary>
     public override Task OnCircuitClosedAsync(Circuit circuit, CancellationToken cancellationToken)
     {
-        _logger.LogWarning("Circuit {CircuitId} closed permanently", circuit.Id);
+        _logger.LogInformation("Circuit {CircuitId} closed permanently", circuit.Id);
         _state.MarkDisconnected();
         return Task.CompletedTask;
     }

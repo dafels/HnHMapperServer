@@ -3,6 +3,7 @@
 @using MudBlazor
 @inject IHttpClientFactory HttpClientFactory
 @inject ISnackbar Snackbar
+@inject ILogger<CreateTimerDialog> Logger
 
 <MudDialog>
     <DialogContent>
@@ -357,7 +358,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error saving timer: {ex.Message}");
+            Logger.Log(UiLog.FailureLevel(ex), ex, "Error saving timer");
             Snackbar.Add($"Failed to save timer: {ex.Message}", Severity.Error);
         }
         finally

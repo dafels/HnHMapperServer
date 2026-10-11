@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using HnHMapperServer.Core.Enums;
 using HnHMapperServer.Core.Extensions;
 using HnHMapperServer.Infrastructure.Data;
@@ -50,7 +49,7 @@ public class TokenService : ITokenService
 
         // Hash only the secret portion for storage (SHA-256)
         // This allows validating the secret while preventing token modification attacks
-        var tokenHash = ComputeSha256(secret);
+        var tokenHash = ClientToken.Hash(secret);
 
         // Create token entity
         var entity = new TokenEntity
@@ -99,7 +98,7 @@ public class TokenService : ITokenService
             var secret = parts[1];
 
             // Hash only the secret portion (consistent with storage)
-            var tokenHash = ComputeSha256(secret);
+            var tokenHash = ClientToken.Hash(secret);
 
             // Query database for token
             var token = await _db.Tokens
@@ -239,14 +238,5 @@ public class TokenService : ITokenService
         _logger.LogInformation(
             "Token revoked: {TokenId}, tenant {TenantId}, by user {UserId}",
             tokenId, token.TenantId, userId);
-    }
-
-    /// <summary>
-    /// Computes SHA-256 hash of a string
-    /// </summary>
-    private static string ComputeSha256(string value)
-    {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
-        return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 }

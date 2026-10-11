@@ -1,0 +1,8 @@
+# HnH Mapper: a private, login-gated map server.
+# Only the superadmin-published public map pages (/public/{slug}) may be fetched, e.g. for chat
+# link previews. Everything below a slug (tiles, info, markers) and every other path is off limits.
+# Longest match wins (RFC 9309): "/public/*/" beats "/public/", which beats "/".
+User-agent: *
+Allow: /public/
+Disallow: /public/*/
+Disallow: /

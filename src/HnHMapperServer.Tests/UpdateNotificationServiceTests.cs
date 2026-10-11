@@ -91,4 +91,32 @@ public class UpdateNotificationServiceTests
 
         Assert.Equal(0, svc.ActiveSubscriptionCount);
     }
+
+    [Fact]
+    public void NotifyMapRevision_WithCells_PassesThemThrough()
+    {
+        var svc = new UpdateNotificationService();
+        using var sub = svc.SubscribeToMapRevisions();
+
+        svc.NotifyMapRevision(5, 7, new[] { new[] { 1, -2 } });
+
+        Assert.True(sub.Reader.TryRead(out var revision));
+        Assert.Equal(5, revision.MapId);
+        Assert.Equal(7, revision.Revision);
+        Assert.Equal(new[] { new[] { 1, -2 } }, revision.Cells);
+    }
+
+    [Fact]
+    public void NotifyMapRevision_TwoArgumentOverload_HasNoCells()
+    {
+        // Admin wipes, set-coords, imports, gap-fill: clients must refresh the whole map
+        var svc = new UpdateNotificationService();
+        using var sub = svc.SubscribeToMapRevisions();
+
+        svc.NotifyMapRevision(5, 8);
+
+        Assert.True(sub.Reader.TryRead(out var revision));
+        Assert.Equal(8, revision.Revision);
+        Assert.Null(revision.Cells);
+    }
 }

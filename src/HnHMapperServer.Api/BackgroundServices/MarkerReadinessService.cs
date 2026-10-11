@@ -35,7 +35,7 @@ public class MarkerReadinessService : BackgroundService
             var sw = Stopwatch.StartNew();
             try
             {
-                _logger.LogInformation("Marker readiness job started");
+                _logger.LogDebug("Marker readiness job started");
 
                 using var scope = _scopeFactory.CreateScope();
                 var markerService = scope.ServiceProvider.GetRequiredService<IMarkerService>();
@@ -51,7 +51,7 @@ public class MarkerReadinessService : BackgroundService
                 }
 
                 sw.Stop();
-                _logger.LogInformation("Marker readiness job completed in {ElapsedMs}ms", sw.ElapsedMilliseconds);
+                _logger.LogDebug("Marker readiness job completed in {ElapsedMs}ms", sw.ElapsedMilliseconds);
 
                 await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
             }

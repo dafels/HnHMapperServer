@@ -3,33 +3,43 @@ using Microsoft.JSInterop;
 namespace HnHMapperServer.Web.Services;
 
 /// <summary>
-/// Provides safe wrappers around JS Interop that swallow benign exceptions during SignalR reconnects.
-/// Prevents circuit crashes when Blazor Server briefly loses connection ("rejoining server").
+/// JS interop wrappers that never throw. While the circuit is disconnected
+/// (<see cref="ReconnectionState.IsConnected"/> false) they do not call JS at all: a call sent into a dead
+/// connection is never delivered and Blazor does not replay it after a reconnect, so it could only end as
+/// a TaskCanceledException after JSInteropDefaultCallTimeout. Failures are logged and turned into
+/// false/default; they are never reported through another JS call (that would be a second call into the
+/// same broken connection).
 /// </summary>
 public class SafeJsInterop
 {
     private readonly ILogger<SafeJsInterop> _logger;
     private readonly IJSRuntime _jsRuntime;
+    private readonly ReconnectionState _connection;
 
-    public SafeJsInterop(ILogger<SafeJsInterop> logger, IJSRuntime jsRuntime)
+    public SafeJsInterop(ILogger<SafeJsInterop> logger, IJSRuntime jsRuntime, ReconnectionState connection)
     {
         _logger = logger;
         _jsRuntime = jsRuntime;
+        _connection = connection;
     }
 
     /// <summary>
-    /// Safely invoke a void JS method, swallowing benign disconnect exceptions.
+    /// Safely invoke a void JS method.
     /// </summary>
     /// <param name="module">JS module reference</param>
     /// <param name="identifier">JS function name</param>
     /// <param name="args">Function arguments</param>
-    /// <returns>True if successful, false if swallowed exception</returns>
+    /// <returns>True if the call completed; false if it was skipped or failed</returns>
     public async Task<bool> InvokeVoidSafeAsync(IJSObjectReference? module, string identifier, params object?[]? args)
     {
         if (module == null)
         {
-            try { await _jsRuntime.InvokeVoidAsync("console.error", $"[SafeJsInterop] ERROR: module is null for {identifier}"); } catch { }
             _logger.LogDebug("InvokeVoidSafe: module is null for {Identifier}", identifier);
+            return false;
+        }
+
+        if (!CanCallJs("InvokeVoidSafe", identifier))
+        {
             return false;
         }
 
@@ -38,40 +48,21 @@ public class SafeJsInterop
             await module.InvokeVoidAsync(identifier, args);
             return true;
         }
-        catch (TaskCanceledException ex)
-        {
-            try { await _jsRuntime.InvokeVoidAsync("console.warn", $"[SafeJsInterop] {identifier} - TaskCanceledException"); } catch { }
-            _logger.LogDebug("InvokeVoidSafe: TaskCanceledException for {Identifier} (reconnecting)", identifier);
-            return false;
-        }
-        catch (JSDisconnectedException ex)
-        {
-            try { await _jsRuntime.InvokeVoidAsync("console.warn", $"[SafeJsInterop] {identifier} - JSDisconnectedException"); } catch { }
-            _logger.LogDebug("InvokeVoidSafe: JSDisconnectedException for {Identifier} (circuit lost)", identifier);
-            return false;
-        }
-        catch (ObjectDisposedException ex)
-        {
-            try { await _jsRuntime.InvokeVoidAsync("console.warn", $"[SafeJsInterop] {identifier} - ObjectDisposedException"); } catch { }
-            _logger.LogDebug("InvokeVoidSafe: ObjectDisposedException for {Identifier} (disposed)", identifier);
-            return false;
-        }
         catch (Exception ex)
         {
-            try { await _jsRuntime.InvokeVoidAsync("console.error", $"[SafeJsInterop] {identifier} - EXCEPTION: {ex.GetType().Name}: {ex.Message}\nStack: {ex.StackTrace}"); } catch { }
-            _logger.LogWarning(ex, "InvokeVoidSafe: Unexpected exception for {Identifier}", identifier);
+            LogFailure(ex, "InvokeVoidSafe", identifier);
             return false;
         }
     }
 
     /// <summary>
-    /// Safely invoke a JS method that returns a value, swallowing benign disconnect exceptions.
+    /// Safely invoke a JS method that returns a value.
     /// </summary>
     /// <typeparam name="T">Return type</typeparam>
     /// <param name="module">JS module reference</param>
     /// <param name="identifier">JS function name</param>
     /// <param name="args">Function arguments</param>
-    /// <returns>Result value or default(T) if exception swallowed</returns>
+    /// <returns>Result value, or default(T) if the call was skipped or failed</returns>
     public async Task<T?> InvokeSafeAsync<T>(IJSObjectReference? module, string identifier, params object?[]? args)
     {
         if (module == null)
@@ -80,32 +71,18 @@ public class SafeJsInterop
             return default;
         }
 
+        if (!CanCallJs("InvokeSafe", identifier))
+        {
+            return default;
+        }
+
         try
         {
             return await module.InvokeAsync<T>(identifier, args);
         }
-        catch (TaskCanceledException)
-        {
-            // Blazor was reconnecting; circuit was cancelled
-            _logger.LogDebug("InvokeSafe: TaskCanceledException for {Identifier} (reconnecting)", identifier);
-            return default;
-        }
-        catch (JSDisconnectedException)
-        {
-            // JS runtime disconnected (circuit lost)
-            _logger.LogDebug("InvokeSafe: JSDisconnectedException for {Identifier} (circuit lost)", identifier);
-            return default;
-        }
-        catch (ObjectDisposedException)
-        {
-            // Component was disposed while operation was in progress
-            _logger.LogDebug("InvokeSafe: ObjectDisposedException for {Identifier} (disposed)", identifier);
-            return default;
-        }
         catch (Exception ex)
         {
-            // Unexpected exception - log as warning
-            _logger.LogWarning(ex, "InvokeSafe: Unexpected exception for {Identifier}", identifier);
+            LogFailure(ex, "InvokeSafe", identifier);
             return default;
         }
     }
@@ -114,31 +91,21 @@ public class SafeJsInterop
     /// Safely get a value from localStorage.
     /// </summary>
     /// <param name="key">localStorage key</param>
-    /// <returns>Value or null if not found or exception swallowed</returns>
+    /// <returns>Value, or null if not found, skipped or failed</returns>
     public async Task<string?> GetLocalStorageAsync(string key)
     {
+        if (!CanCallJs("GetLocalStorage", key))
+        {
+            return null;
+        }
+
         try
         {
             return await _jsRuntime.InvokeAsync<string?>("localStorage.getItem", key);
         }
-        catch (TaskCanceledException)
-        {
-            _logger.LogDebug("GetLocalStorage: TaskCanceledException for {Key} (reconnecting)", key);
-            return null;
-        }
-        catch (JSDisconnectedException)
-        {
-            _logger.LogDebug("GetLocalStorage: JSDisconnectedException for {Key} (circuit lost)", key);
-            return null;
-        }
-        catch (ObjectDisposedException)
-        {
-            _logger.LogDebug("GetLocalStorage: ObjectDisposedException for {Key} (disposed)", key);
-            return null;
-        }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "GetLocalStorage: Unexpected exception for {Key}", key);
+            LogFailure(ex, "GetLocalStorage", key);
             return null;
         }
     }
@@ -148,34 +115,53 @@ public class SafeJsInterop
     /// </summary>
     /// <param name="key">localStorage key</param>
     /// <param name="value">Value to store</param>
-    /// <returns>True if successful, false if exception swallowed</returns>
+    /// <returns>True if stored; false if skipped or failed</returns>
     public async Task<bool> SetLocalStorageAsync(string key, string value)
     {
+        if (!CanCallJs("SetLocalStorage", key))
+        {
+            return false;
+        }
+
         try
         {
             await _jsRuntime.InvokeVoidAsync("localStorage.setItem", key, value);
             return true;
         }
-        catch (TaskCanceledException)
-        {
-            _logger.LogDebug("SetLocalStorage: TaskCanceledException for {Key} (reconnecting)", key);
-            return false;
-        }
-        catch (JSDisconnectedException)
-        {
-            _logger.LogDebug("SetLocalStorage: JSDisconnectedException for {Key} (circuit lost)", key);
-            return false;
-        }
-        catch (ObjectDisposedException)
-        {
-            _logger.LogDebug("SetLocalStorage: ObjectDisposedException for {Key} (disposed)", key);
-            return false;
-        }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "SetLocalStorage: Unexpected exception for {Key}", key);
+            LogFailure(ex, "SetLocalStorage", key);
             return false;
         }
     }
-}
 
+    private bool CanCallJs(string operation, string target)
+    {
+        if (_connection.IsConnected)
+        {
+            return true;
+        }
+
+        _logger.LogDebug("{Operation}: skipped {Target} - circuit not connected", operation, target);
+        return false;
+    }
+
+    private void LogFailure(Exception ex, string operation, string target)
+    {
+        switch (ex)
+        {
+            case OperationCanceledException when _connection.IsConnected:
+                // No answer within JSInteropDefaultCallTimeout although the circuit is up: a hung JS call,
+                // or one lost with a connection that dropped and came back meanwhile.
+                _logger.LogWarning(ex, "{Operation}: {Target} timed out while the circuit is connected (JS hang or call lost across a reconnect)",
+                    operation, target);
+                break;
+            case OperationCanceledException or JSDisconnectedException or ObjectDisposedException:
+                _logger.LogDebug("{Operation}: {Target} abandoned ({ExceptionType})", operation, target, ex.GetType().Name);
+                break;
+            default:
+                _logger.LogWarning(ex, "{Operation}: unexpected exception for {Target}", operation, target);
+                break;
+        }
+    }
+}

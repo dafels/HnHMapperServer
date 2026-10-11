@@ -4,7 +4,7 @@ using HnHMapperServer.Services.Services;
 namespace HnHMapperServer.Tests;
 
 /// <summary>
-/// Pure unit tests for the Merge-mode .hmap decision engine. Pins the 2026-08 incident fixes:
+/// Pure unit tests for the Merge-mode .hmap decision engine. Pins the merge-safety fixes:
 /// per-(map, offset) group voting (a segment can no longer merge into map B using map A's frame),
 /// the dominant-segment minimum-match floor, the pre-plant conflict scan, sentinel GridId==0
 /// exclusion, and preservation of the legacy proximity/cave checks for secondary segments.
@@ -77,7 +77,7 @@ public class HmapMergePlannerTests
     [Fact]
     public void Compute_VotesPerMapAndOffsetGroup_WinnerDefinesTargetAndOffsetTogether()
     {
-        // D6 regression: the old code voted the offset across ALL maps but took the target map
+        // Regression: the old code voted the offset across ALL maps but took the target map
         // from matches.First(). Map-2 matches are listed FIRST in the file order here; the
         // winning group (6 agreeing matches on map 1) must define both target AND offset.
         var segment = Seg(1,

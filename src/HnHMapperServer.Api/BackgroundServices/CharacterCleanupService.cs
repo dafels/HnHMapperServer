@@ -35,7 +35,7 @@ public class CharacterCleanupService : BackgroundService
             var sw = Stopwatch.StartNew();
             try
             {
-                _logger.LogInformation("Character cleanup job started");
+                _logger.LogDebug("Character cleanup job started");
 
                 using var scope = _scopeFactory.CreateScope();
                 var characterService = scope.ServiceProvider.GetRequiredService<ICharacterService>();
@@ -51,7 +51,7 @@ public class CharacterCleanupService : BackgroundService
                 }
 
                 sw.Stop();
-                _logger.LogInformation("Character cleanup job completed in {ElapsedMs}ms", sw.ElapsedMilliseconds);
+                _logger.LogDebug("Character cleanup job completed in {ElapsedMs}ms", sw.ElapsedMilliseconds);
 
                 await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
             }

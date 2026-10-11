@@ -191,16 +191,21 @@ public class PublicTileCacheService
             // Evict in one pass with headroom (down to ~90% of the target) so a busy map
             // doesn't re-sort the whole cache on every single tile request.
             var goal = (long)(targetBytes * 0.9);
-            foreach (var (key, entry) in _tileCache.OrderBy(kv => Volatile.Read(ref kv.Value.LastAccessTicks)))
+            // Sort a ToArray() snapshot, never the live dictionary: Store and InvalidateSlug run
+            // outside this gate, and LINQ over a ConcurrentDictionary sizes its buffer from Count
+            // and then calls CopyTo — a concurrent add or remove in between throws (see
+            // NegativeTileCache). Remove only the snapshotted entry, so a tile re-stored since the
+            // snapshot is not evicted with the old one's byte count.
+            foreach (var (key, entry) in _tileCache.ToArray().OrderBy(kv => Volatile.Read(ref kv.Value.LastAccessTicks)))
             {
                 if (Volatile.Read(ref _bytes) <= goal)
                 {
                     break;
                 }
 
-                if (_tileCache.TryRemove(key, out var removed))
+                if (_tileCache.TryRemove(KeyValuePair.Create(key, entry)))
                 {
-                    Interlocked.Add(ref _bytes, -removed.Data.LongLength);
+                    Interlocked.Add(ref _bytes, -entry.Data.LongLength);
                 }
             }
 

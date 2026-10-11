@@ -12,7 +12,7 @@
 <PageTitle>Map Viewer</PageTitle>
 
 <div class="map-page map-view">
-    @if (!hasMapPermission)
+    @if (permissionResolved && !hasMapPermission)
     {
         <div class="map-loading">
             <MudIcon Icon="@Icons.Material.Filled.Lock" Size="Size.Large" Color="Color.Warning" Class="mb-4" />
@@ -21,6 +21,16 @@
             <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">Contact an administrator to grant you Map access.</MudText>
             <MudProgressCircular Color="Color.Primary" Indeterminate="true" Size="Size.Small" />
             <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mt-2">Checking for permission updates...</MudText>
+        </div>
+    }
+    else if (loadFailedMessage != null)
+    {
+        @* Not a toast: the tab may be hidden while this loads, and a toast's dwell timer runs on the server *@
+        <div class="map-loading">
+            <MudIcon Icon="@Icons.Material.Filled.ErrorOutline" Size="Size.Large" Color="Color.Error" Class="mb-4" />
+            <MudText Typo="Typo.h5" Class="mb-2">The map failed to load</MudText>
+            <MudText Typo="Typo.body2" Class="mb-4">@loadFailedMessage</MudText>
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Refresh" OnClick="ReloadPage">Reload</MudButton>
         </div>
     }
     else if (!isLoaded)
@@ -113,13 +123,15 @@
                     </MudChip>
                 }
 
-                <!-- Polling Mode Indicator (floating) - shown when SSE fails and polling fallback is active -->
-                @if (connectionMode == "polling")
+                <!-- Live-updates indicator (floating) - shown while map-updates.js keeps failing to (re)connect
+                     its stream; it retries on its own and clears this once a healthy stream is back -->
+                @if (liveUpdatesReconnecting)
                 {
                     <MudChip T="string" Color="Color.Warning"
                              Icon="@Icons.Material.Filled.Sync"
-                             Style="@GetPollingIndicatorStyle()">
-                        Polling Mode
+                             Style="@GetLiveUpdatesIndicatorStyle()"
+                             title="Players, markers and new tiles stop updating until the connection is back. Retrying automatically.">
+                        Live updates reconnecting…
                     </MudChip>
                 }
 

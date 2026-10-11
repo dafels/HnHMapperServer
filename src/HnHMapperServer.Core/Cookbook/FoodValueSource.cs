@@ -5,10 +5,9 @@ namespace HnHMapperServer.Core.Cookbook;
 ///
 /// The game client is the source of truth: it reports what the running world actually
 /// gives, while the ringofbrodgar wiki is community-maintained and is not re-checked
-/// every world — its numbers can be several worlds old (measured: 553 of 568 wiki-sourced
-/// foods disagreed with the values the same tenant already had on file). Wiki data is
-/// therefore only a last resort for values, and stays authoritative for descriptive
-/// fields (recipe text, cooking station, satiation groups, page URL).
+/// every world — its numbers can be several worlds old and often disagree with what clients
+/// report. Wiki data is therefore only a last resort for values, and stays authoritative for
+/// descriptive fields (recipe text, cooking station, satiation groups, page URL).
 /// </summary>
 public static class FoodValueSource
 {

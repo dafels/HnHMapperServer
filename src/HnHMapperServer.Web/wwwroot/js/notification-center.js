@@ -161,8 +161,9 @@ window.notificationCenter = {
         if (Notification.permission === 'granted') {
             const options = {
                 body: notification.message,
-                icon: '/favicon.ico',
-                badge: '/favicon.ico',
+                // The PNG favicon is the only one that ships (there is no /favicon.ico).
+                icon: '/favicon.png',
+                badge: '/favicon.png',
                 tag: `notification-${notification.id}`,
                 requireInteraction: notification.priority === 'High',
                 silent: this.SILENT_TYPES.includes(notification.type)

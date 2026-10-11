@@ -51,8 +51,8 @@ COPY --from=build /app/publish .
 # Copy Web static assets (wwwroot) into the API image so the icon catalog can scan them
 COPY --from=build /src/src/HnHMapperServer.Web/wwwroot /app/wwwroot
 
-# Configure ASP.NET Core to listen on port 8080 (non-privileged port)
-ENV ASPNETCORE_URLS=http://+:8080
+# Port 8080 comes from the aspnet base image's ASPNETCORE_HTTP_PORTS=8080. Do not set ASPNETCORE_URLS:
+# with both set the host logs an "Overriding HTTP_PORTS" warning at every start.
 
 # Set the data storage path (will be mounted as a volume in production)
 ENV GridStorage=/data

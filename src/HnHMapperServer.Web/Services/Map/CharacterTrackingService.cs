@@ -84,7 +84,7 @@ public class CharacterTrackingService
     /// </summary>
     public void HandleCharactersSnapshot(List<CharacterModel> characters)
     {
-        _logger.LogInformation("CharactersSnapshot received with {Count} characters", characters.Count);
+        _logger.LogDebug("CharactersSnapshot received with {Count} characters", characters.Count);
 
         if (characters.Count > 0)
         {

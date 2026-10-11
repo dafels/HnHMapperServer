@@ -14,7 +14,7 @@ using ITenantContextAccessor = HnHMapperServer.Core.Interfaces.ITenantContextAcc
 namespace HnHMapperServer.Tests;
 
 /// <summary>
-/// Guard-rail tests for ProcessGridUpdateAsync hardening (the 2026-08 map-corruption incident):
+/// Guard-rail tests for ProcessGridUpdateAsync hardening against map corruption:
 /// placeholder grid ids ("0"/empty) are holes and never persist or anchor; matrices whose known
 /// grids disagree on the implied offset are rejected with zero writes; inserts refuse cells
 /// already owned by a different grid id; merges (irreversible) require two agreeing witnesses
@@ -32,6 +32,7 @@ public class GridServiceHardeningTests : IDisposable
     private readonly ITileRepository _tileRepository;
     private readonly IConfigRepository _configRepository;
     private readonly Mock<IUpdateNotificationService> _mockNotificationService;
+    private readonly Mock<ILogger<GridService>> _gridLogger = new();
 
     private const string TestTenantId = "default-tenant-1";
 
@@ -75,7 +76,6 @@ public class GridServiceHardeningTests : IDisposable
         _configRepository = new ConfigRepository(_dbContext, mockTenantContext.Object);
 
         var tileLogger = new Mock<ILogger<TileService>>();
-        var gridLogger = new Mock<ILogger<GridService>>();
         _mockNotificationService = new Mock<IUpdateNotificationService>();
         var mockQuotaService = new Mock<IStorageQuotaService>();
         var mockMapNameService = new Mock<IMapNameService>();
@@ -101,7 +101,10 @@ public class GridServiceHardeningTests : IDisposable
             mockPendingMarkerService.Object,
             mockTenantContext.Object,
             new ZoomTileQueueService(new Mock<ILogger<ZoomTileQueueService>>().Object),
-            gridLogger.Object);
+            new TenantFilePathService(),
+            new MergeRejectionCache(),
+            new TileCacheService(Mock.Of<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), Mock.Of<ILogger<TileCacheService>>()),
+            _gridLogger.Object);
 
         _dbContext.Database.EnsureCreated();
     }
@@ -421,6 +424,121 @@ public class GridServiceHardeningTests : IDisposable
         Assert.NotNull(b1);
         Assert.Equal(3, b1.Map);
         Assert.Equal(new Coord(90, 90), b1.Coord);
+    }
+
+    // ---------- D5: merge preflight (no double-claimed cells) ----------
+
+    [Fact]
+    public async Task ProcessGridUpdateAsync_MergeWouldDoubleClaim_RejectedBeforeAnyWrite()
+    {
+        // Both maps imply offset (-1,-1) — each internally consistent, so the offset guard passes —
+        // and the shift is (0,0): map 2's bX would be stacked onto a00's cell. This matrix mixes two
+        // coordinate frames; pre-fix u1 was planted in the target frame and bX moved onto a00.
+        await SeedMapWithGridsAsync(1, ("a00", -1, -1), ("a01", -1, 0));
+        await SeedMapWithGridsAsync(2, ("bX", -1, -1), ("b21", 1, 0), ("b22", 1, 1));
+
+        var result = await _gridService.ProcessGridUpdateAsync(
+            Matrix("a00,a01,u1", "u2,u3,u4", "u5,b21,b22"), _testGridStorage);
+
+        Assert.Empty(result.GridRequests);
+        Assert.Equal(0, result.Map);
+        Assert.Null(await _gridRepository.GetGridAsync("u1")); // would have landed on a free cell
+        Assert.Null(await _gridRepository.GetGridAsync("u5"));
+        Assert.NotNull(await _mapRepository.GetMapAsync(2));
+        var bX = await _gridRepository.GetGridAsync("bX");
+        Assert.NotNull(bX);
+        Assert.Equal(2, bX.Map);
+        Assert.Equal(new Coord(-1, -1), bX.Coord);
+        _mockNotificationService.Verify(x => x.NotifyMapMerge(
+            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<Coord>(), It.IsAny<string>()), Times.Never);
+        _mockNotificationService.Verify(x => x.NotifyMapDeleted(It.IsAny<int>()), Times.Never);
+
+        var grids = await _gridRepository.GetAllGridsAsync();
+        Assert.DoesNotContain(grids.GroupBy(g => (g.Map, g.Coord)), g => g.Count() > 1);
+    }
+
+    [Fact]
+    public async Task ProcessGridUpdateAsync_ThreeMaps_OneConflictingSource_WholeUpdateRejected()
+    {
+        // Map 2 would merge cleanly; map 3's c3 lands on t1's cell. Nothing is written at all,
+        // not even the clean merge: the matrix as a whole is frame-mixed.
+        await SeedMapWithGridsAsync(1, ("t1", 0, 0), ("t2", 0, 1));
+        await SeedMapWithGridsAsync(2, ("a1", 50, 50), ("a2", 50, 51));
+        await SeedMapWithGridsAsync(3, ("c1", 90, 90), ("c2", 90, 91), ("c3", 88, 90));
+
+        var result = await _gridService.ProcessGridUpdateAsync(
+            Matrix("t1,t2,u1", "a1,a2,u2", "c1,c2,u3"), _testGridStorage);
+
+        Assert.Empty(result.GridRequests);
+        Assert.NotNull(await _mapRepository.GetMapAsync(2));
+        Assert.NotNull(await _mapRepository.GetMapAsync(3));
+        Assert.Null(await _gridRepository.GetGridAsync("u1"));
+        var a1 = await _gridRepository.GetGridAsync("a1");
+        Assert.NotNull(a1);
+        Assert.Equal(2, a1.Map);
+        _mockNotificationService.Verify(x => x.NotifyMapMerge(
+            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<Coord>(), It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ProcessGridUpdateAsync_SourceGridLandsWhereThisMatrixInsertsANewGrid_Rejected()
+    {
+        // The double claim may also be with a grid this very update is about to plant: map 2's
+        // s3 lands on the cell where the unknown u1 would be inserted.
+        await SeedMapWithGridsAsync(1, ("t1", 0, 0), ("t2", 0, 1));
+        await SeedMapWithGridsAsync(2, ("s1", 50, 50), ("s2", 50, 51), ("s3", 49, 52));
+
+        var result = await _gridService.ProcessGridUpdateAsync(
+            Matrix("t1,t2,u1", "s1,s2,u2", "u3,u4,u5"), _testGridStorage);
+
+        Assert.Empty(result.GridRequests);
+        Assert.Null(await _gridRepository.GetGridAsync("u1"));
+        Assert.NotNull(await _mapRepository.GetMapAsync(2));
+    }
+
+    [Fact]
+    public async Task ProcessGridUpdateAsync_RepeatedDoubleClaim_RefusedFromMemory_OneWarning()
+    {
+        // A rejection changes nothing, so every client walking the area sends the same frames
+        // again. The verdict is remembered: same empty response, no second map load + warning.
+        await SeedMapWithGridsAsync(1, ("a00", -1, -1), ("a01", -1, 0));
+        await SeedMapWithGridsAsync(2, ("bX", -1, -1), ("b21", 1, 0), ("b22", 1, 1));
+
+        var first = await _gridService.ProcessGridUpdateAsync(
+            Matrix("a00,a01,u1", "u2,u3,u4", "u5,b21,b22"), _testGridStorage);
+        // The next client's matrix in the same two frames: the same merge.
+        var second = await _gridService.ProcessGridUpdateAsync(
+            Matrix("a00,a01,v1", "v2,v3,v4", "v5,b21,b22"), _testGridStorage);
+
+        Assert.Empty(first.GridRequests);
+        Assert.Empty(second.GridRequests);
+        Assert.Equal(0, second.Map);
+        Assert.Null(await _gridRepository.GetGridAsync("u1"));
+        Assert.Null(await _gridRepository.GetGridAsync("v1"));
+        Assert.Equal(2, (await _gridRepository.GetGridAsync("bX"))!.Map);
+        _gridLogger.Verify(x => x.Log(
+            LogLevel.Warning, It.IsAny<EventId>(),
+            It.Is<It.IsAnyType>((v, _) => v.ToString()!.Contains("would double-claim")),
+            It.IsAny<Exception?>(), It.IsAny<Func<It.IsAnyType, Exception?, string>>()), Times.Once);
+    }
+
+    // ---------- Unsafe grid ids ----------
+
+    [Fact]
+    public async Task ProcessGridUpdateAsync_PathLikeGridIds_AreHoles()
+    {
+        // Grid ids become pool file names (tenants/{t}/grids/{id}.png): "../2/0/0_0" would let an
+        // upload overwrite, a repair repoint to, or a map delete remove another map's file.
+        await SeedMapWithGridsAsync(1, ("k", 10, 10));
+
+        var result = await _gridService.ProcessGridUpdateAsync(
+            Matrix("../2/0/0_0,f2,~", "a\\b,k,~", "~,~,~"), _testGridStorage);
+
+        Assert.Equal(1, result.Map);
+        Assert.Null(await _gridRepository.GetGridAsync("../2/0/0_0"));
+        Assert.Null(await _gridRepository.GetGridAsync("a\\b"));
+        Assert.Equal(new Coord(9, 10), (await _gridRepository.GetGridAsync("f2"))!.Coord);
+        Assert.Equal(new[] { "f2" }, result.GridRequests.Where(id => id != "k"));
     }
 
     // ---------- Frontier regression ----------

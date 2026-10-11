@@ -15,7 +15,11 @@ public interface ILargeTileService
     /// <param name="zoom">Zoom level (0-6)</param>
     /// <param name="x">X coordinate in 400x400 tile system</param>
     /// <param name="y">Y coordinate in 400x400 tile system</param>
-    /// <returns>WebP tile bytes, or null if no source tiles exist</returns>
+    /// <returns>
+    /// WebP tile bytes, or null if no source tiles exist — also for a tile outside the pyramid
+    /// (zoom outside 0-6, or a footprint beyond int range). A file on disk that is not a complete
+    /// WebP is discarded and regenerated, never returned.
+    /// </returns>
     /// <exception cref="Exception">
     /// Generation failed (database or I/O error), already logged. Deliberately not null: callers
     /// must not cache a failure as a missing tile.
@@ -33,19 +37,30 @@ public interface ILargeTileService
     /// Force-regenerates a tile from source data, bypassing all caches.
     /// Used by ZoomTileProcessorService to regenerate tiles after uploads.
     /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The tile is outside the pyramid (zoom outside 0-6, or a footprint beyond int range).
+    /// </exception>
     Task<byte[]?> ForceRegenerateLargeTileAsync(string tenantId, int mapId, int zoom, int x, int y);
 
     /// <summary>
     /// Generates all missing large tiles for a tenant's maps.
     /// Used by startup scan for pre-generation and migration.
     /// </summary>
-    Task<int> GenerateMissingTilesAsync(string tenantId, CancellationToken ct = default);
+    /// <param name="writtenMapIds">
+    /// Receives the maps on which a file was written. Only this process's caches are evicted for
+    /// those tiles; the caller makes the change visible elsewhere (Web cache, map revision).
+    /// </param>
+    Task<int> GenerateMissingTilesAsync(string tenantId, CancellationToken ct = default, ISet<int>? writtenMapIds = null);
 
     /// <summary>
-    /// Generates missing large tiles for specific maps only.
+    /// Generates missing large tiles for specific maps only, and regenerates the existing parents
+    /// of every tile it generated (they were composed without that child). Every tile written is
+    /// evicted from this process's caches; <paramref name="writtenMapIds"/> receives the maps
+    /// touched, for the caller to evict the Web cache and bump the map revision.
     /// Used by dirty-driven background scan to avoid scanning all maps.
     /// </summary>
-    Task<int> GenerateMissingTilesForMapsAsync(string tenantId, HashSet<int> mapIds, CancellationToken ct = default);
+    Task<int> GenerateMissingTilesForMapsAsync(
+        string tenantId, HashSet<int> mapIds, CancellationToken ct = default, ISet<int>? writtenMapIds = null);
 
     /// <summary>
     /// Gets the filesystem path for a large tile (may not exist yet).

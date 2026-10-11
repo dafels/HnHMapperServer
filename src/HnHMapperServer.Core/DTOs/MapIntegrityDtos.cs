@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+using HnHMapperServer.Core.Models;
+
 namespace HnHMapperServer.Core.DTOs;
 
 /// <summary>
@@ -22,16 +25,21 @@ public class MapIntegrityReportDto
     /// <summary>Live maps whose WebP tile pyramid disagrees with their zoom-0 data.</summary>
     public List<WebpPyramidDriftDto> WebpDrift { get; set; } = new();
 
+    /// <summary>Live maps with zoom-0 tile rows whose source PNG no longer exists on disk.</summary>
+    public List<MissingTileSourcesDto> MissingTileSources { get; set; } = new();
+
     public bool IsClean => ContestedMaps.Count == 0 && PlaceholderRows.Count == 0
-        && OrphanStorage.Count == 0 && WebpDrift.Count == 0;
+        && OrphanStorage.Count == 0 && WebpDrift.Count == 0 && MissingTileSources.Count == 0;
 }
 
 /// <summary>
 /// WebP pyramid drift of one live map, measured file-by-file against the map's zoom-0 rows
 /// (the pyramid's ground truth): ghost files whose footprint holds no data anymore (they render
-/// imagery of deleted/moved terrain) and stale files older than the newest data in their
-/// footprint (they miss content added since). Either kind means the map needs a WebP rebuild.
-/// Missing zoom-0 files are informational only — on-the-fly generation heals those on view.
+/// imagery of deleted/moved terrain), stale files older than the newest data in their
+/// footprint (they miss content added since), and empty files (zero-length residue of an
+/// interrupted write). Any kind means the map needs a WebP rebuild. Missing zoom-0 files are
+/// informational only — generation heals those on view, but only where the cell's source PNGs
+/// still exist; cells whose sources are gone show under <see cref="MissingTileSourcesDto"/>.
 /// </summary>
 public class WebpPyramidDriftDto
 {
@@ -47,7 +55,16 @@ public class WebpPyramidDriftDto
     /// <summary>Files (any zoom) older than the newest zoom-0 row in their footprint.</summary>
     public int StaleFiles { get; set; }
 
-    /// <summary>Cells with zoom-0 rows but no zoom-0 WebP file (heals on view; informational).</summary>
+    /// <summary>
+    /// Files (any zoom) shorter than a WebP header — zero-length residue of interrupted writes:
+    /// served as broken images, and their parents were composed without them.
+    /// </summary>
+    public int CorruptFiles { get; set; }
+
+    /// <summary>
+    /// Cells with zoom-0 rows but no zoom-0 WebP file (informational: heals on view when the
+    /// cell's source PNGs exist; see <see cref="MissingTileSourcesDto"/> when they do not).
+    /// </summary>
     public int MissingZoom0Cells { get; set; }
 
     /// <summary>Total pyramid files checked for this map.</summary>
@@ -55,6 +72,150 @@ public class WebpPyramidDriftDto
 
     /// <summary>Up to a handful of "z{zoom} (x,y)" examples for orientation.</summary>
     public List<string> SampleDriftTiles { get; set; } = new();
+}
+
+/// <summary>
+/// Zoom-0 tile rows of one live map whose source PNG no longer exists on disk — typically a map
+/// merge that deleted an imported map's per-map directory (merges no longer do), or files lost on
+/// disk. Nothing can draw these cells (the WebP pyramid stays dark there at every zoom, and a
+/// rebuild cannot help), but each row still names the exact original path and size, so restoring
+/// the files to those paths from a backup heals them. Rows on dead maps are orphan storage, not
+/// counted here.
+/// </summary>
+public class MissingTileSourcesDto
+{
+    public string TenantId { get; set; } = string.Empty;
+    public string TenantName { get; set; } = string.Empty;
+    public int MapId { get; set; }
+    public string MapName { get; set; } = string.Empty;
+
+    /// <summary>Zoom-0 rows whose file does not exist.</summary>
+    public int MissingRows { get; set; }
+
+    /// <summary>4x4 WebP zoom-0 cells in which EVERY row's file is missing: rendered as nothing.</summary>
+    public int DarkCells { get; set; }
+
+    /// <summary>
+    /// 4x4 cells in which some rows' files are missing and others exist: drawn without the
+    /// missing rows, so any regeneration (rebuild included) drops what the old WebP still shows
+    /// of them.
+    /// </summary>
+    public int PartlyDarkCells { get; set; }
+
+    /// <summary>
+    /// Missing rows whose grid cell has exactly one owner grid with a PNG in the grid pool
+    /// (tenants/{t}/grids/{gridId}.png): repointing the row there would restore the imagery.
+    /// </summary>
+    public int RecoverableFromPool { get; set; }
+
+    /// <summary>Missing rows whose grid cell is claimed by more than one grid (contested).</summary>
+    public int AmbiguousCells { get; set; }
+
+    /// <summary>
+    /// Missing rows whose cell has no (usable) owner grid: nothing to repoint to and nothing a
+    /// client could be asked to re-upload. Only a file restore brings them back.
+    /// </summary>
+    public int RowsWithoutGrid { get; set; }
+
+    /// <summary>
+    /// Cells where the repair would repoint some rows while others stay missing. The repair does
+    /// not redraw those (the old WebP may be the last copy of the missing rows); they are redrawn
+    /// once the rest are restored or forgotten.
+    /// </summary>
+    public int RepairHeldCells { get; set; }
+
+    /// <summary>
+    /// Missing rows per directory, e.g. "tenants/t/17/0 (dead map) shift=(8,-4): 1200 rows" —
+    /// the shift (row coord minus file-name coord) identifies the merge that moved them.
+    /// </summary>
+    public List<string> ByDirectory { get; set; } = new();
+
+    /// <summary>A capped sample of the missing paths, as stored in the rows.</summary>
+    public List<string> SampleFiles { get; set; } = new();
+}
+
+/// <summary>
+/// Request body for repairing a tenant's missing tile sources. <see cref="ConfirmTenantId"/> must
+/// echo the route tenant id. <see cref="ForgetUnrecoverable"/> (opt-in) additionally deletes the
+/// rows nothing can recover — only after their restore keys were written to the audit log.
+/// </summary>
+public class RepairMissingTileSourcesRequestDto
+{
+    public string ConfirmTenantId { get; set; } = string.Empty;
+    public bool ForgetUnrecoverable { get; set; }
+}
+
+/// <summary>What a missing-tile-source repair did for one tenant.</summary>
+public class MissingTileSourcesRepairResultDto
+{
+    public string TenantId { get; set; } = string.Empty;
+
+    /// <summary>Live-map zoom-0 rows whose source PNG was missing when the repair started.</summary>
+    public int MissingRows { get; set; }
+
+    /// <summary>Rows repointed to their cell's single owner grid's pool PNG.</summary>
+    public int RowsRepointed { get; set; }
+
+    /// <summary>Owner grids made requestable again (NextUpdate in the past) so clients re-upload them.</summary>
+    public int GridsRearmed { get; set; }
+
+    /// <summary>Missing rows in contested cells (several owner grids): left to the wipe-region tool.</summary>
+    public int AmbiguousSkipped { get; set; }
+
+    /// <summary>Unrecoverable rows kept: they name the exact path + size to restore from a backup.</summary>
+    public int RowsLeftForRestore { get; set; }
+
+    /// <summary>Unrecoverable rows deleted (only with ForgetUnrecoverable).</summary>
+    public int RowsForgotten { get; set; }
+
+    /// <summary>Unrecoverable rows whose cell has no (usable) owner grid: nothing to re-arm.</summary>
+    public int RowsWithoutGrid { get; set; }
+
+    /// <summary>Repointed WebP cells handed to the fast queue now; the backstop takes the rest.</summary>
+    public int CellsEnqueued { get; set; }
+
+    /// <summary>
+    /// Cells with repointed rows that were NOT redrawn because other rows in them are still
+    /// missing — a redraw would drop those rows' imagery from the old WebP, possibly its last
+    /// copy. Marked durably: the backstop redraws them once nothing in them is missing (restored
+    /// or forgotten); later than that, the drift scan reports them stale for a rebuild.
+    /// </summary>
+    public int CellsHeldForRestore { get; set; }
+
+    public List<int> RepointedMapIds { get; set; } = new();
+
+    /// <summary>
+    /// Where the missing files lived, per map and source directory:
+    /// "map 12: tenants/t/17/0 (dead map) shift=(8,-4) rows=1200 bytes=20971520". With the
+    /// shift (row coord minus file-name coord) the rows of a single-shift per-map directory can be
+    /// rebuilt from restored files even after a forget, and a pool PNG's row from its owner grid;
+    /// every other forgotten row (mixed shift, no owner grid) is listed one by one in the forget's
+    /// audit entry (<see cref="UnkeyedRows"/>). Also stored in the audit entry.
+    /// </summary>
+    public List<string> RestoreKeys { get; set; } = new();
+
+    /// <summary>Repointed base coords per map: all of them are marked dirty (not serialized).</summary>
+    [JsonIgnore]
+    public Dictionary<int, List<Coord>> RepointedBaseCoords { get; set; } = new();
+
+    /// <summary>
+    /// The repointed base coords whose cells hold no row still missing: these are redrawn now
+    /// (not serialized). The others are <see cref="CellsHeldForRestore"/>.
+    /// </summary>
+    [JsonIgnore]
+    public Dictionary<int, List<Coord>> RedrawBaseCoords { get; set; } = new();
+
+    /// <summary>Ids of the unrecoverable rows (single owner without a pool PNG, or no owner).</summary>
+    [JsonIgnore]
+    public List<int> UnrecoverableRowIds { get; set; } = new();
+
+    /// <summary>
+    /// "map M (x,y) {file} bytes=N" for each unrecoverable row the restore keys cannot rebuild
+    /// (mixed-shift directory, or no owner grid naming its file): written to the audit entry
+    /// before a forget deletes them (not serialized).
+    /// </summary>
+    [JsonIgnore]
+    public List<string> UnkeyedRows { get; set; } = new();
 }
 
 /// <summary>
@@ -114,6 +275,19 @@ public class RebuildAllDriftResultDto
 
     /// <summary>"tenant/mapId (name)" per rebuilt map.</summary>
     public List<string> Maps { get; set; } = new();
+
+    /// <summary>
+    /// Drifted maps NOT rebuilt because they have missing tile sources ("tenant/mapId (name)"): a
+    /// rebuild deletes the whole pyramid, including the last WebP copy of their dark areas.
+    /// Restore (or forget) first, then rebuild them one by one.
+    /// </summary>
+    public List<string> SkippedMissingSources { get; set; } = new();
+
+    /// <summary>
+    /// Drifted maps NOT rebuilt because their only drift is empty files: serving discards and
+    /// regenerates those, and the batch rebuilds them — no reason to delete the whole pyramid.
+    /// </summary>
+    public int SkippedEmptyFilesOnly { get; set; }
 }
 
 /// <summary>What an orphan purge actually removed. Only provably-dead data is ever touched.</summary>

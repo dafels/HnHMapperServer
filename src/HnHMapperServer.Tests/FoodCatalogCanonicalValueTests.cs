@@ -187,7 +187,7 @@ public class FoodCatalogCanonicalValueTests : IDisposable
     {
         // Liquids: names are volume-normalized, so a "0.01 l of Cave Slime" sip collapses
         // onto the food and its energy/FEPs/hunger all round to zero. Adopting it would
-        // wipe the real values (measured on the dev database: E=200 -> 4, every FEP 0).
+        // wipe the real values (E=200 -> 4, every FEP 0).
         SeedFoodWithFeps("Cave Slime", energy: 200, hunger: 0.75m,
             new[] { ("STR", 2, 1m), ("CON", 2, 1m), ("PSY", 2, 1m) });
         var food = await LoadFoodAsync(TenantA, "Cave Slime");

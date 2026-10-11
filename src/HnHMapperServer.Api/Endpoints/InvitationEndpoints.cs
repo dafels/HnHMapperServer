@@ -23,6 +23,8 @@ public static class InvitationEndpoints
 {
     public static void MapInvitationEndpoints(this IEndpointRouteBuilder app)
     {
+        // The invite code is a credential in the URL path: telemetry masks these routes via ServiceDefaults'
+        // SensitiveUrlRedactor; never log Request.Path here.
         var group = app.MapGroup("/api/invitations");
 
         // Public: validate a code (returns only what an invite landing page needs)

@@ -74,6 +74,7 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
 
     // Performance optimization tables
     public DbSet<DirtyZoomTileEntity> DirtyZoomTiles => Set<DirtyZoomTileEntity>();
+    public DbSet<DirtyWebpCellEntity> DirtyWebpCells => Set<DirtyWebpCellEntity>();
 
     // Public map tables (global, not tenant-scoped)
     public DbSet<PublicMapEntity> PublicMaps => Set<PublicMapEntity>();
@@ -154,6 +155,10 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
             // Supports FindMissingZoomTilesAsync and FindStaleZoomTilesAsync
             entity.HasIndex(e => new { e.TenantId, e.Zoom });
             entity.HasIndex(e => new { e.TenantId, e.MapId, e.Zoom });
+
+            // /map/updates reconnect deltas (TileRepository.GetTileCacheTokensAsync: TenantId = ? AND
+            // Cache > ?): O(log n + changed rows) instead of a walk over the tenant's rows
+            entity.HasIndex(e => new { e.TenantId, e.Cache });
 
             // Foreign key to Tenants
             entity.HasOne<TenantEntity>()
@@ -737,6 +742,34 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser, Id
                 .OnDelete(DeleteBehavior.Cascade);
 
             // Foreign key to Maps
+            entity.HasOne<MapInfoEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.MapId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<DirtyWebpCellEntity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.TenantId).IsRequired();
+            entity.Property(e => e.MapId).IsRequired();
+            entity.Property(e => e.CellX).IsRequired();
+            entity.Property(e => e.CellY).IsRequired();
+            entity.Property(e => e.MarkedAt).IsRequired();
+
+            // One row per WebP zoom-0 cell; a re-mark bumps MarkedAt instead of adding a row
+            entity.HasIndex(e => new { e.TenantId, e.MapId, e.CellX, e.CellY }).IsUnique();
+
+            // The backstop reads the oldest settled marks of one tenant
+            entity.HasIndex(e => new { e.TenantId, e.MarkedAt });
+
+            // Foreign key to Tenants
+            entity.HasOne<TenantEntity>()
+                .WithMany()
+                .HasForeignKey(e => e.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Foreign key to Maps: deleting or merging away a map drops its pending marks
             entity.HasOne<MapInfoEntity>()
                 .WithMany()
                 .HasForeignKey(e => e.MapId)
@@ -1718,6 +1751,34 @@ public sealed class DirtyZoomTileEntity
     /// When the tile was marked dirty (for debugging/monitoring)
     /// </summary>
     public DateTime CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Durable "regenerate this WebP cell" mark: one row per 400x400 zoom-0 WebP cell (4x4 base
+/// grids), written alongside DirtyZoomTiles by every zoom-0 tile save and bulk writer. Its only
+/// consumer is the WebP backstop, which deletes a row once the cell's whole existing z0-z6 chain
+/// on disk is newer than <see cref="MarkedAt"/>. DirtyZoomTiles belongs to the legacy PNG pyramid
+/// and its own consumer; the WebP pyramid must not read a queue another consumer deletes from.
+/// </summary>
+public sealed class DirtyWebpCellEntity
+{
+    public int Id { get; set; }
+
+    public string TenantId { get; set; } = string.Empty;
+
+    public int MapId { get; set; }
+
+    /// <summary>WebP zoom-0 cell X = floor(baseX / 4)</summary>
+    public int CellX { get; set; }
+
+    /// <summary>WebP zoom-0 cell Y = floor(baseY / 4)</summary>
+    public int CellY { get; set; }
+
+    /// <summary>
+    /// UTC time of the newest mark. Bumped on every re-mark, so data written after a
+    /// regeneration always makes the cell stale again.
+    /// </summary>
+    public DateTime MarkedAt { get; set; }
 }
 
 /// <summary>

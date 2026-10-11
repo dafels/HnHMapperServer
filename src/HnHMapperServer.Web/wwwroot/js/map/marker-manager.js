@@ -12,6 +12,34 @@ const HIGHLIGHT_GLOW_COLORS = {
     questgiver: '#2CDB2C'
 };
 
+// Generic marker icon - the same fallback MarkersPanel, EventsPanel and custom-marker-manager use.
+const FALLBACK_ICON_URL = '/gfx/terobjs/mm/custom.png';
+
+// Some stored markers have Image='' ('/.png' can never resolve) - skip the request.
+function markerIconUrl(image) {
+    return image ? `/${image}.png` : FALLBACK_ICON_URL;
+}
+
+// L.Icon whose <img> falls back to the generic icon when the game icon is not shipped (the game
+// adds minimap resources over time; wellspring was missing for months and rendered as a broken
+// image). Deliberately NO cross-marker memo of failed URLs: onerror cannot tell a 404 from a
+// transient 502 or a network blip, and module state survives circuit resumes, so a memo could pin
+// working icons to the fallback until a reload. Each new <img> (markercluster re-adds) retries.
+const GameMarkerIcon = L.Icon.extend({
+    createIcon(oldIcon) {
+        const img = L.Icon.prototype.createIcon.call(this, oldIcon);
+        img.style.objectFit = 'contain'; // game icons are square; custom.png is 21x23
+        // Leaflet reuses oldIcon when it is an IMG (setIcon, e.g. the glow swap in
+        // applyHighlightIcon, which uses a plain L.icon and therefore keeps this handler -
+        // harmless, the glow is a data: URL). Always overwrite, never add.
+        img.onerror = this.options.iconUrl === FALLBACK_ICON_URL ? null : () => {
+            img.onerror = null;
+            img.src = FALLBACK_ICON_URL;
+        };
+        return img;
+    }
+});
+
 // Marker storage - visible markers with their Leaflet instances
 const markers = {};
 // All marker data storage - persists regardless of visibility for re-evaluation
@@ -155,7 +183,7 @@ export function addMarker(markerData, mapInstance, skipStorage = false) {
         return false;
     }
 
-    const iconUrl = `/${markerData.image}.png`;
+    const iconUrl = markerIconUrl(markerData.image);
     const isCustom = markerData.image === "gfx/terobjs/mm/custom";
     const isCave = markerData.name.toLowerCase() === "cave";
     const isThingwall = markerData.type === "thingwall";
@@ -183,7 +211,7 @@ export function addMarker(markerData, mapInstance, skipStorage = false) {
         icon = L.divIcon({
             html: `
                 <div class="marker-with-timer">
-                    <img src="${actualIconUrl}" class="marker-icon-img" style="width: ${iconSize[0]}px; height: ${iconSize[1]}px;" />
+                    <img src="${actualIconUrl}" class="marker-icon-img" style="width: ${iconSize[0]}px; height: ${iconSize[1]}px; object-fit: contain;" onerror="this.onerror=null;this.src='${FALLBACK_ICON_URL}';" />
                     <div class="marker-timer-text">${markerData.timerText}</div>
                 </div>
             `,
@@ -193,8 +221,8 @@ export function addMarker(markerData, mapInstance, skipStorage = false) {
             className: 'marker-timer-container'
         });
     } else {
-        // Use regular icon for markers without timers
-        icon = L.icon({
+        // Use regular icon for markers without timers (falls back to the generic icon)
+        icon = new GameMarkerIcon({
             iconUrl: isCave ? '/gfx/hud/mmap/cave.png' : iconUrl,
             iconSize: iconSize,
             iconAnchor: iconAnchor

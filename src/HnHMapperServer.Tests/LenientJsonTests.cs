@@ -14,15 +14,17 @@ public class LenientJsonTests
     private static List<Dictionary<string, object>>? Parse(string json) =>
         JsonSerializer.Deserialize<List<Dictionary<string, object>>>(json, Options);
 
+    // Two player markers (no id), then the first shared marker with a bare hex oid —
+    // the shape on which a strict /markerUpdate parse fails at $[2].id.
+    private const string HurricanePayload =
+        "[{\"name\":\"Home\",\"gridID\":\"1234567890123456789\",\"x\":50,\"y\":50,\"type\":\"player\",\"color\":\"java.awt.Color[r=255,g=255,b=255]\"}," +
+        "{\"name\":\"Swamp\",\"gridID\":\"1234567890123456789\",\"x\":12,\"y\":93,\"type\":\"player\",\"color\":\"java.awt.Color[r=0,g=74,b=208]\"}," +
+        "{\"name\":\"Deep cave\",\"gridID\":\"9876543210987654321\",\"x\":10,\"y\":91,\"type\":\"shared\",\"id\":531a9f2e44c81b07,\"image\":\"gfx/terobjs/mm/cave\"}]";
+
     [Fact]
     public void Repairs_HurricaneStyleBareHexIdPayload()
     {
-        // Two player markers (no id), then the first shared marker with a bare hex oid —
-        // the exact shape that made /markerUpdate die at $[2].id in production.
-        const string payload =
-            "[{\"name\":\"Home\",\"gridID\":\"1234567890123456789\",\"x\":50,\"y\":50,\"type\":\"player\",\"color\":\"java.awt.Color[r=255,g=255,b=255]\"}," +
-            "{\"name\":\"Swamp\",\"gridID\":\"1234567890123456789\",\"x\":12,\"y\":93,\"type\":\"player\",\"color\":\"java.awt.Color[r=0,g=74,b=208]\"}," +
-            "{\"name\":\"Deep cave\",\"gridID\":\"9876543210987654321\",\"x\":10,\"y\":91,\"type\":\"shared\",\"id\":531a9f2e44c81b07,\"image\":\"gfx/terobjs/mm/cave\"}]";
+        const string payload = HurricanePayload;
 
         Assert.Throws<JsonException>(() => Parse(payload));
 
@@ -132,5 +134,84 @@ public class LenientJsonTests
 
         Assert.Same(payload, LenientJson.QuoteBareTokens(payload));
         Assert.ThrowsAny<JsonException>(() => Parse(payload));
+    }
+
+    // The quoting now copies spans into a lazily created builder: pin the prefix/suffix bookkeeping.
+    [Fact]
+    public void BareTokenAtStartAndEnd_PrefixAndSuffixCopied()
+    {
+        Assert.Equal("[\"12ab\"]", LenientJson.QuoteBareTokens("[12ab]"));
+        Assert.Equal("[{\"a\":\"x\"},\"ff\"]", LenientJson.QuoteBareTokens("[{\"a\":\"x\"},ff]"));
+        Assert.Equal("\"zz\"", LenientJson.QuoteBareTokens("zz"));
+    }
+
+    [Fact]
+    public void UnterminatedStringAfterABareToken_KeepsItsTailVerbatim()
+    {
+        Assert.Equal("[\"ab\",\"x y", LenientJson.QuoteBareTokens("[ab,\"x y"));
+    }
+
+    [Fact]
+    public void TrailingBackslashInAnUnterminatedString_IsLeftAlone()
+    {
+        const string payload = "[\"a\\";
+
+        Assert.Same(payload, LenientJson.QuoteBareTokens(payload));
+    }
+
+    [Fact]
+    public void Deserialize_HurricanePayload_ParsesOnce_WithoutAFirstChanceJsonException()
+    {
+        // ReadMarkerListAsync used to parse strictly, throw, repair and parse again: one
+        // JsonReaderException + one JsonException per Hurricane marker post. The test is synchronous,
+        // so the managed thread filters out other tests' exceptions.
+        var thread = Environment.CurrentManagedThreadId;
+        var jsonExceptions = 0;
+        EventHandler<System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs> handler = (_, e) =>
+        {
+            if (Environment.CurrentManagedThreadId == thread && e.Exception is JsonException)
+            {
+                Interlocked.Increment(ref jsonExceptions);
+            }
+        };
+
+        List<Dictionary<string, object>>? markers;
+        bool repaired;
+        AppDomain.CurrentDomain.FirstChanceException += handler;
+        try
+        {
+            markers = LenientJson.Deserialize<List<Dictionary<string, object>>>(HurricanePayload, Options, out repaired);
+        }
+        finally
+        {
+            AppDomain.CurrentDomain.FirstChanceException -= handler;
+        }
+
+        Assert.Equal(0, jsonExceptions);
+        Assert.True(repaired);
+        Assert.Equal(3, markers!.Count);
+        Assert.Equal("531a9f2e44c81b07", ((JsonElement)markers[2]["id"]).GetString());
+    }
+
+    [Fact]
+    public void Deserialize_ValidPayload_IsNotRepaired_AndMatchesTheStrictParse()
+    {
+        const string payload = "[{\"name\":\"A\",\"gridID\":\"42\",\"x\":1,\"y\":2,\"ready\":true,\"id\":null}]";
+
+        var lenient = LenientJson.Deserialize<List<Dictionary<string, object>>>(payload, Options, out var repaired);
+        var strict = Parse(payload);
+
+        Assert.False(repaired);
+        Assert.Equal(
+            strict!.Select(m => string.Join(",", m.Select(kv => $"{kv.Key}={kv.Value}"))),
+            lenient!.Select(m => string.Join(",", m.Select(kv => $"{kv.Key}={kv.Value}"))));
+    }
+
+    [Fact]
+    public void Deserialize_StructurallyBrokenJson_StillThrows()
+    {
+        // Keeps the endpoints' 400 path
+        Assert.ThrowsAny<JsonException>(() =>
+            LenientJson.Deserialize<List<Dictionary<string, object>>>("[{{\"x\":1}", Options, out _));
     }
 }

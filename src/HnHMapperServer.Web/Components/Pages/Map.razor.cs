@@ -50,7 +50,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     [Inject] private AuthenticationStateProvider AuthStateProvider { get; set; } = default!;
     [Inject] private ILogger<Map> Logger { get; set; } = default!;
     [Inject] private IHttpClientFactory HttpClientFactory { get; set; } = default!;
-    [Inject] private AuthenticationStateCache AuthStateCache { get; set; } = default!;
+    [Inject] private CircuitServicesAccessor CircuitServices { get; set; } = default!;
     [Inject] private ISnackbar Snackbar { get; set; } = default!;
     [Inject] private ReconnectionState ReconnectionState { get; set; } = default!;
     [Inject] private IJSRuntime JS { get; set; } = default!;
@@ -84,17 +84,25 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     private MapState state = new();
     private bool isLoaded = false;
     private bool hasMapPermission = false;
+    private bool permissionResolved = false;  // the config call answered; until then show "Loading map...", not the lock screen
+    private string? loadFailedMessage;        // OnInitializedAsync failed: show it with a Reload button instead of the spinner
     private bool hasMarkersPermission = false;
     private bool isTenantAdmin => state.TenantRole == "TenantAdmin" || state.TenantRole == "SuperAdmin";
     private bool isReconnecting = false;
     private bool circuitFullyReady = false;  // Prevents JS->NET calls during circuit initialization
+    // Completed together with circuitFullyReady; lets an early charactersSnapshot wait instead of being dropped
+    private readonly TaskCompletionSource circuitReadyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool hiddenMarkerGroupsLoaded = false;  // Ensures filter state is loaded before markers
-    private string connectionMode = "connecting";  // Current connection mode: sse, polling, connecting, disconnected
+    private bool liveUpdatesReconnecting = false;  // map-updates.js: several live-update connections in a row failed
 
+    // One-shot, re-armed after every tick from markerPoll (ticks never overlap; markerTickRunning guards the
+    // reconnect re-arm racing a tick still in flight)
     private Timer? markerUpdateTimer;
     private Timer? permissionCheckTimer;
-    private int markerUpdateRetryCount = 0;
-    private const int MaxMarkerUpdateRetries = 3;
+    private readonly MarkerPollBackoff markerPoll = new();
+    private int markerTickRunning;
+    private bool viewportSubscribed;
+    private volatile bool disposed;
 
     private List<TimerDto> allTimers = new();
 
@@ -269,6 +277,22 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             return;
         }
 
+        // Static prerender: Leaflet and every JS call need the interactive pass, which runs this method again
+        // from scratch. Render the "Loading map..." shell instead of fetching config, markers, maps, custom
+        // markers and timers twice per page load.
+        if (HttpContext != null)
+        {
+            return;
+        }
+
+        // The marker poll and permission timers below call the API from timer threads; they keep this circuit's
+        // identity only because component init runs inside an inbound circuit activity (CircuitServicesAccessor).
+        // That is framework behaviour (verified on ASP.NET Core 10) - say so loudly if it ever changes.
+        if (CircuitServices.Services is null)
+        {
+            Logger.LogWarning("Circuit services not available in interactive OnInitializedAsync; background API calls from this page will be unauthenticated");
+        }
+
         try
         {
             // Parse query string parameters for bookmark support
@@ -288,6 +312,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             var config = await MapData.GetConfigAsync();
 
             hasMapPermission = config.Permissions.Any(a => a.Equals(Permission.Map.ToClaimValue(), StringComparison.OrdinalIgnoreCase));
+            permissionResolved = true;
 
             if (!hasMapPermission)
             {
@@ -356,29 +381,36 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
             // Subscribe to breakpoint changes (don't fire immediately to avoid illegal StateHasChanged during init)
             await BrowserViewportService.SubscribeAsync(this, fireImmediately: false);
+            viewportSubscribed = true;
 
             // Manually set initial sidebar state based on current breakpoint
             var currentBreakpoint = await BrowserViewportService.GetCurrentBreakpointAsync();
             isSidebarOpen = currentBreakpoint >= Breakpoint.Lg;
             // No StateHasChanged needed - we're already in OnInitializedAsync render cycle
 
-            // Set up polling timer for markers
-            markerUpdateTimer = new Timer(UpdateMarkers, null, 60000, 60000);
+            // Marker poll: one-shot, re-armed by every tick (ScheduleNextMarkerPoll)
+            markerUpdateTimer = new Timer(UpdateMarkers, null, MarkerPollBackoff.Interval, Timeout.InfiniteTimeSpan);
 
             isLoaded = true;
+        }
+        catch (Exception ex) when (disposed)
+        {
+            Logger.LogDebug(ex, "Map initialization abandoned: page disposed");
         }
         catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
                                               ex.StatusCode == System.Net.HttpStatusCode.Found)
         {
             Logger.LogError(ex, "Authentication failed during map initialization");
-            Snackbar.Add("Authentication failed. Please refresh the page.", Severity.Error);
+            loadFailedMessage = "Your session could not be verified. Reload the page; you may need to sign in again.";
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Error initializing map");
-            Snackbar.Add("Failed to load map. Please refresh the page.", Severity.Error);
+            loadFailedMessage = "The map data could not be loaded. Reload the page to try again.";
         }
     }
+
+    private void ReloadPage() => Navigation.Refresh(forceReload: true);
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -402,6 +434,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
                 // Mark circuit as fully ready for JS->NET calls
                 circuitFullyReady = true;
+                circuitReadyTcs.TrySetResult();
 
                 // Load hidden marker groups from localStorage
                 await LoadHiddenMarkerGroupsAsync();
@@ -529,9 +562,11 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             // JS addMarker() will store in allMarkerData and decide visibility based on current settings
             await mapView.AddMarkersAsync(markersToLoad);
             Logger.LogInformation("AddMarkersAsync completed for {Count} markers", markersToLoad.Count);
+            if (disposed) return;
 
             // Load custom markers
             await TryRenderPendingCustomMarkersAsync();
+            if (disposed) return;
 
             // Load roads
             await RefreshRoadsAsync();
@@ -541,35 +576,53 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         // Markers are rendered directly via JavaScript interop
     }
 
+    /// <summary>
+    /// Never throws: an exception escaping a component's DisposeAsync terminates the circuit. During circuit
+    /// teardown ReconnectionState is already false (the framework runs the circuit handlers before disposing
+    /// components), so the JS teardown is skipped - it could only fail with JSDisconnectedException. The
+    /// per-step catch covers the race where the socket drops after the check.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
+        disposed = true;
         ReconnectionState.OnDown -= HandleCircuitDown;
         ReconnectionState.OnUp -= HandleCircuitUp;
 
-        await BrowserViewportService.UnsubscribeAsync(this);
-
+        // Timers first: no tick may start API or JS work for a page that is going away
         markerUpdateTimer?.Dispose();
+        markerUpdateTimer = null;
         permissionCheckTimer?.Dispose();
+        permissionCheckTimer = null;
 
-        if (sseModule != null)
+        // MudBlazor-owned and error-handled; only if OnInitializedAsync got as far as subscribing
+        if (viewportSubscribed)
         {
-            try
-            {
-                await sseModule.InvokeVoidAsync("disconnectSseUpdates");
-                await sseModule.DisposeAsync();
-            }
-            catch { }
-            sseModule = null;
+            await DisposeStepAsync("viewport", () => BrowserViewportService.UnsubscribeAsync(this));
         }
 
-        if (leafletModule != null)
+        var sse = sseModule;
+        var leaflet = leafletModule;
+        sseModule = null;
+        leafletModule = null;
+        if (ReconnectionState.IsConnected)
         {
-            try
+            if (sse != null)
             {
-                await leafletModule.DisposeAsync();
+                await DisposeStepAsync("sse", async () =>
+                {
+                    await sse.InvokeVoidAsync("disconnectSseUpdates");
+                    await sse.DisposeAsync();
+                });
             }
-            catch { }
-            leafletModule = null;
+
+            if (leaflet != null)
+            {
+                await DisposeStepAsync("leaflet", () => leaflet.DisposeAsync().AsTask());
+            }
+        }
+        else if (sse != null || leaflet != null)
+        {
+            Logger.LogDebug("Map disposal: circuit not connected, skipping JS teardown");
         }
 
         sseDotnetRef?.Dispose();
@@ -577,7 +630,23 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
         if (mapView != null)
         {
-            await mapView.DisposeAsync();
+            await DisposeStepAsync("mapView", () => mapView.DisposeAsync().AsTask());
+        }
+    }
+
+    private async Task DisposeStepAsync(string step, Func<Task> action)
+    {
+        try
+        {
+            await action();
+        }
+        catch (Exception ex) when (ex is JSDisconnectedException or TaskCanceledException or ObjectDisposedException or JSException)
+        {
+            Logger.LogDebug("Map disposal: {Step} skipped ({ExceptionType})", step, ex.GetType().Name);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Map disposal: {Step} failed", step);
         }
     }
 
@@ -585,42 +654,23 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
     #region Polling Methods
 
+    /// <summary>
+    /// Marker poll tick. The timer is one-shot and every completed tick makes exactly one scheduling decision
+    /// (MarkerPollBackoff): 60 s after a success; after a failure 2/4/8 s, then every 60 s for as long as it
+    /// lasts - the poll never stops on its own. Nothing is re-armed while the circuit is disconnected
+    /// (HandleCircuitUp does that) or after disposal.
+    /// </summary>
     private async void UpdateMarkers(object? timerState)
     {
+        // A tick fired by the reconnect re-arm while an older tick is still running: that one re-arms
+        if (Interlocked.Exchange(ref markerTickRunning, 1) == 1) return;
+
+        MarkerPollBackoff.Decision? next = null;
         try
         {
-            if (!AuthStateCache.IsAuthenticated || string.IsNullOrEmpty(AuthStateCache.CookieValue))
-            {
-                // Retry with exponential backoff instead of immediately failing
-                if (markerUpdateRetryCount < MaxMarkerUpdateRetries)
-                {
-                    markerUpdateRetryCount++;
-                    var delaySeconds = Math.Pow(2, markerUpdateRetryCount); // 2s, 4s, 8s
-                    Logger.LogWarning(
-                        "Authentication state not available for marker update. Retry {RetryCount}/{MaxRetries} in {DelaySeconds}s.",
-                        markerUpdateRetryCount, MaxMarkerUpdateRetries, delaySeconds);
-
-                    // Reschedule timer with exponential backoff delay
-                    markerUpdateTimer?.Change(TimeSpan.FromSeconds(delaySeconds), TimeSpan.FromMilliseconds(-1));
-                    return;
-                }
-
-                // All retries exhausted - stop timer and show error
-                Logger.LogWarning("Authentication state not available after {RetryCount} retries. Stopping timer.", MaxMarkerUpdateRetries);
-                await InvokeAsync(() =>
-                {
-                    Snackbar.Add("Authentication lost. Marker updates stopped. Please refresh the page.", Severity.Warning);
-                    StateHasChanged();
-                });
-                markerUpdateTimer?.Dispose();
-                markerUpdateTimer = null;
-                return;
-            }
+            if (disposed || !ReconnectionState.IsConnected) return;
 
             var markers = await MapData.GetMarkersAsync();
-
-            // Reset retry counter on successful update
-            markerUpdateRetryCount = 0;
 
             await InvokeAsync(async () =>
             {
@@ -653,52 +703,82 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
                 StateHasChanged();
             });
 
-            // Reset timer to normal 60s interval after successful update
-            markerUpdateTimer?.Change(TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60));
-        }
-        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
-                                              ex.StatusCode == System.Net.HttpStatusCode.NotFound ||
-                                              ex.StatusCode == System.Net.HttpStatusCode.Forbidden ||
-                                              ex.StatusCode == System.Net.HttpStatusCode.Found)
-        {
-            // Retry with exponential backoff for HTTP auth errors
-            if (markerUpdateRetryCount < MaxMarkerUpdateRetries)
+            next = markerPoll.OnSuccess();
+            if (next.Value.NotifyRecovered)
             {
-                markerUpdateRetryCount++;
-                var delaySeconds = Math.Pow(2, markerUpdateRetryCount); // 2s, 4s, 8s
-                Logger.LogWarning(
-                    "Authentication failed while updating markers (Status: {StatusCode}). Retry {RetryCount}/{MaxRetries} in {DelaySeconds}s.",
-                    ex.StatusCode, markerUpdateRetryCount, MaxMarkerUpdateRetries, delaySeconds);
-
-                // Reschedule timer with exponential backoff delay
-                markerUpdateTimer?.Change(TimeSpan.FromSeconds(delaySeconds), TimeSpan.FromMilliseconds(-1));
-                return;
+                Logger.LogInformation("Marker updates resumed");
             }
-
-            // All retries exhausted - stop timer and show error
-            Logger.LogWarning("Authentication failed after {RetryCount} retries (Status: {StatusCode}). Stopping timer.", MaxMarkerUpdateRetries, ex.StatusCode);
-            await InvokeAsync(() =>
-            {
-                var message = ex.StatusCode switch
-                {
-                    System.Net.HttpStatusCode.Unauthorized => "Authentication failed. Marker updates stopped. Please refresh the page.",
-                    System.Net.HttpStatusCode.Found => "Authentication session expired. Marker updates stopped. Please refresh the page.",
-                    _ => "Failed to update markers. Updates stopped."
-                };
-                Snackbar.Add(message, Severity.Warning);
-                StateHasChanged();
-            });
-            markerUpdateTimer?.Dispose();
-            markerUpdateTimer = null;
+        }
+        catch (Exception ex) when (disposed)
+        {
+            Logger.LogDebug(ex, "Marker update abandoned: page disposed");
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error updating markers");
+            next = markerPoll.OnFailure();
+            var status = (ex as HttpRequestException)?.StatusCode;
+            if (next.Value.NotifyFailing)
+            {
+                // Once per failure streak, when the fast retries are used up (the API handler has already logged
+                // any auth failure on its own)
+                Logger.LogWarning(ex, "Marker updates keep failing (status {StatusCode}); retrying every {IntervalSeconds} s",
+                    status, MarkerPollBackoff.Interval.TotalSeconds);
+            }
+            else
+            {
+                Logger.LogDebug(ex, "Marker update failed (status {StatusCode}); retrying in {DelaySeconds} s",
+                    status, next.Value.Delay.TotalSeconds);
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref markerTickRunning, 0);
+            if (next is { } decision)
+            {
+                ScheduleNextMarkerPoll(decision);
+            }
+        }
+    }
+
+    /// <summary>Re-arms the one-shot marker timer and shows the once-per-streak notices. Must not throw (async void caller).</summary>
+    private void ScheduleNextMarkerPoll(MarkerPollBackoff.Decision decision)
+    {
+        if (disposed || !ReconnectionState.IsConnected) return;
+
+        try
+        {
+            markerUpdateTimer?.Change(decision.Delay, Timeout.InfiniteTimeSpan);
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        if (decision.NotifyFailing || decision.NotifyRecovered)
+        {
+            _ = ShowMarkerPollNoticeAsync(decision.NotifyFailing);
+        }
+    }
+
+    private async Task ShowMarkerPollNoticeAsync(bool failing)
+    {
+        try
+        {
             await InvokeAsync(() =>
             {
-                Snackbar.Add("Error updating markers. Check console for details.", Severity.Error);
-                StateHasChanged();
+                if (failing)
+                {
+                    Snackbar.Add("Marker updates are failing; retrying every minute.", Severity.Warning);
+                }
+                else
+                {
+                    Snackbar.Add("Marker updates resumed.", Severity.Success);
+                }
             });
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Could not show the marker update notice");
         }
     }
 
@@ -706,6 +786,9 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         try
         {
+            // Paused by HandleCircuitDown; a tick already queued must not call the API during an outage
+            if (disposed || !ReconnectionState.IsConnected) return;
+
             Logger.LogDebug("Checking for Map permission update...");
             var config = await MapData.GetConfigAsync();
             var nowHasMapPermission = config.Permissions.Any(a => a.Equals(Permission.Map.ToClaimValue(), StringComparison.OrdinalIgnoreCase));
@@ -788,8 +871,33 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         }
     }
 
+    /// <summary>
+    /// Every await below yields to the renderer, which can dispose this page in between (SPA navigation away):
+    /// check <c>disposed</c> after each phase, or the sequence re-imports the JS modules DisposeAsync just released
+    /// and opens a live-update stream bound to a dead component that nothing would ever close.
+    /// </summary>
     private async Task HandleMapInitialized(bool isReady)
     {
+        if (disposed) return;
+
+        if (!isReady)
+        {
+            // MapView gave up and logged why; everything below needs a working Leaflet map. The tab may be hidden
+            // right now and MudBlazor's dwell timer runs on the server, so a default 5 s toast would expire unseen:
+            // keep this one until the player acts on it.
+            Snackbar.Add("The map failed to load.", Severity.Error, config =>
+            {
+                config.RequireInteraction = true;
+                config.Action = "Reload";
+                config.OnClick = _ =>
+                {
+                    ReloadPage();
+                    return Task.CompletedTask;
+                };
+            });
+            return;
+        }
+
         Logger.LogInformation("Map initialized event received, starting initialization sequence");
 
         // Leaflet can fire its 'load' event extremely early (often before OnAfterRenderAsync(firstRender)
@@ -809,6 +917,8 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             layerVisibilityLoaded = true;
         }
 
+        if (disposed) return;
+
         // Keep clustering state aligned across:
         // - the floating clustering toggle (showClustering)
         // - the LayerVisibility service (snapshot/persistence)
@@ -816,19 +926,17 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         LayerVisibility.ShowClustering = showClustering;
         state.ShowClustering = showClustering;
 
-        // Set initial revisions for all maps
-        foreach (var map in MapNavigation.Maps)
-        {
-            await mapView.SetMapRevisionAsync(map.ID, map.MapInfo.Revision);
-            MapNavigation.InitializeMapRevision(map.ID, map.MapInfo.Revision);
-            Logger.LogDebug("Set initial revision for map {MapId}: {Revision}", map.ID, map.MapInfo.Revision);
-        }
+        // Set initial revisions for all maps (one batched interop call)
+        await SeedMapRevisionsAsync(MapNavigation.Maps);
+        if (disposed) return;
 
         // Handle route parameters and set initial view position
         await InitializeViewFromUrlParametersAsync();
+        if (disposed) return;
 
         // Load active timers
         await LoadTimersAsync();
+        if (disposed) return;
         StateHasChanged();
 
         // Load markers after positioning is complete
@@ -846,13 +954,16 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             // ALWAYS sync hidden marker groups to JS before loading markers
             // (even if empty, to ensure JS state matches C# state)
             await mapView.SetHiddenMarkerTypesAsync(hiddenMarkerGroups);
+            if (disposed) return;
 
             // Apply JS toggles that affect marker creation (filter mode, clustering) BEFORE adding markers.
             // This avoids creating thousands of markers and then immediately rebuilding/moving them.
             await ApplyToggleStatesToJavaScriptAsync();
+            if (disposed) return;
 
             Logger.LogInformation("Loading markers for map {MapId}", MapNavigation.CurrentMapId);
             await LoadMarkersForCurrentMapAsync();
+            if (disposed) return;
 
             // Sync character tooltip visibility with LayerVisibilityService default state
             await mapView.ToggleCharacterTooltipsAsync(LayerVisibility.ShouldShowCharacterTooltips());
@@ -862,6 +973,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         // 1. mapView component reference is now guaranteed to be available
         // 2. Leaflet 'load' event has fired, so all JS interop is ready
         // 3. circuitFullyReady should already be true from OnAfterRenderAsync
+        // (InitializeBrowserSseAsync re-checks 'disposed' itself, around its own import await.)
         await InitializeBrowserSseAsync();
     }
 
@@ -1285,7 +1397,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
         // Sync markers visibility to JS (triggers rebuildAllMarkers for efficient batch update)
         leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
-        await leafletModule.InvokeAsync<bool>("setShowMarkersEnabled", LayerVisibility.ShowMarkers);
+        await leafletModule.InvokeVoidAsync("setShowMarkersEnabled", LayerVisibility.ShowMarkers);
 
         await SyncLayerVisibility();
         await SaveLayerVisibilityAsync();
@@ -1520,25 +1632,25 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             // - Highlights appearing/disappearing inconsistently on first load
 
             // Overlay toggles
-            await leafletModule.InvokeAsync<bool>("setOverlayTypeEnabled", "ClaimFloor", showPClaim);
-            await leafletModule.InvokeAsync<bool>("setOverlayTypeEnabled", "ClaimOutline", showPClaim);
+            await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "ClaimFloor", showPClaim);
+            await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "ClaimOutline", showPClaim);
 
-            await leafletModule.InvokeAsync<bool>("setOverlayTypeEnabled", "VillageFloor", showVClaim);
-            await leafletModule.InvokeAsync<bool>("setOverlayTypeEnabled", "VillageOutline", showVClaim);
+            await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "VillageFloor", showVClaim);
+            await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "VillageOutline", showVClaim);
 
-            await leafletModule.InvokeAsync<bool>("setOverlayTypeEnabled", "Province0", showProvince);
-            await leafletModule.InvokeAsync<bool>("setOverlayTypeEnabled", "Province1", showProvince);
-            await leafletModule.InvokeAsync<bool>("setOverlayTypeEnabled", "Province2", showProvince);
-            await leafletModule.InvokeAsync<bool>("setOverlayTypeEnabled", "Province3", showProvince);
-            await leafletModule.InvokeAsync<bool>("setOverlayTypeEnabled", "Province4", showProvince);
+            await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "Province0", showProvince);
+            await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "Province1", showProvince);
+            await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "Province2", showProvince);
+            await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "Province3", showProvince);
+            await leafletModule.InvokeVoidAsync("setOverlayTypeEnabled", "Province4", showProvince);
 
             // Marker visibility and filter mode toggles
             // IMPORTANT: setShowMarkersEnabled must be called BEFORE markers are loaded.
             // This controls whether addMarker() actually adds markers to the map or just stores them.
-            await leafletModule.InvokeAsync<bool>("setShowMarkersEnabled", LayerVisibility.ShowMarkers);
-            await leafletModule.InvokeAsync<bool>("setThingwallHighlightEnabled", showThingwallHighlight);
-            await leafletModule.InvokeAsync<bool>("setQuestGiverHighlightEnabled", showQuestGiverHighlight);
-            await leafletModule.InvokeAsync<bool>("setMarkerFilterModeEnabled", showMarkerFilterMode);
+            await leafletModule.InvokeVoidAsync("setShowMarkersEnabled", LayerVisibility.ShowMarkers);
+            await leafletModule.InvokeVoidAsync("setThingwallHighlightEnabled", showThingwallHighlight);
+            await leafletModule.InvokeVoidAsync("setQuestGiverHighlightEnabled", showQuestGiverHighlight);
+            await leafletModule.InvokeVoidAsync("setMarkerFilterModeEnabled", showMarkerFilterMode);
 
             // Clustering toggle
             if (mapView != null)
@@ -1547,10 +1659,15 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             }
 
             // Roads toggle
-            await leafletModule.InvokeAsync<bool>("toggleRoads", showRoads);
+            await leafletModule.InvokeVoidAsync("toggleRoads", showRoads);
 
             Logger.LogDebug("Applied toggle states to JavaScript: PClaim={PClaim}, VClaim={VClaim}, Province={Province}, Thingwall={Thingwall}, Quest={Quest}, Filter={Filter}, Clustering={Clustering}, Roads={Roads}",
                 showPClaim, showVClaim, showProvince, showThingwallHighlight, showQuestGiverHighlight, showMarkerFilterMode, showClustering, showRoads);
+        }
+        catch (Exception ex) when (disposed)
+        {
+            // DisposeAsync released the module between two of the calls above
+            Logger.LogDebug(ex, "Applying toggle states abandoned: page disposed");
         }
         catch (Exception ex)
         {
@@ -1922,11 +2039,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             if (isNew)
             {
                 // Seed the tile revision so tile URLs get a valid ?v= (mirrors init)
-                if (mapView != null)
-                {
-                    await mapView.SetMapRevisionAsync(updatedMap.ID, updatedMap.MapInfo.Revision);
-                }
-                MapNavigation.InitializeMapRevision(updatedMap.ID, updatedMap.MapInfo.Revision);
+                await SeedMapRevisionsAsync([updatedMap]);
             }
 
             if (SelectedMap?.ID == updatedMap.ID)
@@ -1945,22 +2058,41 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         });
     }
 
+    /// <summary>
+    /// Fallback only: map-updates.js hands revisions straight to leaflet-interop.js (JS-owned store) and
+    /// calls OnSseMapRevision only when that bridge is missing (a page still running an older
+    /// map-updates.js). Deduped against the .NET copy, and no re-render: no markup shows a revision.
+    /// </summary>
     private void HandleMapRevision(int mapId, int revision)
     {
         InvokeAsync(async () =>
         {
-            if (mapView != null && !isReconnecting)
-            {
-                await mapView.SetMapRevisionAsync(mapId, revision);
-                MapNavigation.SetMapRevision(mapId, revision);
-                Logger.LogDebug("Map {MapId} revision updated to {Revision}", mapId, revision);
+            if (mapView == null || isReconnecting) return;
+            if (!MapNavigation.SetMapRevision(mapId, revision)) return;
 
-                if (MapNavigation.CurrentMapId == mapId)
-                {
-                    StateHasChanged();
-                }
-            }
+            await mapView.SetMapRevisionAsync(mapId, revision);
         });
+    }
+
+    /// <summary>
+    /// Seeds the revisions of <paramref name="maps"/> from a GET snapshot: the .NET copy (only when unknown;
+    /// it serves the fallback's dedupe) and the JS-owned store in one interop call (JS applies a value only
+    /// when the map is unknown or the value is newer, so a snapshot never rolls back a live revision).
+    /// </summary>
+    private async Task SeedMapRevisionsAsync(IEnumerable<MapInfoModel> maps)
+    {
+        var revisions = new Dictionary<int, int>();
+        foreach (var map in maps)
+        {
+            MapNavigation.InitializeMapRevision(map.ID, map.MapInfo.Revision);
+            revisions[map.ID] = map.MapInfo.Revision;
+        }
+
+        if (mapView != null)
+        {
+            await mapView.SeedMapRevisionsAsync(revisions);
+        }
+        Logger.LogDebug("Seeded revisions for {Count} maps", revisions.Count);
     }
 
     #endregion
@@ -1998,47 +2130,41 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     }
 
     /// <summary>
-    /// Called from JavaScript when connection mode changes (SSE vs polling)
+    /// Called from map-updates.js: true after several live-update connections in a row failed (it keeps
+    /// retrying with backoff on its own), false once a healthy stream is back. Drives the small persistent
+    /// "Live updates reconnecting…" indicator; the map itself keeps working meanwhile.
     /// </summary>
     [JSInvokable]
-    public void OnConnectionModeChanged(string mode)
+    public void OnLiveUpdatesReconnecting(bool reconnecting)
     {
-        Logger.LogInformation("Connection mode changed to: {Mode}", mode);
-        connectionMode = mode;
-
-        // Show notification when switching to polling mode
-        if (mode == "polling")
+        InvokeAsync(() =>
         {
-            Snackbar.Add("Real-time connection unavailable. Using polling mode (updates every 3s).", Severity.Warning, config =>
-            {
-                config.ShowCloseIcon = true;
-                config.VisibleStateDuration = 10000;
-            });
-        }
-        else if (mode == "sse" && connectionMode == "polling")
-        {
-            Snackbar.Add("Real-time connection restored.", Severity.Success, config =>
-            {
-                config.ShowCloseIcon = true;
-                config.VisibleStateDuration = 5000;
-            });
-        }
-
-        InvokeAsync(StateHasChanged);
+            if (liveUpdatesReconnecting == reconnecting) return;
+            liveUpdatesReconnecting = reconnecting;
+            Logger.LogInformation(reconnecting
+                ? "Live map updates keep failing to connect; retrying"
+                : "Live map updates restored");
+            StateHasChanged();
+        });
     }
 
     [JSInvokable]
     public async Task OnSseCharactersSnapshot(List<CharacterModel> characters)
     {
-        // Check if circuit is fully ready (prevents "No interop methods registered" errors)
+        // The stream can deliver its snapshot before OnAfterRenderAsync marked the circuit ready
+        // (HandleMapInitialized may run first). Wait rather than drop it: the server sends charactersSnapshot
+        // only at connect, so a dropped one stays dropped until the next reconnect (stationary characters
+        // would stay invisible).
         if (!circuitFullyReady)
         {
-            Logger.LogWarning("OnSseCharactersSnapshot called before circuit ready, waiting briefly...");
-            await Task.Delay(50);  // Brief wait for circuit to finish initialization
-            if (!circuitFullyReady)
+            try
             {
-                Logger.LogWarning("Circuit still not ready after delay, dropping characters snapshot");
-                return;  // Drop this callback - another snapshot will arrive soon
+                await circuitReadyTcs.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            catch (TimeoutException)
+            {
+                Logger.LogWarning("Circuit not ready after 10 s, dropping characters snapshot");
+                return;
             }
         }
 
@@ -2139,28 +2265,30 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         }
     }
 
+    /// <summary>
+    /// Server-side state only. This runs from OnConnectionDown after the socket has already closed, and during
+    /// circuit teardown inline before the JS runtime is marked permanently disconnected: a JS call made now is
+    /// never delivered (it only fails after JSInteropDefaultCallTimeout, 2 min), and a render or snackbar would
+    /// flush only after a reconnect (a stale "Connection lost" toast next to "Reconnected"). So: pause the timers.
+    /// </summary>
     private void HandleCircuitDown()
     {
-        InvokeAsync(() =>
+        isReconnecting = true;
+        ChangeTimer(markerUpdateTimer, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        ChangeTimer(permissionCheckTimer, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        Logger.LogDebug("Circuit disconnected - pausing updates");
+    }
+
+    /// <summary>Timer.Change that tolerates a timer DisposeAsync has disposed in the meantime.</summary>
+    private static void ChangeTimer(Timer? timer, TimeSpan dueTime, TimeSpan period)
+    {
+        try
         {
-            isReconnecting = true;
-
-            markerUpdateTimer?.Change(Timeout.Infinite, Timeout.Infinite);
-
-            if (sseModule != null)
-            {
-                try
-                {
-                    _ = sseModule.InvokeVoidAsync("disconnectSseUpdates");
-                }
-                catch { }
-            }
-
-            Logger.LogInformation("Circuit disconnected - pausing updates");
-            Snackbar.Add("Connection lost. Reconnecting...", Severity.Warning);
-
-            StateHasChanged();
-        });
+            timer?.Change(dueTime, period);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     private void HandleCircuitUp()
@@ -2169,12 +2297,20 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         {
             isReconnecting = false;
 
-            Logger.LogInformation("Circuit reconnected");
+            Logger.LogDebug("Circuit reconnected - resuming updates");
 
-            // Resume marker update timer
-            markerUpdateTimer?.Change(60000, 60000);
+            // Resume the polls. The marker timer was only re-armed, never recreated: OnConnectionUp is not an
+            // inbound circuit activity, so a timer created here would carry no circuit identity
+            // (CircuitServicesAccessor). The reconnect may have cured a failure streak: start with fast retries.
+            markerPoll.ResetFastRetries();
+            ChangeTimer(markerUpdateTimer, TimeSpan.FromSeconds(2), Timeout.InfiniteTimeSpan);
+            ChangeTimer(permissionCheckTimer, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
 
-            // SSE handles reconnection internally (checks if already connected)
+            // initializeSseUpdates always opens a fresh stream: the server sends charactersSnapshot and the
+            // mapRevision replay only at connect, and events delivered while the circuit was down are lost.
+            // The JS side forgets that it raised the indicator, so clear it here too; a stream that is still
+            // failing raises it again.
+            liveUpdatesReconnecting = false;
             if (sseModule != null && sseDotnetRef != null)
             {
                 try
@@ -2385,8 +2521,8 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         if (mode == SidebarMode.Maps)
         {
             // Belt-and-braces: the SSE mapUpdate upsert keeps the list live, but this
-            // guarantees the Maps panel is fresh even in polling-fallback mode or after
-            // a missed event. Fire-and-forget so the panel opens instantly.
+            // guarantees the Maps panel is fresh after a missed event (e.g. while the
+            // stream was reconnecting). Fire-and-forget so the panel opens instantly.
             _ = RefreshMapListAsync();
         }
         StateHasChanged();
@@ -2395,7 +2531,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     /// <summary>
     /// Background refetch of GET /map/api/maps, merging the fresh list into navigation
     /// state. If the current map vanished while we weren't listening (e.g. deleted or
-    /// merged away during polling mode), behaves like a live deletion.
+    /// merged away while the live-update stream was down), behaves like a live deletion.
     /// </summary>
     private async Task RefreshMapListAsync()
     {
@@ -2408,15 +2544,9 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             {
                 MapNavigation.SetMaps(mapsDict.Values.ToList()); // SetMaps applies the canonical sort
 
-                // Seed revisions for maps we learned about via this refetch
-                foreach (var m in MapNavigation.Maps)
-                {
-                    MapNavigation.InitializeMapRevision(m.ID, m.MapInfo.Revision);
-                    if (mapView != null)
-                    {
-                        await mapView.SetMapRevisionAsync(m.ID, m.MapInfo.Revision);
-                    }
-                }
+                // Seed revisions for maps we learned about via this refetch (and bring forward any the
+                // stream missed); never rolls back a newer live revision
+                await SeedMapRevisionsAsync(MapNavigation.Maps);
 
                 if (MapNavigation.GetMapById(MapNavigation.CurrentMapId) == null)
                 {
@@ -2498,7 +2628,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         return $"position: fixed; bottom: 16px; right: {rightPosition}; z-index: 1400; transition: right 0.3s ease; max-width: 320px;";
     }
 
-    private string GetPollingIndicatorStyle()
+    private string GetLiveUpdatesIndicatorStyle()
     {
         // Position below following indicator if present, otherwise at top
         var topPosition = isFollowing && followingCharacterId.HasValue ? "56px" : "16px";
@@ -2643,17 +2773,38 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
                 return;
             }
 
+            if (disposed) return;
+
             if (mapView == null)
             {
                 Logger.LogWarning("mapView is null, cannot initialize SSE");
                 return;
             }
 
-            sseModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/map-updates.js{JsVersion}");
+            var module = sseModule ?? await JS.InvokeAsync<IJSObjectReference>("import", $"./js/map-updates.js{JsVersion}");
+            if (disposed)
+            {
+                // DisposeAsync ran during the import and found no module to tear down. Nothing is connected yet:
+                // release the module and never create the DotNetObjectReference a stream would hold.
+                Logger.LogDebug("SSE initialization abandoned: page disposed");
+                if (ReconnectionState.IsConnected)
+                {
+                    await DisposeStepAsync("sse", () => module.DisposeAsync().AsTask());
+                }
+                return;
+            }
+
+            // Stored before the connect call: a DisposeAsync during it finds the module and sends
+            // disconnectSseUpdates, which JS runs after initializeSseUpdates (calls are delivered in order).
+            sseModule = module;
             sseDotnetRef ??= DotNetObjectReference.Create(this);
-            await sseModule.InvokeVoidAsync("initializeSseUpdates", sseDotnetRef);
+            await module.InvokeVoidAsync("initializeSseUpdates", sseDotnetRef);
             Logger.LogInformation("SSE connection initialized successfully");
             sseInitialized = true;
+        }
+        catch (Exception ex) when (disposed)
+        {
+            Logger.LogDebug(ex, "SSE initialization abandoned: page disposed");
         }
         catch (Exception ex)
         {
@@ -3257,8 +3408,11 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
                 var roadDtos = await response.Content.ReadFromJsonAsync<List<RoadViewDto>>(CamelCaseJsonOptions);
                 allRoads = roadDtos?.Select(RoadViewModel.FromDto).ToList() ?? new();
 
+                // The page may have been disposed during the fetch: never re-import the module DisposeAsync released
+                if (disposed) return;
+
                 // Update map display
-                leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
+                leafletModule ??=await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
                 await leafletModule.InvokeVoidAsync("clearAllRoads");
                 foreach (var road in allRoads.Where(r => !r.Hidden))
                 {
@@ -3605,25 +3759,20 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         try
         {
-            Console.WriteLine($"[Map.razor.cs] OnPingCreated called - Id:{pingData.Id}, MapId:{pingData.MapId}, CurrentMapId:{MapNavigation.CurrentMapId}");
-
             // Only process pings for the currently viewed map
             if (pingData.MapId != MapNavigation.CurrentMapId)
             {
-                Console.WriteLine($"[Map.razor.cs] Ping is for different map (ping:{pingData.MapId}, current:{MapNavigation.CurrentMapId}), ignoring");
+                Logger.LogDebug("Ping {PingId} is for map {PingMapId}, not the current map {CurrentMapId}; ignoring",
+                    pingData.Id, pingData.MapId, MapNavigation.CurrentMapId);
                 return;
             }
-
-            Console.WriteLine($"[Map.razor.cs] Ping is for current map, coords:({pingData.CoordX},{pingData.CoordY},{pingData.X},{pingData.Y})");
 
             // Forward to JavaScript ping manager
             if (mapView != null)
             {
-                Console.WriteLine("[Map.razor.cs] mapView is not null, getting leaflet module");
                 leafletModule ??= await JS.InvokeAsync<IJSObjectReference>("import", $"./js/leaflet-interop.js{JsVersion}");
-                Console.WriteLine("[Map.razor.cs] Calling onPingCreated in JS");
                 await leafletModule.InvokeVoidAsync("onPingCreated", pingData);
-                Console.WriteLine("[Map.razor.cs] onPingCreated completed");
+                Logger.LogDebug("Ping {PingId} shown on map {MapId}", pingData.Id, pingData.MapId);
 
                 // Show the "Go to Ping" button
                 hasActivePing = true;
@@ -3631,13 +3780,12 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
             }
             else
             {
-                Console.WriteLine("[Map.razor.cs] ERROR: mapView is null!");
+                Logger.LogDebug("Ping {PingId} not shown: map view not ready", pingData.Id);
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Map.razor.cs] ERROR in OnPingCreated: {ex.Message}");
-            Logger.LogError(ex, "Error handling ping created event");
+            Logger.LogWarning(ex, "Error handling ping created event");
         }
     }
 
@@ -3649,8 +3797,6 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
     {
         try
         {
-            Console.WriteLine($"[Map.razor.cs] OnPingDeleted called - Id:{deleteData.Id}");
-
             // Forward to JavaScript ping manager
             if (mapView != null)
             {
@@ -3665,7 +3811,7 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error handling ping deleted event");
+            Logger.LogWarning(ex, "Error handling ping deleted event");
         }
     }
 

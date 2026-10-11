@@ -11,7 +11,7 @@ using ITenantContextAccessor = HnHMapperServer.Core.Interfaces.ITenantContextAcc
 namespace HnHMapperServer.Tests;
 
 /// <summary>
-/// TileRepository.SaveTilesBatchAsync hardening (2026-08-24 incident): the existence check
+/// TileRepository.SaveTilesBatchAsync hardening: the existence check
 /// only filtered against rows already in the DB, so two tiles sharing a
 /// (MapId, Zoom, CoordX, CoordY) key inside ONE batch both passed it and SaveChanges died
 /// on the Tiles unique index — and a concurrent writer inserting between the check and the

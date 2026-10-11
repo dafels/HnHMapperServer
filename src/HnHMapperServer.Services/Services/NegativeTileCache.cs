@@ -12,8 +12,7 @@ namespace HnHMapperServer.Services.Services;
 /// the live dictionary is not safe: LINQ sizes its buffer from <c>Count</c> and then calls
 /// <c>CopyTo</c>, two separate lock acquisitions. An add in between overflows the buffer
 /// (ArgumentException), and a remove in between leaves default entries whose null keys then
-/// reach <c>TryRemove</c> (ArgumentNullException). Both happened in production on every busy
-/// day, inside tile generation.
+/// reach <c>TryRemove</c> (ArgumentNullException).
 /// </remarks>
 public sealed class NegativeTileCache
 {

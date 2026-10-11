@@ -1,3 +1,4 @@
+using HnHMapperServer.ServiceDefaults.Telemetry;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.DependencyInjection;
@@ -7,6 +8,7 @@ using Microsoft.Extensions.ServiceDiscovery;
 using OpenTelemetry;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
+using Serilog;
 
 namespace Microsoft.Extensions.Hosting;
 
@@ -47,6 +49,17 @@ public static class Extensions
         return builder;
     }
 
+    /// <summary>
+    /// The Serilog setup both services share. Call it LAST in the <c>UseSerilog</c> lambda (after <c>ReadFrom.*</c>),
+    /// so the redaction enricher runs after every other root enricher. ServiceDefaultsTelemetryTests run this method;
+    /// LoggingConfigurationTests check that Api/Program.cs and Web/Program.cs still end their lambda with it.
+    /// </summary>
+    public static LoggerConfiguration ApplyServiceDefaults(this LoggerConfiguration configuration) => configuration
+        .Enrich.FromLogContext()
+        // Masks client tokens, invite codes, token-revoke paths and webhook tokens in every property (incl. the
+        // hosting scope's RequestPath and HttpClient's Scope/Uri) for all sinks. See SensitiveUrlRedactor.
+        .Enrich.With<SensitiveUrlRedactionEnricher>();
+
     public static TBuilder ConfigureOpenTelemetry<TBuilder>(this TBuilder builder) where TBuilder : IHostApplicationBuilder
     {
         builder.Logging.AddOpenTelemetry(logging =>
@@ -82,12 +95,24 @@ public static class Extensions
             .WithTracing(tracing =>
             {
                 tracing.AddSource(builder.Environment.ApplicationName)
-                    .AddAspNetCoreInstrumentation(tracing =>
+                    // Masks client tokens, invite codes and webhook tokens in url.path/url.full of every span
+                    // (server and HttpClient alike). Runs before the OTLP exporter, which UseOtlpExporter adds last.
+                    .AddProcessor(new SensitiveUrlRedactionProcessor())
+                    .AddAspNetCoreInstrumentation(options =>
+                    {
                         // Exclude health check requests from tracing
-                        tracing.Filter = context =>
+                        options.Filter = context =>
                             !context.Request.Path.StartsWithSegments(HealthEndpointPath)
-                            && !context.Request.Path.StartsWithSegments(AlivenessEndpointPath)
-                    )
+                            && !context.Request.Path.StartsWithSegments(AlivenessEndpointPath);
+
+                        // No span per SignalR hub message (on by default on .NET 9+). Our only hub is Blazor's
+                        // ComponentHub, whose JS-interop / render-ack messages would otherwise make up most traces
+                        // (each a sub-millisecond span). With the source off, ASP.NET Core leaves
+                        // Activity.Current null during a hub call, so HTTP calls and timers started from it become
+                        // their own root traces. Blazor's Route/Event and Circuit spans are unaffected. Filter
+                        // can't do this (it only sees HTTP requests). Turn back on if a real hub is ever added.
+                        options.EnableAspNetCoreSignalRSupport = false;
+                    })
                     // Uncomment the following line to enable gRPC instrumentation (requires the OpenTelemetry.Instrumentation.GrpcNetClient package)
                     //.AddGrpcClientInstrumentation()
                     .AddHttpClientInstrumentation()
