@@ -310,6 +310,12 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
             // Check for Map permission first
             var config = await MapData.GetConfigAsync();
+            if (config == null)
+            {
+                // The API does not know this session: waiting for a Map permission would poll forever.
+                RedirectToLoginAfterSessionLoss();
+                return;
+            }
 
             hasMapPermission = config.Permissions.Any(a => a.Equals(Permission.Map.ToClaimValue(), StringComparison.OrdinalIgnoreCase));
             permissionResolved = true;
@@ -791,6 +797,16 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
 
             Logger.LogDebug("Checking for Map permission update...");
             var config = await MapData.GetConfigAsync();
+            if (config == null)
+            {
+                // Session gone (signed out / expired): the circuit's captured cookie will never become valid
+                // again, so stop polling and send the tab to the login page.
+                permissionCheckTimer?.Dispose();
+                permissionCheckTimer = null;
+                await InvokeAsync(RedirectToLoginAfterSessionLoss);
+                return;
+            }
+
             var nowHasMapPermission = config.Permissions.Any(a => a.Equals(Permission.Map.ToClaimValue(), StringComparison.OrdinalIgnoreCase));
 
             if (nowHasMapPermission && !hasMapPermission)
@@ -810,6 +826,19 @@ public partial class Map : IAsyncDisposable, IBrowserViewportObserver
         {
             Logger.LogError(ex, "Error checking for map permission");
         }
+    }
+
+    /// <summary>
+    /// The API answered 401 for this circuit. Reload into the login page (a full load, so the Web's cookie
+    /// handler decides afresh and the dead circuit goes away), returning to the current map afterwards.
+    /// </summary>
+    private void RedirectToLoginAfterSessionLoss()
+    {
+        if (disposed) return;
+
+        Logger.LogInformation("Map API rejected this session (401); redirecting to login");
+        var returnUrl = Navigation.ToBaseRelativePath(Navigation.Uri);
+        Navigation.NavigateTo($"/login?returnUrl={Uri.EscapeDataString("/" + returnUrl)}", forceLoad: true);
     }
 
     #endregion

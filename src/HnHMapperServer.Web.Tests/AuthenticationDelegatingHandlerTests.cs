@@ -212,6 +212,22 @@ public sealed class AuthenticationDelegatingHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task Unauthorized_without_a_cookie_is_expected_and_logs_no_warning()
+    {
+        // An abandoned tab whose session is gone polls the API; its 401s must not fill the log.
+        _recorder.Status = HttpStatusCode.Unauthorized;
+        using var circuit = NewCircuitScope(cookie: null, IpA);
+
+        await Task.Run(async () =>
+        {
+            Accessor.Set(new CircuitServicesHolder(circuit.ServiceProvider));
+            return await SendAsync();
+        });
+
+        Assert.Empty(_logger.AtLevel(LogLevel.Warning));
+    }
+
+    [Fact]
     public async Task Closed_circuit_sends_no_cookie_and_does_not_throw()
     {
         var circuit = NewCircuitScope("cookie-A", IpA);

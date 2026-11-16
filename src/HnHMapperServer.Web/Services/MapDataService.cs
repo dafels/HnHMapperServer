@@ -81,13 +81,25 @@ public class MapDataService
         }
     }
 
-    public async Task<MapConfig> GetConfigAsync()
+    /// <summary>
+    /// The map config of the caller. Null when the API answers 401: the session is gone (signed out, expired, or
+    /// the circuit reconnected without its cookie), which no retry from this circuit can cure - the caller should
+    /// send the user to the login page. Other failures return an empty config (no permissions).
+    /// </summary>
+    public async Task<MapConfig?> GetConfigAsync()
     {
         try
         {
             var client = _httpClientFactory.CreateClient("API");
-            var response = await client.GetFromJsonAsync<MapConfig>("/map/api/config");
-            return response ?? new MapConfig();
+            using var response = await client.GetAsync("/map/api/config");
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            {
+                _logger.LogDebug("Config request unauthenticated (401)");
+                return null;
+            }
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<MapConfig>() ?? new MapConfig();
         }
         catch (Exception ex)
         {

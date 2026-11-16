@@ -709,6 +709,10 @@ names the `AuthSource`: `Circuit` = the circuit's captured `HnH.Auth` cookie (ca
 `AuthenticationCaptureCircuitHandler` on every connect — an expired session stays expired until a reload),
 `HttpContext` = the current request's cookie, and "No circuit services and no HttpContext" = the call was made
 outside both (e.g. a timer created in a CircuitHandler callback — see "Blazor circuit and JS interop rules").
+A 401 for a request that carried **no** cookie is logged at Debug (expected for a signed-out/expired session;
+the capture handler warns once per connect), and /map treats a 401 from `/map/api/config`
+(`MapDataService.GetConfigAsync` → null) as "session gone": it stops the 10 s permission poll and reloads into
+`/login?returnUrl=…` (before 2026-11-16 such a tab logged a Warning + Error every 10 s forever).
 A Map "Circuit services not available" Warning means the framework stopped wrapping component init in inbound
 circuit activities (re-check `ServicesAccessorCircuitHandler` after runtime upgrades).
 

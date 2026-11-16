@@ -97,7 +97,11 @@ public class AuthenticationDelegatingHandler : DelegatingHandler
         if (source != "None" &&
             (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Found))
         {
-            _logger.LogWarning("API auth failure {Status} from {Method} {Uri} (AuthSource: {AuthSource}, HasAuthCookie: {HasCookie})",
+            // A rejected cookie is worth a Warning. A 401 for a request that carried no cookie is the expected
+            // answer (signed-out or expired session; AuthenticationCaptureCircuitHandler already warned once when
+            // such a circuit connected) and would otherwise repeat on every poll of an abandoned tab.
+            var level = string.IsNullOrEmpty(authCookie) ? LogLevel.Debug : LogLevel.Warning;
+            _logger.Log(level, "API auth failure {Status} from {Method} {Uri} (AuthSource: {AuthSource}, HasAuthCookie: {HasCookie})",
                 (int)response.StatusCode, request.Method, request.RequestUri, source, !string.IsNullOrEmpty(authCookie));
         }
 
