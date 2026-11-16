@@ -730,6 +730,22 @@ circuit activities (re-check `ServicesAccessorCircuitHandler` after runtime upgr
 
 ## Recent Changes
 
+### 2026-11-16: ImageSharp back to 3.1.12 (CI was red since 2026-11-05); decoding limited to PNG + WebP
+
+Dependabot's 3.1.12 → 3.2.0 bump (merged 20b0a1a) broke every `build-and-push` run: **3.2.0 enforces the Six
+Labors license at build time too** ("No Six Labors license found" from `SixLabors.ImageSharp.targets` during
+`dotnet publish`), not just 4.x. The `test` workflow stayed green, so only the Docker job showed it, and
+nothing deployed from 2026-11-05 to this fix. 3.2.0 / 4.1.2 are also the fix for the 2026-10-07 advisories
+(mostly TIFF encoder/decoder out-of-bounds writes), so the revert (user decision) comes with a mitigation:
+`Services/ImageFormatPolicy.RestrictDecodingToPngAndWebp(Configuration.Default)` in both `Program.cs` clears
+ImageSharp's format detectors and re-adds only PNG and WebP — the only formats the app decodes — so bytes
+uploaded as a grid PNG can no longer reach the TIFF/BMP/GIF/JPEG/... decoders (`UnknownImageFormatException`).
+Still exposed: GHSA-gwg2-r3hj-4w44 (ICC profile parsing; a PNG can embed one). **Real fix: get a free Six Labors
+key (open-source / under $1M revenue), pass it to CI's Docker builds as `SixLaborsLicenseKey`, and move to a
+patched version.** Dependabot's security update will propose 3.2.0 again — don't merge it without the key.
+Gotcha: `Configuration.Clone()` shares the `ImageFormatsManager`; restricting a clone restricts the original
+(`ImageFormatPolicyTests` builds fresh configurations for that reason).
+
 ### 2026-10-11: Storage quota charges the change on disk; stale client tokens summarized; marker/food icon fallbacks; ImageSharp comments corrected
 
 **From the 2026-10-10 export (plan step 6, part B: P3-E, P3-B phase 1, P3-C, P3-H).** The verification

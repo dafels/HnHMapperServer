@@ -55,6 +55,10 @@ SixLabors.ImageSharp.Configuration.Default.MemoryAllocator =
         AllocationLimitMegabytes = 256
     });
 
+// Only PNG and WebP are ever decoded; refuse every other format detected from uploaded bytes (we stay on
+// ImageSharp 3.1.x, whose TIFF advisories this keeps out of reach - see ImageFormatPolicy).
+HnHMapperServer.Services.Services.ImageFormatPolicy.RestrictDecodingToPngAndWebp(SixLabors.ImageSharp.Configuration.Default);
+
 // Configure Serilog. Serilog:MinimumLevel is the ONLY level gate for Console, File and OTLP
 // (writeToProviders + ClearProviders make Logging:LogLevel inert) - see CLAUDE.md "Logging levels".
 builder.Host.UseSerilog((context, services, configuration) => configuration
