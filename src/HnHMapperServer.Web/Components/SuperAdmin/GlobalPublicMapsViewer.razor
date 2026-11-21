@@ -1,4 +1,5 @@
 @using HnHMapperServer.Core.DTOs
+@implements IDisposable
 @inject IHttpClientFactory HttpClientFactory
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
@@ -188,13 +189,37 @@
         }
     }
 
+    private bool _disposed;
+
+    // One-shot timer, re-armed after each poll: ticks never overlap, and a tick always runs on the
+    // component's dispatcher (the Elapsed callback itself is on a thread-pool thread).
     private void StartPollingIfNeeded()
     {
-        if (_hasRunningGenerations && _pollTimer == null)
+        if (_disposed || !_hasRunningGenerations)
         {
-            _pollTimer = new System.Timers.Timer(3000); // Poll every 3 seconds
-            _pollTimer.Elapsed += async (sender, e) => await PollStatus();
-            _pollTimer.Start();
+            return;
+        }
+
+        if (_pollTimer == null)
+        {
+            _pollTimer = new System.Timers.Timer(3000) { AutoReset = false };
+            _pollTimer.Elapsed += OnPollTimerElapsed;
+        }
+
+        _pollTimer.Stop();
+        _pollTimer.Start();
+    }
+
+    private async void OnPollTimerElapsed(object? sender, System.Timers.ElapsedEventArgs e)
+    {
+        try
+        {
+            await InvokeAsync(PollStatus);
+        }
+        catch (Exception ex)
+        {
+            // The circuit is gone or the component was disposed mid-tick; nothing to update.
+            Logger.LogDebug(ex, "Generation status poll tick dropped");
         }
     }
 
@@ -202,6 +227,7 @@
     {
         if (_pollTimer != null)
         {
+            _pollTimer.Elapsed -= OnPollTimerElapsed;
             _pollTimer.Stop();
             _pollTimer.Dispose();
             _pollTimer = null;
@@ -210,32 +236,50 @@
 
     private async Task PollStatus()
     {
-        try
+        if (_disposed)
         {
-            await LoadPublicMaps();
-            await InvokeAsync(StateHasChanged);
-
-            // Stop polling if no more running generations
-            if (!_hasRunningGenerations)
-            {
-                StopPolling();
-            }
+            return;
         }
-        catch (Exception ex)
+
+        await LoadPublicMaps(background: true);
+
+        if (_disposed)
         {
-            Logger.LogWarning(ex, "Error polling generation status");
+            return;
+        }
+
+        // A failed poll keeps _hasRunningGenerations, so it is retried on the next tick.
+        if (_hasRunningGenerations)
+        {
+            StartPollingIfNeeded();
+        }
+        else
+        {
+            StopPolling();
         }
     }
 
-    private async Task LoadPublicMaps()
+    // background: a poll refresh. It keeps the table on screen (no loading state) and reports
+    // failures only to the log, so a slow or unavailable API does not produce a toast every 3 s.
+    private Task LoadPublicMaps() => LoadPublicMaps(background: false);
+
+    private async Task LoadPublicMaps(bool background)
     {
-        _isLoading = true;
-        StateHasChanged();
+        if (!background)
+        {
+            _isLoading = true;
+            StateHasChanged();
+        }
 
         try
         {
             var client = HttpClientFactory.CreateClient("API");
             var response = await client.GetAsync("/api/superadmin/public-maps");
+
+            if (_disposed)
+            {
+                return;
+            }
 
             if (response.IsSuccessStatusCode)
             {
@@ -243,10 +287,18 @@
                 _hasRunningGenerations = _publicMaps.Any(m => m.GenerationStatus == "running");
                 StartPollingIfNeeded();
             }
+            else if (background)
+            {
+                Logger.LogDebug("Generation status poll returned {StatusCode}", (int)response.StatusCode);
+            }
             else
             {
                 Snackbar.Add("Failed to load public maps", Severity.Error);
             }
+        }
+        catch (Exception ex) when (background)
+        {
+            Logger.LogDebug(ex, "Generation status poll failed");
         }
         catch (Exception ex)
         {
@@ -256,7 +308,10 @@
         finally
         {
             _isLoading = false;
-            StateHasChanged();
+            if (!_disposed)
+            {
+                StateHasChanged();
+            }
         }
     }
 
@@ -420,6 +475,7 @@
 
     public void Dispose()
     {
+        _disposed = true;
         StopPolling();
     }
 }

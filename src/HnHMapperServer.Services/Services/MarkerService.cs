@@ -27,41 +27,17 @@ public class MarkerService : IMarkerService
         _logger = logger;
     }
 
-    public async Task<List<FrontendMarker>> GetAllFrontendMarkersAsync()
+    public async Task<List<FrontendMarker>> GetAllFrontendMarkersAsync(CancellationToken cancellationToken = default)
     {
-        var markers = await _markerRepository.GetAllMarkersAsync();
-        var frontendMarkers = new List<FrontendMarker>();
-
-        var orphanedCount = 0;
-        foreach (var marker in markers)
-        {
-            var grid = await _gridRepository.GetGridAsync(marker.GridId);
-            if (grid == null)
-            {
-                orphanedCount++;
-                continue;
-            }
-
-            frontendMarkers.Add(new FrontendMarker
-            {
-                Id = marker.Id,
-                Name = marker.Name,
-                Map = grid.Map,
-                Position = new Position(
-                    marker.Position.X + grid.Coord.X * 100,
-                    marker.Position.Y + grid.Coord.Y * 100),
-                Image = marker.Image,
-                Hidden = marker.Hidden,
-                MaxReady = marker.MaxReady,
-                MinReady = marker.MinReady,
-                Ready = marker.Ready
-            });
-        }
+        // One joined query. This runs on every /map marker poll (each open tab, once a minute); it used
+        // to look up the grid of every marker separately - thousands of queries per call.
+        var (frontendMarkers, orphanedCount) = await _markerRepository.GetFrontendMarkersAsync(cancellationToken);
 
         if (orphanedCount > 0)
         {
-            _logger.LogWarning("Skipped {OrphanedCount} orphaned markers (missing grids) out of {TotalCount} total",
-                orphanedCount, markers.Count);
+            // Debug: per request. OrphanedMarkerCleanupService removes orphans hourly and reports them.
+            _logger.LogDebug("Skipped {OrphanedCount} orphaned markers (missing grids) out of {TotalCount} total",
+                orphanedCount, frontendMarkers.Count + orphanedCount);
         }
 
         return frontendMarkers;

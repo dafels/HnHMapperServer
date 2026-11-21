@@ -7,7 +7,7 @@ public interface IMarkerService
     /// <summary>
     /// Gets all markers with grid location information for frontend
     /// </summary>
-    Task<List<FrontendMarker>> GetAllFrontendMarkersAsync();
+    Task<List<FrontendMarker>> GetAllFrontendMarkersAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Updates marker readiness times

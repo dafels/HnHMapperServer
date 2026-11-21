@@ -730,6 +730,29 @@ circuit activities (re-check `ServicesAccessorCircuitHandler` after runtime upgr
 
 ## Recent Changes
 
+### 2026-11-21: Public-maps poll timer leak; markers endpoint N+1 (two prod log sources)
+
+- **`GlobalPublicMapsViewer` Warning spam ("Error polling generation status", several per second).** Its
+  `System.Timers.Timer` tick called `LoadPublicMaps`, whose first statement was a bare `StateHasChanged()`
+  on the timer thread → `InvalidOperationException` before the HTTP call, so `_hasRunningGenerations` was
+  never refreshed and the timer never stopped; and the component had `Dispose()` but **no
+  `@implements IDisposable`**, so every instance that saw a running generation leaked a timer until the
+  Web process restarted. Now: the tick runs through `InvokeAsync`, the timer is one-shot and re-armed
+  after each poll, the component is disposable, and a background poll neither flips the loading state
+  nor toasts (failures at Debug). **Rule: a `Dispose()` without `@implements IDisposable` is never
+  called; a timer callback must reach component state only through `InvokeAsync`.** No other component
+  had the pattern (checked every timer and Dispose under `Web/Components`).
+- **Polly 10 s timeouts on `GET /map/api/v1/markers`.** `MarkerService.GetAllFrontendMarkersAsync` ran
+  one `GetGridAsync` per marker (thousands of sequential queries per call, on every /map tab's
+  once-a-minute poll) and took no cancellation token, so a timed-out call kept running while the retry
+  started another. Now `IMarkerRepository.GetFrontendMarkersAsync(ct)` = ONE left join on the Grids key
+  (`Id`, `TenantId`), ordered by marker id; the endpoint passes `RequestAborted` and answers
+  `Results.Empty` when the caller is gone. Response shape unchanged. The per-request "Skipped N orphaned
+  markers" Warning is Debug (the hourly `OrphanedMarkerCleanupService` reports and removes them).
+- **Tests (776 + Web 51):** `MarkerRepositoryFrontendMarkersTests` (3, real SQLite with the ambient
+  tenant set: map/world position, orphan skipped, other tenant's same-id grid ignored; exactly one
+  command for 200+ markers; cancelled token throws). The timer fix has no test and was not run in a browser.
+
 ### 2026-11-16: ImageSharp back to 3.1.12 (CI was red since 2026-11-05); decoding limited to PNG + WebP
 
 Dependabot's 3.1.12 → 3.2.0 bump (merged 20b0a1a) broke every `build-and-push` run: **3.2.0 enforces the Six

@@ -67,6 +67,68 @@ public class MarkerRepository : IMarkerRepository
         return entities.Select(MapToDomain).ToList();
     }
 
+    public async Task<(List<FrontendMarker> Markers, int OrphanedCount)> GetFrontendMarkersAsync(CancellationToken cancellationToken = default)
+    {
+        // Explicit tenant filtering for defense-in-depth (the global query filters apply as well)
+        var currentTenantId = _tenantContext.GetCurrentTenantId();
+
+        var markers = _context.Markers.AsNoTracking();
+        if (!string.IsNullOrEmpty(currentTenantId))
+        {
+            markers = markers.Where(m => m.TenantId == currentTenantId);
+        }
+
+        // Left join on the Grids primary key (Id, TenantId): at most one grid per marker.
+        var rows = await (
+            from m in markers
+            join g in _context.Grids.AsNoTracking()
+                on new { GridId = m.GridId, m.TenantId } equals new { GridId = g.Id, g.TenantId } into grids
+            from g in grids.DefaultIfEmpty()
+            orderby m.Id
+            select new
+            {
+                m.Id,
+                m.Name,
+                m.PositionX,
+                m.PositionY,
+                m.Image,
+                m.Hidden,
+                m.MaxReady,
+                m.MinReady,
+                m.Ready,
+                HasGrid = g != null,
+                Map = g != null ? g.Map : 0,
+                GridX = g != null ? g.CoordX : 0,
+                GridY = g != null ? g.CoordY : 0
+            }).ToListAsync(cancellationToken);
+
+        var result = new List<FrontendMarker>(rows.Count);
+        var orphaned = 0;
+        foreach (var row in rows)
+        {
+            if (!row.HasGrid)
+            {
+                orphaned++;
+                continue;
+            }
+
+            result.Add(new FrontendMarker
+            {
+                Id = row.Id,
+                Name = row.Name,
+                Map = row.Map,
+                Position = new Position(row.PositionX + row.GridX * 100, row.PositionY + row.GridY * 100),
+                Image = row.Image,
+                Hidden = row.Hidden,
+                MaxReady = row.MaxReady,
+                MinReady = row.MinReady,
+                Ready = row.Ready
+            });
+        }
+
+        return (result, orphaned);
+    }
+
     public async Task SaveMarkerAsync(Marker marker, string key)
     {
         // Marker Keys are client-generated and can be the same across tenants

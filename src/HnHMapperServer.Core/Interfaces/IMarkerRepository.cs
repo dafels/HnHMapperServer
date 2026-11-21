@@ -7,6 +7,14 @@ public interface IMarkerRepository
     Task<Marker?> GetMarkerAsync(int markerId);
     Task<Marker?> GetMarkerByKeyAsync(string key);
     Task<List<Marker>> GetAllMarkersAsync();
+
+    /// <summary>
+    /// The current tenant's markers resolved to map coordinates (marker position + its grid's
+    /// coordinate * 100) in ONE query, ordered by marker id. Markers whose grid does not exist are
+    /// left out and counted in <c>OrphanedCount</c>.
+    /// </summary>
+    Task<(List<FrontendMarker> Markers, int OrphanedCount)> GetFrontendMarkersAsync(CancellationToken cancellationToken = default);
+
     Task SaveMarkerAsync(Marker marker, string key);
     Task DeleteMarkerAsync(string key);
     Task<int> GetNextMarkerIdAsync();

@@ -134,8 +134,16 @@ public static class MapEndpoints
         if (!HasPermission(context.User, Permission.Markers))
             return Results.Json(new List<object>());
 
-        var markers = await markerService.GetAllFrontendMarkersAsync();
-        return Results.Json(markers);
+        try
+        {
+            var markers = await markerService.GetAllFrontendMarkersAsync(context.RequestAborted);
+            return Results.Json(markers);
+        }
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            // The caller gave up (the Web's 10 s attempt timeout, or a closed tab): nothing to answer.
+            return Results.Empty;
+        }
     }
 
     /// <summary>
